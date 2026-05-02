@@ -16,8 +16,9 @@ run_sql_file "${SCRIPT_DIR}/../db/builtin_roles.sql"
 # 2. Schemas, control tables, lifecycle functions, main loop
 run_sql_file "${SCRIPT_DIR}/../db/haf_stats_app.sql"
 
-# 3. Block processor stub (processors added here as features are implemented)
+# 3. Block processors
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 
 # 4. API endpoints
 run_sql_file "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"

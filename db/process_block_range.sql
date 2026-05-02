@@ -9,7 +9,6 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Processors will be added here as features are implemented.
-    NULL;
+    PERFORM haf_stats_app.process_financial(_first_block, _last_block);
 END;
 $$;

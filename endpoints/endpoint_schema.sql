@@ -24,4 +24,41 @@ AS $$
     LIMIT 1;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Feature: per-account financial summary
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
+    _account     TEXT,
+    _from        DATE DEFAULT (NOW() - INTERVAL '1 year')::DATE,
+    _to          DATE DEFAULT NOW()::DATE,
+    _granularity TEXT DEFAULT 'month'   -- 'day' | 'week' | 'month'
+)
+RETURNS TABLE (
+    period    TEXT,
+    category  TEXT,
+    direction TEXT,
+    hive_nai  BIGINT,
+    hbd_nai   BIGINT,
+    vests_nai BIGINT,
+    op_count  INT
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        TO_CHAR(DATE_TRUNC(_granularity, afd.day), 'YYYY-MM-DD') AS period,
+        afd.category,
+        afd.direction,
+        SUM(afd.hive_nai)::BIGINT,
+        SUM(afd.hbd_nai)::BIGINT,
+        SUM(afd.vests_nai)::BIGINT,
+        SUM(afd.op_count)::INT
+    FROM haf_stats_backend.account_financial_daily afd
+    JOIN hafd.accounts ha ON ha.id = afd.account_id
+    WHERE ha.name  = _account
+      AND afd.day BETWEEN _from AND _to
+    GROUP BY 1, 2, 3
+    ORDER BY 1, 2, 3;
+$$;
+
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;
