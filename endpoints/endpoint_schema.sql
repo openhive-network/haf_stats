@@ -103,4 +103,87 @@ AS $$
     ORDER BY rc_consumed DESC;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide RC utilization by op type / DApp
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
+    _from        DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
+    _to          DATE DEFAULT NOW()::DATE,
+    _granularity TEXT DEFAULT 'day'   -- 'day' | 'week' | 'month'
+)
+RETURNS TABLE (
+    period    TEXT,
+    rc_total  BIGINT,
+    by_label  JSONB   -- keys: op_type_name for non-custom_json, custom_json id for custom_json ops
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        TO_CHAR(DATE_TRUNC(_granularity, rol."timestamp"), 'YYYY-MM-DD') AS period,
+        SUM(rol.rc_cost)::BIGINT                                          AS rc_total,
+        jsonb_object_agg(
+            COALESCE(rol.custom_json_id, ot.name, 'unknown'),
+            SUM(rol.rc_cost)::BIGINT
+        )                                                                 AS by_label
+    FROM haf_stats_backend.rc_operation_log rol
+    LEFT JOIN hive.operation_types ot ON ot.id = rol.op_type_id
+    WHERE rol."timestamp"::DATE BETWEEN _from AND _to
+    GROUP BY DATE_TRUNC(_granularity, rol."timestamp")
+    ORDER BY 1;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network HP stake distribution (bucketed)
+-- Reads cross-schema from btracker_app (Balance Tracker).
+-- Requires: GRANT SELECT ON btracker_app.current_account_balances TO haf_stats_user
+--
+-- TODO: calibrate VESTS thresholds against live data. Current values assume
+-- ~2,000,000,000 raw units per HP (VESTS precision=6, 1 HP ≈ 2000 VESTS).
+-- Run: SELECT MIN(balance), MAX(balance), AVG(balance)
+--      FROM btracker_app.current_account_balances WHERE nai = '@@000000037';
+-- to verify the unit scale before deploying.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
+RETURNS TABLE (
+    bucket        TEXT,
+    account_count BIGINT,
+    pct_accounts  NUMERIC
+)
+LANGUAGE sql STABLE
+AS $$
+    WITH balances AS (
+        SELECT
+            CASE
+                WHEN balance < 2000000000          THEN '0–1 HP'
+                WHEN balance < 20000000000         THEN '1–10 HP'
+                WHEN balance < 200000000000        THEN '10–100 HP'
+                WHEN balance < 2000000000000       THEN '100–1K HP'
+                WHEN balance < 20000000000000      THEN '1K–10K HP'
+                ELSE                                    '10K+ HP'
+            END   AS bucket,
+            COUNT(*) AS cnt
+        FROM btracker_app.current_account_balances
+        WHERE nai = '@@000000037'
+          AND balance > 0
+        GROUP BY 1
+    ),
+    total AS (SELECT SUM(cnt) AS n FROM balances)
+    SELECT
+        bucket,
+        cnt::BIGINT                              AS account_count,
+        ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts
+    FROM balances, total
+    ORDER BY
+        CASE bucket
+            WHEN '0–1 HP'    THEN 1
+            WHEN '1–10 HP'   THEN 2
+            WHEN '10–100 HP' THEN 3
+            WHEN '100–1K HP' THEN 4
+            WHEN '1K–10K HP' THEN 5
+            ELSE                  6
+        END;
+$$;
+
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;
