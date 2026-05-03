@@ -19,6 +19,7 @@ run_sql_file "${SCRIPT_DIR}/../db/haf_stats_app.sql"
 # 3. Block processors
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 
 # 4. API endpoints
 run_sql_file "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
