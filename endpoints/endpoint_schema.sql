@@ -156,12 +156,14 @@ AS $$
     WITH balances AS (
         SELECT
             CASE
-                WHEN balance < 2000000000          THEN '0–1 HP'
-                WHEN balance < 20000000000         THEN '1–10 HP'
-                WHEN balance < 200000000000        THEN '10–100 HP'
-                WHEN balance < 2000000000000       THEN '100–1K HP'
-                WHEN balance < 20000000000000      THEN '1K–10K HP'
-                ELSE                                    '10K+ HP'
+                WHEN balance < 2000000000            THEN '0–1 HP'
+                WHEN balance < 20000000000           THEN '1–10 HP'
+                WHEN balance < 200000000000          THEN '10–100 HP'
+                WHEN balance < 2000000000000         THEN '100–1K HP'
+                WHEN balance < 20000000000000        THEN '1K–10K HP'
+                WHEN balance < 200000000000000       THEN '10K–100K HP'
+                WHEN balance < 2000000000000000      THEN '100K–1M HP'
+                ELSE                                      '1M+ HP'
             END   AS bucket,
             COUNT(*) AS cnt
         FROM btracker_app.current_account_balances
@@ -177,12 +179,14 @@ AS $$
     FROM balances, total
     ORDER BY
         CASE bucket
-            WHEN '0–1 HP'    THEN 1
-            WHEN '1–10 HP'   THEN 2
-            WHEN '10–100 HP' THEN 3
-            WHEN '100–1K HP' THEN 4
-            WHEN '1K–10K HP' THEN 5
-            ELSE                  6
+            WHEN '0–1 HP'      THEN 1
+            WHEN '1–10 HP'     THEN 2
+            WHEN '10–100 HP'   THEN 3
+            WHEN '100–1K HP'   THEN 4
+            WHEN '1K–10K HP'   THEN 5
+            WHEN '10K–100K HP' THEN 6
+            WHEN '100K–1M HP'  THEN 7
+            ELSE                    8
         END;
 $$;
 
