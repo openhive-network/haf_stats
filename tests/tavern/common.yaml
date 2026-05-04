@@ -1,0 +1,6 @@
+---
+name: Common variables
+description: Shared variables for all haf_stats Tavern tests
+
+variables:
+  api_url: !env API_URL

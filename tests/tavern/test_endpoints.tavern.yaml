@@ -1,0 +1,107 @@
+---
+test_name: Version endpoint returns a string
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_version
+    request:
+      url: "{api_url}/rpc/get_version"
+      method: GET
+    response:
+      status_code: 200
+
+---
+test_name: Health endpoint returns ok status
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_health
+    request:
+      url: "{api_url}/rpc/get_health"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+
+---
+test_name: Account financial summary returns rows for known account
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_financial_summary for hiveio
+    request:
+      url: "{api_url}/rpc/get_account_financial_summary"
+      method: GET
+      params:
+        _account: "hiveio"
+        _from:    "2026-01-01"
+        _to:      "2026-05-01"
+        _granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+
+---
+test_name: Account RC footprint returns rows for known account
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_rc_footprint for hiveio grouped by op_type
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        _account:  "hiveio"
+        _from:     "2026-01-01"
+        _to:       "2026-05-01"
+        _group_by: "op_type"
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+
+---
+test_name: Network RC utilization returns time-series data
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_rc_utilization with day granularity
+    request:
+      url: "{api_url}/rpc/get_network_rc_utilization"
+      method: GET
+      params:
+        _from:        "2026-01-01"
+        _to:          "2026-01-07"
+        _granularity: "day"
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+
+---
+test_name: Network HP distribution returns bucketed data
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_hp_distribution
+    request:
+      url: "{api_url}/rpc/get_network_hp_distribution"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
