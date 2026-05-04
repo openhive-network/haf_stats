@@ -192,5 +192,45 @@ ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
     op_count  = account_financial_daily.op_count  + EXCLUDED.op_count;
 
+-- Witness Pay (producer_reward_operation): income for the block producer (VESTS only).
+INSERT INTO haf_stats_backend.account_financial_daily
+    (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
+SELECT
+    a.id,
+    ov.timestamp::DATE,
+    'Witness Pay',
+    'income',
+    0,
+    0,
+    COALESCE((ov.body -> 'value' -> 'vesting_shares' ->> 'amount')::BIGINT, 0),
+    1
+FROM hive.operations_view ov
+JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
+WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'producer_reward_operation' LIMIT 1)
+  AND ov.block_num BETWEEN _first_block AND _last_block
+ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
+    vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
+    op_count  = account_financial_daily.op_count  + EXCLUDED.op_count;
+
+-- Proposal Pay (proposal_pay_operation): income for DHF proposal receiver (HBD only).
+INSERT INTO haf_stats_backend.account_financial_daily
+    (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
+SELECT
+    a.id,
+    ov.timestamp::DATE,
+    'Proposal Pay',
+    'income',
+    0,
+    COALESCE((ov.body -> 'value' -> 'payment' ->> 'amount')::BIGINT, 0),
+    0,
+    1
+FROM hive.operations_view ov
+JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
+WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'proposal_pay_operation' LIMIT 1)
+  AND ov.block_num BETWEEN _first_block AND _last_block
+ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
+    hbd_nai  = account_financial_daily.hbd_nai  + EXCLUDED.hbd_nai,
+    op_count = account_financial_daily.op_count + EXCLUDED.op_count;
+
 END;
 $$;
