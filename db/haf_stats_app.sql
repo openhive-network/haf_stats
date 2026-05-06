@@ -73,6 +73,8 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- Main block-processing loop
+-- hive.app_next_block(context_name) returns hive.blocks_range (first_block, last_block INT).
+-- NULL return means no blocks yet — loop continues. Negative range means wait for live block.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.main()
@@ -80,18 +82,16 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    _context      hive.contexts_name := 'haf_stats';
-    _first_block  INT;
-    _last_block   INT;
+    _block_range hive.blocks_range;
 BEGIN
     PERFORM haf_stats_app.allow_processing();
 
     LOOP
-        PERFORM hive.app_next_iteration(_context, _first_block, _last_block);
+        _block_range := hive.app_next_block('haf_stats');
 
-        IF _last_block IS NOT NULL AND _last_block >= _first_block THEN
-            PERFORM haf_stats_app.process_block_range(_first_block, _last_block);
-            UPDATE haf_stats_app.app_status SET last_processed_block = _last_block;
+        IF _block_range IS NOT NULL AND _block_range.first_block > 0 THEN
+            PERFORM haf_stats_app.process_block_range(_block_range.first_block, _block_range.last_block);
+            UPDATE haf_stats_app.app_status SET last_processed_block = _block_range.last_block;
         END IF;
 
         EXIT WHEN NOT haf_stats_app.continue_processing();
