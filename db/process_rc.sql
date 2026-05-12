@@ -18,21 +18,21 @@
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_operation_log (
-    id             BIGSERIAL PRIMARY KEY,
-    block_num      INT       NOT NULL,
-    account_id     INT       NOT NULL,
-    op_type_id     SMALLINT,           -- NULL when attribution is not possible
-    custom_json_id TEXT,               -- populated only for custom_json_operation
-    rc_cost        BIGINT    NOT NULL,
-    "timestamp"    TIMESTAMP NOT NULL
+    id BIGSERIAL PRIMARY KEY,
+    block_num INT NOT NULL,
+    account_id INT NOT NULL,
+    op_type_id SMALLINT, -- NULL when attribution is not possible
+    custom_json_id TEXT, -- populated only for custom_json_operation
+    rc_cost BIGINT NOT NULL,
+    "timestamp" TIMESTAMP NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_rol_account_ts
-    ON haf_stats_backend.rc_operation_log (account_id, "timestamp" DESC);
+ON haf_stats_backend.rc_operation_log (account_id, "timestamp" DESC);
 
 CREATE INDEX IF NOT EXISTS idx_rol_custom_json
-    ON haf_stats_backend.rc_operation_log (custom_json_id)
-    WHERE custom_json_id IS NOT NULL;
+ON haf_stats_backend.rc_operation_log (custom_json_id)
+WHERE custom_json_id IS NOT NULL;
 
 GRANT SELECT ON haf_stats_backend.rc_operation_log TO haf_stats_user;
 
@@ -42,9 +42,9 @@ GRANT SELECT ON haf_stats_backend.rc_operation_log TO haf_stats_user;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_rc(
     _first_block INT,
-    _last_block  INT
+    _last_block INT
 )
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE

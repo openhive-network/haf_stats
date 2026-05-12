@@ -6,19 +6,19 @@
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
-    account_id  INT    NOT NULL,
-    day         DATE   NOT NULL,
-    category    TEXT   NOT NULL,
-    direction   TEXT   NOT NULL CHECK (direction IN ('income','expense')),
-    hive_nai    BIGINT NOT NULL DEFAULT 0,
-    hbd_nai     BIGINT NOT NULL DEFAULT 0,
-    vests_nai   BIGINT NOT NULL DEFAULT 0,
-    op_count    INT    NOT NULL DEFAULT 0,
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense')),
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count INT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day, category, direction)
 );
 
 CREATE INDEX IF NOT EXISTS idx_afd_account_day
-    ON haf_stats_backend.account_financial_daily (account_id, day DESC);
+ON haf_stats_backend.account_financial_daily (account_id, day DESC);
 
 GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
@@ -28,9 +28,9 @@ GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_financial(
     _first_block INT,
-    _last_block  INT
+    _last_block INT
 )
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 BEGIN

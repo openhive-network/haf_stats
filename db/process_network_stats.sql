@@ -7,9 +7,9 @@
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_network_stats(
     _first_block INT,
-    _last_block  INT
+    _last_block INT
 )
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -76,9 +76,9 @@ $$;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_supply_snapshot(
     _first_block INT,
-    _last_block  INT
+    _last_block INT
 )
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE

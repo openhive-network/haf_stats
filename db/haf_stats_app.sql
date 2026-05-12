@@ -4,12 +4,12 @@
 -- Schemas
 -- ---------------------------------------------------------------------------
 
-CREATE SCHEMA IF NOT EXISTS haf_stats_app      AUTHORIZATION haf_stats_owner;
-CREATE SCHEMA IF NOT EXISTS haf_stats_backend  AUTHORIZATION haf_stats_owner;
+CREATE SCHEMA IF NOT EXISTS haf_stats_app AUTHORIZATION haf_stats_owner;
+CREATE SCHEMA IF NOT EXISTS haf_stats_backend AUTHORIZATION haf_stats_owner;
 CREATE SCHEMA IF NOT EXISTS haf_stats_endpoints AUTHORIZATION haf_stats_owner;
 
-GRANT USAGE ON SCHEMA haf_stats_app       TO haf_stats_user;
-GRANT USAGE ON SCHEMA haf_stats_backend   TO haf_stats_user;
+GRANT USAGE ON SCHEMA haf_stats_app TO haf_stats_user;
+GRANT USAGE ON SCHEMA haf_stats_backend TO haf_stats_user;
 GRANT USAGE ON SCHEMA haf_stats_endpoints TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
@@ -17,8 +17,8 @@ GRANT USAGE ON SCHEMA haf_stats_endpoints TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_app.app_status (
-    continue_processing   BOOL  NOT NULL DEFAULT TRUE,
-    last_processed_block  INT   NOT NULL DEFAULT 0
+    continue_processing BOOL NOT NULL DEFAULT TRUE,
+    last_processed_block INT NOT NULL DEFAULT 0
 );
 
 INSERT INTO haf_stats_app.app_status VALUES (TRUE, 0)
@@ -40,14 +40,14 @@ AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.allow_processing()
-RETURNS void
+RETURNS VOID
 LANGUAGE sql
 AS $$
     UPDATE haf_stats_app.app_status SET continue_processing = TRUE;
 $$;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.stop_processing()
-RETURNS void
+RETURNS VOID
 LANGUAGE sql
 AS $$
     UPDATE haf_stats_app.app_status SET continue_processing = FALSE;
@@ -58,7 +58,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.create_context_if_not_exists()
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -78,7 +78,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.main()
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE

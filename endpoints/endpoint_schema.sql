@@ -10,9 +10,9 @@ $$;
 
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_health()
 RETURNS TABLE (
-    status               TEXT,
+    status TEXT,
     last_processed_block INT,
-    version              TEXT
+    version TEXT
 )
 LANGUAGE sql STABLE
 AS $$
@@ -29,19 +29,19 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
-    _account     TEXT,
-    _from        DATE DEFAULT (NOW() - INTERVAL '1 year')::DATE,
-    _to          DATE DEFAULT NOW()::DATE,
-    _granularity TEXT DEFAULT 'month'   -- 'day' | 'week' | 'month'
+    _account TEXT,
+    _from DATE DEFAULT (NOW() - INTERVAL '1 year')::DATE,
+    _to DATE DEFAULT NOW()::DATE,
+    _granularity TEXT DEFAULT 'month' -- 'day' | 'week' | 'month'
 )
 RETURNS TABLE (
-    period    TEXT,
-    category  TEXT,
+    period TEXT,
+    category TEXT,
     direction TEXT,
-    hive_nai  BIGINT,
-    hbd_nai   BIGINT,
+    hive_nai BIGINT,
+    hbd_nai BIGINT,
     vests_nai BIGINT,
-    op_count  INT
+    op_count INT
 )
 LANGUAGE sql STABLE
 AS $$
@@ -66,16 +66,16 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
-    _account  TEXT,
-    _from     DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
-    _to       DATE DEFAULT NOW()::DATE,
-    _group_by TEXT DEFAULT 'op_type'   -- 'op_type' | 'app'
+    _account TEXT,
+    _from DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
+    _to DATE DEFAULT NOW()::DATE,
+    _group_by TEXT DEFAULT 'op_type' -- 'op_type' | 'app'
 )
 RETURNS TABLE (
-    label       TEXT,
+    label TEXT,
     rc_consumed BIGINT,
-    op_count    BIGINT,
-    pct         NUMERIC
+    op_count BIGINT,
+    pct NUMERIC
 )
 LANGUAGE sql STABLE
 AS $$
@@ -108,14 +108,14 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
-    _from        DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
-    _to          DATE DEFAULT NOW()::DATE,
-    _granularity TEXT DEFAULT 'day'   -- 'day' | 'week' | 'month'
+    _from DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
+    _to DATE DEFAULT NOW()::DATE,
+    _granularity TEXT DEFAULT 'day' -- 'day' | 'week' | 'month'
 )
 RETURNS TABLE (
-    period    TEXT,
-    rc_total  BIGINT,
-    by_label  JSONB   -- keys: op_type_name for non-custom_json, custom_json id for custom_json ops
+    period TEXT,
+    rc_total BIGINT,
+    by_label JSONB -- keys: op_type_name for non-custom_json, custom_json id for custom_json ops
 )
 LANGUAGE sql STABLE
 AS $$
@@ -147,9 +147,9 @@ $$;
 
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
 RETURNS TABLE (
-    bucket        TEXT,
+    bucket TEXT,
     account_count BIGINT,
-    pct_accounts  NUMERIC
+    pct_accounts NUMERIC
 )
 LANGUAGE sql STABLE
 AS $$
