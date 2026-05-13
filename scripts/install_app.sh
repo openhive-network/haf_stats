@@ -21,13 +21,16 @@ run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 
-# 4. API endpoints
+# 4. Seed lookup tables (app registry + financial op categories)
+run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
+
+# 5. API endpoints
 run_sql_file "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
 
-# 5. Register HAF context (idempotent)
+# 6. Register HAF context (idempotent)
 psql_cmd -c "SELECT haf_stats_app.create_context_if_not_exists();"
 
-# 6. Grant read access on current and future objects to haf_stats_user
+# 7. Grant read access on current and future objects to haf_stats_user
 psql_cmd -c "
     ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_backend
         GRANT SELECT ON TABLES TO haf_stats_user;
