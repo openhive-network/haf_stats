@@ -1,13 +1,21 @@
 stages:
   - lint
-  - test
 
 sql-lint:
   stage: lint
   image: python:3.12-slim
   script:
-    - pip install sqlfluff -q
+    - pip install sqlfluff==3.3.0 -q
     - sqlfluff lint db/ endpoints/ --dialect postgres
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+shell-lint:
+  stage: lint
+  image: koalaman/shellcheck-alpine:latest
+  script:
+    - find scripts/ -name "*.sh" -exec shellcheck {} +
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
