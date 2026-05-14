@@ -1,5 +1,5 @@
 # Stage 1: base psql image provided by the HAF CI configuration
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql AS base
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-2 AS base
 
 # Stage 2: inject version (populated by CI from git describe)
 FROM base AS version
