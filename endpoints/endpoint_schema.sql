@@ -1,19 +1,534 @@
--- PostgREST-exposed API functions for haf_stats.
--- All functions live in haf_stats_endpoints and are callable by haf_stats_user.
+SET ROLE haf_stats_owner;
 
+/** openapi
+openapi: 3.1.0
+info:
+  title: HAF Stats — Blockchain Analytics
+  description: >-
+    Blockchain statistics and analytics API for the Hive network.
+    Provides per-account financial summaries, RC usage breakdowns,
+    and network-wide stake distribution.
+  license:
+    name: MIT License
+    url: https://opensource.org/license/mit
+  version: 1.0.0
+externalDocs:
+  description: HAF Stats GitLab repository
+  url: https://gitlab.syncad.com/hive/haf_stats
+tags:
+  - name: Account
+    description: Per-account analytics
+  - name: Network
+    description: Network-wide statistics
+  - name: Other
+    description: Health and version endpoints
+servers:
+  - url: /haf-stats-api
+ */
+
+-- ---------------------------------------------------------------------------
+-- root() — serves the full OpenAPI spec at GET /
+-- ---------------------------------------------------------------------------
+
+DO $__$
+DECLARE
+    swagger_url TEXT;
+BEGIN
+    swagger_url := COALESCE(current_setting('custom.swagger_url', TRUE), 'localhost');
+
+    EXECUTE FORMAT(
+        'CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
+        LANGUAGE plpgsql STABLE
+        AS $_$
+        DECLARE
+        -- openapi-spec
+-- openapi-generated-code-begin
+  openapi json = $$
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HAF Stats \u00e2\u20ac\u201d Blockchain Analytics",
+    "description": "Blockchain statistics and analytics API for the Hive network. Provides per-account financial summaries, RC usage breakdowns, and network-wide stake distribution.",
+    "license": {
+      "name": "MIT License",
+      "url": "https://opensource.org/license/mit"
+    },
+    "version": "1.0.0"
+  },
+  "externalDocs": {
+    "description": "HAF Stats GitLab repository",
+    "url": "https://gitlab.syncad.com/hive/haf_stats"
+  },
+  "tags": [
+    {
+      "name": "Account",
+      "description": "Per-account analytics"
+    },
+    {
+      "name": "Network",
+      "description": "Network-wide statistics"
+    },
+    {
+      "name": "Other",
+      "description": "Health and version endpoints"
+    }
+  ],
+  "servers": [
+    {
+      "url": "/haf-stats-api"
+    }
+  ],
+  "paths": {
+    "/version": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "Application version",
+        "description": "Returns the git hash of the currently deployed version.",
+        "operationId": "haf_stats_endpoints.get_version",
+        "responses": {
+          "200": {
+            "description": "Git hash string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "Health check",
+        "description": "Returns service health and last processed block number.",
+        "operationId": "haf_stats_endpoints.get_health",
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT)",
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "last_processed_block": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/{_account}/financial-summary": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account financial summary",
+        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (in/out).",
+        "operationId": "haf_stats_endpoints.get_account_financial_summary",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "_account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 1 year ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation granularity"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Financial summary rows grouped by period and category",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "ISO-8601 date string for the aggregation bucket"
+                      },
+                      "category": {
+                        "type": "string"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": [
+                          "in",
+                          "out"
+                        ]
+                      },
+                      "hive_nai": {
+                        "type": "integer"
+                      },
+                      "hbd_nai": {
+                        "type": "integer"
+                      },
+                      "vests_nai": {
+                        "type": "integer"
+                      },
+                      "op_count": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/{_account}/rc-footprint": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account RC footprint",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp.",
+        "operationId": "haf_stats_endpoints.get_account_rc_footprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "_account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_group_by",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "op_type",
+              "enum": [
+                "op_type",
+                "app"
+              ]
+            },
+            "description": "Group results by operation type or DApp"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "RC consumption ranked by usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "description": "Operation type name or custom_json app ID"
+                      },
+                      "rc_consumed": {
+                        "type": "integer"
+                      },
+                      "op_count": {
+                        "type": "integer"
+                      },
+                      "pct": {
+                        "type": "number",
+                        "description": "Percentage of total RC consumed"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/network/rc-utilization": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Network RC utilization",
+        "description": "Time-series of total RC consumption across the network, broken down by operation type or DApp, aggregated by the chosen granularity.",
+        "operationId": "haf_stats_endpoints.get_network_rc_utilization",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation granularity"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "RC utilization time-series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, rc_total BIGINT, by_label JSONB)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "ISO-8601 date string for the aggregation bucket"
+                      },
+                      "rc_total": {
+                        "type": "integer",
+                        "description": "Total RC consumed in the period"
+                      },
+                      "by_label": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "integer"
+                        },
+                        "description": "RC per operation type or DApp"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/network/hp-distribution": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "HP stake distribution",
+        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads from btracker_app \u00e2\u20ac\u201d requires cross-schema grant.",
+        "operationId": "haf_stats_endpoints.get_network_hp_distribution",
+        "responses": {
+          "200": {
+            "description": "HP distribution buckets ordered from smallest to largest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "bucket": {
+                        "type": "string",
+                        "example": "1\u00e2\u20ac\u201c10 HP"
+                      },
+                      "account_count": {
+                        "type": "integer"
+                      },
+                      "pct_accounts": {
+                        "type": "number",
+                        "description": "Percentage of all accounts in this bucket"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+$$;
+-- openapi-generated-code-end
+        -- openapi-generated-code-begin
+          openapi json = $${}$$;
+        -- openapi-generated-code-end
+        BEGIN
+          RETURN openapi;
+        END
+        $_$;'
+    , swagger_url);
+END
+$__$;
+
+-- ---------------------------------------------------------------------------
+-- Health / version
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/version:
+  get:
+    tags:
+      - Other
+    summary: Application version
+    description: Returns the git hash of the currently deployed version.
+    operationId: haf_stats_endpoints.get_version
+    responses:
+      '200':
+        description: Git hash string
+        content:
+          application/json:
+            schema:
+              type: string
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_version;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_version()
-RETURNS TEXT
+RETURNS TEXT 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT git_hash FROM haf_stats_app.app_version LIMIT 1;
 $$;
 
+/** openapi:paths
+/health:
+  get:
+    tags:
+      - Other
+    summary: Health check
+    description: Returns service health and last processed block number.
+    operationId: haf_stats_endpoints.get_health
+    responses:
+      '200':
+        description: Health status
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT)"
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: ok
+                last_processed_block:
+                  type: integer
+                version:
+                  type: string
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_health()
-RETURNS TABLE (
-    status TEXT,
-    last_processed_block INT,
-    version TEXT
-)
+RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT) 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
@@ -28,21 +543,87 @@ $$;
 -- Feature: per-account financial summary
 -- ---------------------------------------------------------------------------
 
+/** openapi:paths
+/account/{_account}/financial-summary:
+  get:
+    tags:
+      - Account
+    summary: Account financial summary
+    description: >-
+      Aggregated HBD/HIVE/VESTS flows for an account over a time range,
+      grouped by financial category and direction (in/out).
+    operationId: haf_stats_endpoints.get_account_financial_summary
+    parameters:
+      - in: path
+        name: _account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 1 year ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: month
+          enum: [day, week, month]
+        description: Aggregation granularity
+    responses:
+      '200':
+        description: Financial summary rows grouped by period and category
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: ISO-8601 date string for the aggregation bucket
+                  category:
+                    type: string
+                  direction:
+                    type: string
+                    enum: [in, out]
+                  hive_nai:
+                    type: integer
+                  hbd_nai:
+                    type: integer
+                  vests_nai:
+                    type: integer
+                  op_count:
+                    type: integer
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_financial_summary;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
-    _account TEXT,
-    _from DATE DEFAULT (NOW() - INTERVAL '1 year')::DATE,
-    _to DATE DEFAULT NOW()::DATE,
-    _granularity TEXT DEFAULT 'month' -- 'day' | 'week' | 'month'
+    "_account" TEXT,
+    "_from" DATE = (NOW() - INTERVAL '1 year')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'month'
 )
-RETURNS TABLE (
-    period TEXT,
-    category TEXT,
-    direction TEXT,
-    hive_nai BIGINT,
-    hbd_nai BIGINT,
-    vests_nai BIGINT,
-    op_count INT
-)
+RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT) 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
@@ -65,18 +646,81 @@ $$;
 -- Feature: per-account RC footprint
 -- ---------------------------------------------------------------------------
 
+/** openapi:paths
+/account/{_account}/rc-footprint:
+  get:
+    tags:
+      - Account
+    summary: Account RC footprint
+    description: >-
+      Breakdown of Resource Credit consumption for an account over a time range,
+      grouped by operation type or DApp.
+    operationId: haf_stats_endpoints.get_account_rc_footprint
+    parameters:
+      - in: path
+        name: _account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _group_by
+        required: false
+        schema:
+          type: string
+          default: op_type
+          enum: [op_type, app]
+        description: Group results by operation type or DApp
+    responses:
+      '200':
+        description: RC consumption ranked by usage
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  label:
+                    type: string
+                    description: Operation type name or custom_json app ID
+                  rc_consumed:
+                    type: integer
+                  op_count:
+                    type: integer
+                  pct:
+                    type: number
+                    description: Percentage of total RC consumed
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
-    _account TEXT,
-    _from DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
-    _to DATE DEFAULT NOW()::DATE,
-    _group_by TEXT DEFAULT 'op_type' -- 'op_type' | 'app'
+    "_account" TEXT,
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_group_by" TEXT = 'op_type'
 )
-RETURNS TABLE (
-    label TEXT,
-    rc_consumed BIGINT,
-    op_count BIGINT,
-    pct NUMERIC
-)
+RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC) 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     WITH base AS (
@@ -107,16 +751,75 @@ $$;
 -- Feature: network-wide RC utilization by op type / DApp
 -- ---------------------------------------------------------------------------
 
+/** openapi:paths
+/network/rc-utilization:
+  get:
+    tags:
+      - Network
+    summary: Network RC utilization
+    description: >-
+      Time-series of total RC consumption across the network, broken down
+      by operation type or DApp, aggregated by the chosen granularity.
+    operationId: haf_stats_endpoints.get_network_rc_utilization
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum: [day, week, month]
+        description: Aggregation granularity
+    responses:
+      '200':
+        description: RC utilization time-series
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, rc_total BIGINT, by_label JSONB)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: ISO-8601 date string for the aggregation bucket
+                  rc_total:
+                    type: integer
+                    description: Total RC consumed in the period
+                  by_label:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                    description: RC per operation type or DApp
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_rc_utilization;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
-    _from DATE DEFAULT (NOW() - INTERVAL '30 days')::DATE,
-    _to DATE DEFAULT NOW()::DATE,
-    _granularity TEXT DEFAULT 'day' -- 'day' | 'week' | 'month'
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'day'
 )
-RETURNS TABLE (
-    period TEXT,
-    rc_total BIGINT,
-    by_label JSONB -- keys: op_type_name for non-custom_json, custom_json id for custom_json ops
-)
+RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB) 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
@@ -145,12 +848,41 @@ $$;
 -- to verify the unit scale before deploying.
 -- ---------------------------------------------------------------------------
 
+/** openapi:paths
+/network/hp-distribution:
+  get:
+    tags:
+      - Network
+    summary: HP stake distribution
+    description: >-
+      Bucketed distribution of Hive Power (HP) stake across all accounts.
+      Reads from btracker_app — requires cross-schema grant.
+    operationId: haf_stats_endpoints.get_network_hp_distribution
+    responses:
+      '200':
+        description: HP distribution buckets ordered from smallest to largest
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  bucket:
+                    type: string
+                    example: "1–10 HP"
+                  account_count:
+                    type: integer
+                  pct_accounts:
+                    type: number
+                    description: Percentage of all accounts in this bucket
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_hp_distribution;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
-RETURNS TABLE (
-    bucket TEXT,
-    account_count BIGINT,
-    pct_accounts NUMERIC
-)
+RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC) 
+-- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     WITH balances AS (
@@ -191,3 +923,5 @@ AS $$
 $$;
 
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;
+
+RESET ROLE;
