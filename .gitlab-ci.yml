@@ -21,6 +21,30 @@ shell-lint:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint --ignore DL3006 --ignore DL3002 Dockerfile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+compose-validate:
+  stage: lint
+  image: docker:24
+  variables:
+    HAF_REGISTRY: "registry.example.com"
+    HAF_VERSION: "latest"
+    HAF_STATS_REGISTRY: "registry.example.com"
+    HAF_STATS_VERSION: "latest"
+    POSTGREST_VERSION: "latest"
+  script:
+    - docker compose -f docker/docker-compose.yml config --quiet
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
 docker-build:
   stage: build
   image: docker:24
