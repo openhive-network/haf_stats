@@ -7,11 +7,12 @@
 -- Attribution to an op type uses the first non-virtual op in the same transaction
 -- (covers the common case of one op per tx on Hive).
 --
--- TODO: verify body shape on a live HAF node:
---   body -> 'value' -> 'account'        (account name)
---   body -> 'value' -> 'previous_rc'    (mana before tx)
---   body -> 'value' -> 'rc' -> 'current_mana'  (mana after tx)
--- If the op batches multiple accounts, switch to the jsonb_array_elements approach.
+-- rc_account_statuses_operation body shape (HF26+ / Shape B — array):
+--   body -> 'value' -> 'account_statuses'  array of per-account entries, each with:
+--     elem ->> 'account'              (account name)
+--     elem ->> 'previous_rc'          (mana before tx)
+--     elem -> 'rc' ->> 'current_mana' (mana after tx)
+-- Uses hive.operations_view_extended (vs operations_view) to obtain the timestamp.
 
 -- ---------------------------------------------------------------------------
 -- Table
@@ -62,22 +63,24 @@ BEGIN
     INSERT INTO haf_stats_backend.rc_operation_log
         (block_num, account_id, op_type_id, custom_json_id, rc_cost, "timestamp")
     WITH rc_events AS (
-        -- One rc_account_statuses_operation virtual op per affected account per tx.
-        -- previous_rc holds mana before the tx; rc.current_mana is after.
+        -- One rc_account_statuses_operation virtual op per tx, batching all accounts.
+        -- CROSS JOIN expands the account_statuses array into one row per account.
+        -- operations_view_extended used (vs operations_view) to get the timestamp.
         SELECT
             ov.block_num,
             ov.trx_in_block,
             ov.timestamp,
-            (ov.body -> 'value' ->> 'account')                       AS account_name,
+            (elem ->> 'account')                                      AS account_name,
             GREATEST(0,
-                (ov.body -> 'value' ->> 'previous_rc')::BIGINT -
-                (ov.body -> 'value' -> 'rc' ->> 'current_mana')::BIGINT
+                (elem ->> 'previous_rc')::BIGINT -
+                (elem -> 'rc' ->> 'current_mana')::BIGINT
             )                                                         AS rc_cost
-        FROM hive.operations_view ov
+        FROM hive.operations_view_extended ov
+        CROSS JOIN jsonb_array_elements(ov.body -> 'value' -> 'account_statuses') AS elem
         WHERE ov.op_type_id = _rc_vop_type_id
           AND ov.block_num  BETWEEN _first_block AND _last_block
-          AND (ov.body -> 'value' ->> 'previous_rc')::BIGINT
-            > (ov.body -> 'value' -> 'rc' ->> 'current_mana')::BIGINT
+          AND (elem ->> 'previous_rc')::BIGINT
+            > (elem -> 'rc' ->> 'current_mana')::BIGINT
     ),
     user_ops AS (
         -- First non-virtual op per transaction for op-type attribution.
@@ -91,7 +94,7 @@ BEGIN
                  ELSE NULL END AS custom_json_id
         FROM hive.operations_view
         WHERE block_num BETWEEN _first_block AND _last_block
-          AND is_virtual = FALSE
+          AND op_type_id NOT IN (SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE)
         ORDER BY block_num, trx_in_block, op_pos ASC
     )
     SELECT
