@@ -1,5 +1,6 @@
 stages:
   - lint
+  - build
 
 sql-lint:
   stage: lint
@@ -16,6 +17,45 @@ shell-lint:
   image: koalaman/shellcheck-alpine:latest
   script:
     - find scripts/ -name "*.sh" -exec shellcheck --severity=warning {} +
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint Dockerfile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+compose-validate:
+  stage: lint
+  image: docker:24
+  variables:
+    HAF_REGISTRY: "registry.example.com"
+    HAF_VERSION: "latest"
+    HAF_STATS_REGISTRY: "registry.example.com"
+    HAF_STATS_VERSION: "latest"
+    POSTGREST_VERSION: "latest"
+  script:
+    - docker compose -f docker/docker-compose.yml config --quiet
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+docker-build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build --build-arg GIT_HASH=$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
