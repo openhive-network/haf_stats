@@ -27,6 +27,8 @@ stages:
       status_code: 200
       headers:
         content-type: application/json
+      json:
+        - status: "ok"
 
 ---
 test_name: Account financial summary returns rows for known account
@@ -48,6 +50,7 @@ stages:
       status_code: 200
       headers:
         content-type: application/json
+      json: !anylist
 
 ---
 test_name: Account RC footprint returns rows for known account
@@ -69,6 +72,7 @@ stages:
       status_code: 200
       headers:
         content-type: application/json
+      json: !anylist
 
 ---
 test_name: Network RC utilization returns time-series data
@@ -89,6 +93,7 @@ stages:
       status_code: 200
       headers:
         content-type: application/json
+      json: !anylist
 
 ---
 test_name: Network HP distribution returns bucketed data
@@ -105,3 +110,54 @@ stages:
       status_code: 200
       headers:
         content-type: application/json
+      json: !anylist
+
+---
+test_name: Financial summary rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_financial_summary with bad _from date
+    request:
+      url: "{api_url}/rpc/get_account_financial_summary"
+      method: GET
+      params:
+        _account: "hiveio"
+        _from:    "not-a-date"
+    response:
+      status_code: 400
+
+---
+test_name: Financial summary rejects invalid granularity
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_financial_summary with bad _granularity
+    request:
+      url: "{api_url}/rpc/get_account_financial_summary"
+      method: GET
+      params:
+        _account:     "hiveio"
+        _granularity: "invalid"
+    response:
+      status_code: 400
+
+---
+test_name: Network RC utilization rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_rc_utilization with bad _to date
+    request:
+      url: "{api_url}/rpc/get_network_rc_utilization"
+      method: GET
+      params:
+        _to: "not-a-date"
+    response:
+      status_code: 400
