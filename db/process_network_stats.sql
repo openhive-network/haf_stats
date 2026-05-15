@@ -39,7 +39,7 @@ BEGIN
         FROM hive.operations_view hot
         JOIN block_dates bd ON bd.block_num = hot.block_num
         JOIN hive.operation_types ot ON ot.id = hot.op_type_id
-        WHERE hot.is_virtual = FALSE
+        WHERE hot.op_type_id NOT IN (SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE)
         GROUP BY bd.day
     ),
     new_accounts AS (
@@ -99,13 +99,10 @@ BEGIN
         RETURN;
     END IF;
 
-    -- dynamic_global_properties_object is embedded in 'system_warning' virtual ops
-    -- or accessible via the hafd.dynamic_global_properties view if available.
-    -- Fallback: read the latest block's metadata directly from hafd.blocks.
-    --
-    -- TODO: Verify the exact view/column name on the target HAF version.
-    --       hafd.blocks may expose total_vesting_fund_hive, current_supply etc.
-    --       as columns added by the sql_serializer plugin.
+    -- hafd.blocks confirmed columns (from hive.blocks_view definition in HAF source):
+    --   virtual_supply, current_supply, current_hbd_supply,
+    --   total_vesting_fund_hive, total_vesting_shares, dhf_interval_ledger
+    -- Savings balance columns do NOT exist on hafd.blocks — stored as NULL.
 
     INSERT INTO haf_stats_backend.supply_snapshots
         (block_num, "timestamp",
@@ -114,13 +111,12 @@ BEGIN
     SELECT
         _last_block,
         created_at,
-        total_vesting_fund_hive,        -- HIVE locked as HP
+        virtual_supply,
         current_supply,
         current_hbd_supply,
         total_vesting_shares,
-        hive_savings_balance,           -- column names TBC against live hafd schema
-        hbd_savings_balance,
-        0                               -- reward_fund populated separately if needed
+        NULL,
+        NULL
     FROM hafd.blocks
     WHERE num = _last_block
     ON CONFLICT (block_num) DO NOTHING;
