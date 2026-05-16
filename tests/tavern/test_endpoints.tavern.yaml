@@ -161,3 +161,56 @@ stages:
         _to: "not-a-date"
     response:
       status_code: 400
+
+---
+test_name: Network account funnel returns cohort retention data
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_account_funnel returns rows
+    request:
+      url: "{api_url}/rpc/get_network_account_funnel"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+      json: !anylist
+
+---
+test_name: Network account funnel respects date range filter
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_account_funnel with explicit range
+    request:
+      url: "{api_url}/rpc/get_network_account_funnel"
+      method: GET
+      params:
+        _from: "2016-03-01"
+        _to:   "2016-12-31"
+    response:
+      status_code: 200
+      headers:
+        content-type: application/json
+      json: !anylist
+
+---
+test_name: Network account funnel rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_account_funnel with bad _from date
+    request:
+      url: "{api_url}/rpc/get_network_account_funnel"
+      method: GET
+      params:
+        _from: "not-a-date"
+    response:
+      status_code: 400
