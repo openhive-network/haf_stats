@@ -17,12 +17,12 @@
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_members (
-    account_id   INT     PRIMARY KEY,
-    cohort_month DATE    NOT NULL,
-    created_at   TIMESTAMP NOT NULL,
-    active_7d    BOOLEAN NOT NULL DEFAULT FALSE,
-    active_30d   BOOLEAN NOT NULL DEFAULT FALSE,
-    active_90d   BOOLEAN NOT NULL DEFAULT FALSE
+    account_id INT PRIMARY KEY,
+    cohort_month DATE NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    active_7d BOOLEAN NOT NULL DEFAULT FALSE,
+    active_30d BOOLEAN NOT NULL DEFAULT FALSE,
+    active_90d BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_acm_cohort
@@ -35,9 +35,9 @@ WHERE NOT active_90d;
 GRANT SELECT ON haf_stats_backend.account_cohort_members TO haf_stats_user;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
-    cohort_month  DATE PRIMARY KEY,
-    new_accounts  INT  NOT NULL DEFAULT 0,
-    active_at_7d  INT,
+    cohort_month DATE PRIMARY KEY,
+    new_accounts INT NOT NULL DEFAULT 0,
+    active_at_7d INT,
     active_at_30d INT,
     active_at_90d INT
 );
@@ -50,7 +50,7 @@ GRANT SELECT ON haf_stats_backend.account_cohort_retention TO haf_stats_user;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_account_cohorts(
     _first_block INT,
-    _last_block  INT
+    _last_block INT
 )
 RETURNS VOID
 LANGUAGE plpgsql
