@@ -8,7 +8,7 @@ version: "3.8"
 
 services:
   haf:
-    image: ${HAF_REGISTRY}/haf/instance:${HAF_VERSION}
+    image: ${HAF_REGISTRY}/haf:${HAF_VERSION}
     restart: unless-stopped
     ports:
       - "5432:5432"
