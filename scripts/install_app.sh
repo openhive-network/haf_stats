@@ -31,6 +31,7 @@ run_sql_file "${SCRIPT_DIR}/../db/haf_stats_app.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 
 # 4. Seed lookup tables (app registry + financial op categories)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
@@ -50,3 +51,10 @@ psql_cmd -c "
 "
 
 log "Installation complete."
+
+# PREREQUISITE (run by btracker_app schema owner, not this script):
+#   GRANT SELECT ON btracker_app.current_account_balances TO haf_stats_user;
+# Required for get_network_hp_distribution to return data.
+# Verify with:
+#   SELECT has_table_privilege('haf_stats_user',
+#       'btracker_app.current_account_balances', 'SELECT');

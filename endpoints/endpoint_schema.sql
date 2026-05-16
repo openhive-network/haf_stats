@@ -840,12 +840,7 @@ $$;
 -- Feature: network HP stake distribution (bucketed)
 -- Reads cross-schema from btracker_app (Balance Tracker).
 -- Requires: GRANT SELECT ON btracker_app.current_account_balances TO haf_stats_user
---
--- TODO: calibrate VESTS thresholds against live data. Current values assume
--- ~2,000,000,000 raw units per HP (VESTS precision=6, 1 HP ≈ 2000 VESTS).
--- Run: SELECT MIN(balance), MAX(balance), AVG(balance)
---      FROM btracker_app.current_account_balances WHERE nai = '@@000000037';
--- to verify the unit scale before deploying.
+-- VESTS/HP ratio is read dynamically from hafd.blocks at query time.
 -- ---------------------------------------------------------------------------
 
 /** openapi:paths
@@ -885,22 +880,29 @@ RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
-    WITH balances AS (
+    WITH ratio AS (
+        SELECT (total_vesting_shares::NUMERIC * 1000)
+               / NULLIF(total_vesting_fund_hive, 0) AS r
+        FROM hafd.blocks
+        ORDER BY num DESC
+        LIMIT 1
+    ),
+    balances AS (
         SELECT
             CASE
-                WHEN balance < 2000000000            THEN '0–1 HP'
-                WHEN balance < 20000000000           THEN '1–10 HP'
-                WHEN balance < 200000000000          THEN '10–100 HP'
-                WHEN balance < 2000000000000         THEN '100–1K HP'
-                WHEN balance < 20000000000000        THEN '1K–10K HP'
-                WHEN balance < 200000000000000       THEN '10K–100K HP'
-                WHEN balance < 2000000000000000      THEN '100K–1M HP'
-                ELSE                                      '1M+ HP'
+                WHEN b.balance < 1       * r.r THEN '0–1 HP'
+                WHEN b.balance < 10      * r.r THEN '1–10 HP'
+                WHEN b.balance < 100     * r.r THEN '10–100 HP'
+                WHEN b.balance < 1000    * r.r THEN '100–1K HP'
+                WHEN b.balance < 10000   * r.r THEN '1K–10K HP'
+                WHEN b.balance < 100000  * r.r THEN '10K–100K HP'
+                WHEN b.balance < 1000000 * r.r THEN '100K–1M HP'
+                ELSE                               '1M+ HP'
             END   AS bucket,
             COUNT(*) AS cnt
-        FROM btracker_app.current_account_balances
-        WHERE nai = '@@000000037'
-          AND balance > 0
+        FROM btracker_app.current_account_balances b, ratio r
+        WHERE b.nai = '@@000000037'
+          AND b.balance > 0
         GROUP BY 1
     ),
     total AS (SELECT SUM(cnt) AS n FROM balances)
@@ -920,6 +922,96 @@ AS $$
             WHEN '100K–1M HP'  THEN 7
             ELSE                    8
         END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: new account cohort retention
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/account-funnel:
+  get:
+    tags:
+      - Network
+    summary: New account cohort retention
+    description: >-
+      Cohort retention for new accounts — percentage still active at 7, 30,
+      and 90 days after creation, grouped by month of account creation.
+      active_at_Nd is null for cohorts whose Nd window has not yet elapsed.
+    operationId: haf_stats_endpoints.get_network_account_funnel
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
+          type: string
+          format: date
+        description: Start cohort month (inclusive), defaults to 1 year ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End cohort month (inclusive), defaults to today
+    responses:
+      '200':
+        description: Cohort retention rows ordered by month
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  cohort_month:
+                    type: string
+                    example: "2026-01"
+                  new_accounts:
+                    type: integer
+                  active_at_7d:
+                    type: integer
+                  pct_7d:
+                    type: number
+                  active_at_30d:
+                    type: integer
+                  pct_30d:
+                    type: number
+                  active_at_90d:
+                    type: integer
+                    nullable: true
+                  pct_90d:
+                    type: number
+                    nullable: true
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_account_funnel;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_account_funnel(
+    "_from" DATE = (NOW() - INTERVAL '1 year')::DATE,
+    "_to"   DATE = NOW()::DATE
+)
+RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC,
+              active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                   AS cohort_month,
+        acr.new_accounts,
+        acr.active_at_7d,
+        ROUND(acr.active_at_7d  * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_7d,
+        acr.active_at_30d,
+        ROUND(acr.active_at_30d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_30d,
+        acr.active_at_90d,
+        ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
+    FROM haf_stats_backend.account_cohort_retention acr
+    WHERE acr.cohort_month BETWEEN _from AND _to
+    ORDER BY acr.cohort_month;
 $$;
 
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;
