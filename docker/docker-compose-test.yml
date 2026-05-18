@@ -5,6 +5,9 @@ version: "3.8"
 #
 # Usage:
 #   docker compose -f docker-compose-test.yml up --abort-on-container-exit
+#
+# Note: all services connect to PostgreSQL via Unix socket (pg_socket volume)
+# to avoid pg_hba TCP access issues with the HAF image.
 
 services:
   haf:
@@ -17,6 +20,7 @@ services:
       - "5432:5432"
     volumes:
       - ./blockchain:/home/hived/datadir/blockchain:ro   # pre-synced block_log
+      - pg_socket:/var/run/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h localhost -U haf_admin -d haf_block_log"]
       interval: 5s
@@ -28,9 +32,11 @@ services:
     image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
     command: ["/app/scripts/install_app.sh"]
     environment:
-      POSTGRES_HOST: haf
+      POSTGRES_HOST: /var/run/postgresql
       POSTGRES_USER: haf_admin
       POSTGRES_DB:   haf_block_log
+    volumes:
+      - pg_socket:/var/run/postgresql
     depends_on:
       haf:
         condition: service_healthy
@@ -39,9 +45,11 @@ services:
     image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
     command: ["/app/scripts/process_blocks.sh"]
     environment:
-      POSTGRES_HOST: haf
+      POSTGRES_HOST: /var/run/postgresql
       POSTGRES_USER: haf_stats_owner
       POSTGRES_DB:   haf_block_log
+    volumes:
+      - pg_socket:/var/run/postgresql
     depends_on:
       haf-stats-setup:
         condition: service_completed_successfully
@@ -51,10 +59,12 @@ services:
     ports:
       - "3001:3000"
     environment:
-      PGRST_DB_URI:       "postgres://haf_stats_user@haf/haf_block_log"
+      PGRST_DB_URI:       "postgres:///haf_block_log?user=haf_stats_user&host=/var/run/postgresql"
       PGRST_DB_SCHEMA:    "haf_stats_endpoints"
       PGRST_DB_ANON_ROLE: "haf_stats_user"
       PGRST_DB_POOL:      "5"
+    volumes:
+      - pg_socket:/var/run/postgresql
     depends_on:
       - haf-stats-process
 
@@ -69,3 +79,6 @@ services:
       API_URL: "http://haf-stats-api:3000"
     depends_on:
       - haf-stats-api
+
+volumes:
+  pg_socket:
