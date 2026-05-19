@@ -68,7 +68,7 @@ docker-build:
 #   services:
 #     - docker:dind
 #   script:
-#     - cd docker
-#     - docker compose -f docker-compose-test.yml up --abort-on-container-exit
+#     - chmod +x scripts/run_tests.sh
+#     - ./scripts/run_tests.sh
 #   rules:
 #     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

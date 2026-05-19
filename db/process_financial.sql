@@ -1,9 +1,20 @@
+SET ROLE haf_stats_owner;
+
 -- Feature: per-account financial summary (get_account_financial_summary endpoint).
 -- Creates the aggregation table and the block processor that populates it.
 
 -- ---------------------------------------------------------------------------
 -- Table
 -- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.op_financial_categories (
+    op_type_name TEXT NOT NULL PRIMARY KEY,
+    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense', 'neutral')),
+    category TEXT NOT NULL,
+    asset TEXT NOT NULL
+);
+
+GRANT SELECT ON haf_stats_backend.op_financial_categories TO haf_stats_user;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
@@ -50,7 +61,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'author')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'author_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'author_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai  = account_financial_daily.hive_nai  + EXCLUDED.hive_nai,
@@ -72,7 +83,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'curator')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'curation_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'curation_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
@@ -92,7 +103,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'interest_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'interest_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hbd_nai  = account_financial_daily.hbd_nai + EXCLUDED.hbd_nai,
@@ -117,7 +128,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'transfer_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
@@ -142,7 +153,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'transfer_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
@@ -164,7 +175,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'transfer_to_vesting_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_to_vesting_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
@@ -185,7 +196,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from_account')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'fill_vesting_withdraw_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'fill_vesting_withdraw_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai  = account_financial_daily.hive_nai  + EXCLUDED.hive_nai,
@@ -206,7 +217,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'producer_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'producer_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
@@ -226,7 +237,7 @@ SELECT
     1
 FROM hive.operations_view ov
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
-WHERE ov.op_type_id = (SELECT id FROM hive.operation_types WHERE name = 'proposal_pay_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'proposal_pay_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hbd_nai  = account_financial_daily.hbd_nai  + EXCLUDED.hbd_nai,
@@ -234,3 +245,5 @@ ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
 
 END;
 $$;
+
+RESET ROLE;

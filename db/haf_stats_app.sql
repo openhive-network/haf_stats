@@ -12,6 +12,8 @@ GRANT USAGE ON SCHEMA haf_stats_app TO haf_stats_user;
 GRANT USAGE ON SCHEMA haf_stats_backend TO haf_stats_user;
 GRANT USAGE ON SCHEMA haf_stats_endpoints TO haf_stats_user;
 
+SET ROLE haf_stats_owner;
+
 -- ---------------------------------------------------------------------------
 -- Control tables
 -- ---------------------------------------------------------------------------
@@ -27,6 +29,9 @@ ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS haf_stats_app.app_version (
     git_hash TEXT NOT NULL
 );
+
+GRANT SELECT ON haf_stats_app.app_status TO haf_stats_user;
+GRANT SELECT ON haf_stats_app.app_version TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Lifecycle control functions
@@ -63,7 +68,7 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NOT hive.app_context_exists('haf_stats') THEN
-        PERFORM hive.app_create_context('haf_stats');
+        PERFORM hive.app_create_context('haf_stats'::hafd.context_name, 'haf_stats_app');
         RAISE NOTICE 'HAF context haf_stats created.';
     ELSE
         RAISE NOTICE 'HAF context haf_stats already exists, skipping.';
@@ -87,7 +92,13 @@ BEGIN
     PERFORM haf_stats_app.allow_processing();
 
     LOOP
-        _block_range := hive.app_next_block('haf_stats');
+        BEGIN
+            _block_range := hive.app_next_block('haf_stats'::hafd.context_name);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Waiting for HAF synchronization: %', SQLERRM;
+            PERFORM pg_sleep(3);
+            CONTINUE;
+        END;
 
         IF _block_range IS NOT NULL AND _block_range.first_block > 0 THEN
             PERFORM haf_stats_app.process_block_range(_block_range.first_block, _block_range.last_block);
@@ -98,3 +109,5 @@ BEGIN
     END LOOP;
 END;
 $$;
+
+RESET ROLE;

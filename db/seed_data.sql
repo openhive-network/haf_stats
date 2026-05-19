@@ -1,3 +1,5 @@
+SET ROLE haf_stats_owner;
+
 -- Seed data: DApp registry and financial operation category map.
 -- Re-running this file is safe (INSERT ... ON CONFLICT DO NOTHING).
 
@@ -66,3 +68,5 @@ VALUES
 -- Custom JSON
 ('custom_json_operation', 'neutral', 'app_activity', 'MIXED')
 ON CONFLICT (op_type_name) DO NOTHING;
+
+RESET ROLE;

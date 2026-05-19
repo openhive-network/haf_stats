@@ -36,14 +36,11 @@ DECLARE
 BEGIN
     swagger_url := COALESCE(current_setting('custom.swagger_url', TRUE), 'localhost');
 
-    EXECUTE FORMAT(
-        'CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
-        LANGUAGE plpgsql STABLE
-        AS $_$
-        DECLARE
-        -- openapi-spec
--- openapi-generated-code-begin
-  openapi json = $$
+    EXECUTE $exec$
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
+LANGUAGE sql STABLE
+AS $func$
+    SELECT $api_json$
 {
   "openapi": "3.1.0",
   "info": {
@@ -456,16 +453,9 @@ BEGIN
     }
   }
 }
-$$;
--- openapi-generated-code-end
-        -- openapi-generated-code-begin
-          openapi json = $${}$$;
-        -- openapi-generated-code-end
-        BEGIN
-          RETURN openapi;
-        END
-        $_$;'
-    , swagger_url);
+$api_json$::json;
+$func$;
+$exec$;
 END
 $__$;
 
@@ -622,12 +612,19 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
     "_to" DATE = NOW()::DATE,
     "_granularity" TEXT = 'month'
 )
-RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT) 
+RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT)
 -- openapi-generated-code-end
-LANGUAGE sql STABLE
+LANGUAGE plpgsql STABLE
 AS $$
+BEGIN
+    IF "_granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || "_granularity",
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+    RETURN QUERY
     SELECT
-        TO_CHAR(DATE_TRUNC(_granularity, afd.day), 'YYYY-MM-DD') AS period,
+        TO_CHAR(DATE_TRUNC("_granularity", afd.day), 'YYYY-MM-DD') AS period,
         afd.category,
         afd.direction,
         SUM(afd.hive_nai)::BIGINT,
@@ -636,10 +633,11 @@ AS $$
         SUM(afd.op_count)::INT
     FROM haf_stats_backend.account_financial_daily afd
     JOIN hafd.accounts ha ON ha.id = afd.account_id
-    WHERE ha.name  = _account
-      AND afd.day BETWEEN _from AND _to
+    WHERE ha.name  = "_account"
+      AND afd.day BETWEEN "_from" AND "_to"
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3;
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -732,7 +730,7 @@ AS $$
             rol.rc_cost
         FROM haf_stats_backend.rc_operation_log rol
         JOIN hafd.accounts a ON a.id = rol.account_id
-        LEFT JOIN hive.operation_types ot ON ot.id = rol.op_type_id
+        LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
         WHERE a.name             = _account
           AND rol.timestamp::DATE BETWEEN _from AND _to
     ),
@@ -822,17 +820,22 @@ RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
+    WITH per_label AS (
+        SELECT
+            DATE_TRUNC(_granularity, rol."timestamp")            AS period,
+            COALESCE(rol.custom_json_id, ot.name, 'unknown')    AS label,
+            SUM(rol.rc_cost)::BIGINT                             AS rc_label_total
+        FROM haf_stats_backend.rc_operation_log rol
+        LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
+        WHERE rol."timestamp"::DATE BETWEEN _from AND _to
+        GROUP BY 1, 2
+    )
     SELECT
-        TO_CHAR(DATE_TRUNC(_granularity, rol."timestamp"), 'YYYY-MM-DD') AS period,
-        SUM(rol.rc_cost)::BIGINT                                          AS rc_total,
-        jsonb_object_agg(
-            COALESCE(rol.custom_json_id, ot.name, 'unknown'),
-            SUM(rol.rc_cost)::BIGINT
-        )                                                                 AS by_label
-    FROM haf_stats_backend.rc_operation_log rol
-    LEFT JOIN hive.operation_types ot ON ot.id = rol.op_type_id
-    WHERE rol."timestamp"::DATE BETWEEN _from AND _to
-    GROUP BY DATE_TRUNC(_granularity, rol."timestamp")
+        TO_CHAR(period, 'YYYY-MM-DD')           AS period,
+        SUM(rc_label_total)::BIGINT             AS rc_total,
+        jsonb_object_agg(label, rc_label_total) AS by_label
+    FROM per_label
+    GROUP BY period
     ORDER BY 1;
 $$;
 
@@ -878,8 +881,10 @@ DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_hp_distribution;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
 RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC) 
 -- openapi-generated-code-end
-LANGUAGE sql STABLE
-AS $$
+LANGUAGE plpgsql STABLE
+AS $_$
+BEGIN
+    RETURN QUERY
     WITH ratio AS (
         SELECT (total_vesting_shares::NUMERIC * 1000)
                / NULLIF(total_vesting_fund_hive, 0) AS r
@@ -890,13 +895,13 @@ AS $$
     balances AS (
         SELECT
             CASE
-                WHEN b.balance < 1       * r.r THEN '0–1 HP'
-                WHEN b.balance < 10      * r.r THEN '1–10 HP'
-                WHEN b.balance < 100     * r.r THEN '10–100 HP'
-                WHEN b.balance < 1000    * r.r THEN '100–1K HP'
-                WHEN b.balance < 10000   * r.r THEN '1K–10K HP'
-                WHEN b.balance < 100000  * r.r THEN '10K–100K HP'
-                WHEN b.balance < 1000000 * r.r THEN '100K–1M HP'
+                WHEN b.balance < 1       * r.r THEN '0-1 HP'
+                WHEN b.balance < 10      * r.r THEN '1-10 HP'
+                WHEN b.balance < 100     * r.r THEN '10-100 HP'
+                WHEN b.balance < 1000    * r.r THEN '100-1K HP'
+                WHEN b.balance < 10000   * r.r THEN '1K-10K HP'
+                WHEN b.balance < 100000  * r.r THEN '10K-100K HP'
+                WHEN b.balance < 1000000 * r.r THEN '100K-1M HP'
                 ELSE                               '1M+ HP'
             END   AS bucket,
             COUNT(*) AS cnt
@@ -913,16 +918,20 @@ AS $$
     FROM balances, total
     ORDER BY
         CASE bucket
-            WHEN '0–1 HP'      THEN 1
-            WHEN '1–10 HP'     THEN 2
-            WHEN '10–100 HP'   THEN 3
-            WHEN '100–1K HP'   THEN 4
-            WHEN '1K–10K HP'   THEN 5
-            WHEN '10K–100K HP' THEN 6
-            WHEN '100K–1M HP'  THEN 7
+            WHEN '0-1 HP'      THEN 1
+            WHEN '1-10 HP'     THEN 2
+            WHEN '10-100 HP'   THEN 3
+            WHEN '100-1K HP'   THEN 4
+            WHEN '1K-10K HP'   THEN 5
+            WHEN '10K-100K HP' THEN 6
+            WHEN '100K-1M HP'  THEN 7
             ELSE                    8
         END;
-$$;
+EXCEPTION WHEN undefined_table THEN
+    -- btracker_app not installed; return empty result set
+    RETURN;
+END
+$_$;
 
 -- ---------------------------------------------------------------------------
 -- Feature: new account cohort retention

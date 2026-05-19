@@ -38,7 +38,7 @@ BEGIN
             )                                          AS ops_by_type
         FROM hive.operations_view hot
         JOIN block_dates bd ON bd.block_num = hot.block_num
-        JOIN hive.operation_types ot ON ot.id = hot.op_type_id
+        JOIN hafd.operation_types ot ON ot.id = hot.op_type_id
         WHERE hot.op_type_id NOT IN (SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE)
         GROUP BY bd.day
     ),
