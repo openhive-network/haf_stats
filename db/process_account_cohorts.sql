@@ -1,3 +1,5 @@
+SET ROLE haf_stats_owner;
+
 -- Feature: new account cohort retention (get_network_account_funnel endpoint).
 --
 -- Tracks what percentage of accounts created in a given month are still active
@@ -130,3 +132,5 @@ BEGIN
         active_at_90d = EXCLUDED.active_at_90d;
 END;
 $$;
+
+RESET ROLE;

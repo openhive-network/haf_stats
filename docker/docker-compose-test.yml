@@ -3,8 +3,12 @@ version: "3.8"
 # Fast test stack — skips hived, loads a pre-synced block_log snapshot.
 # Use for CI and local development: no multi-day blockchain replay needed.
 #
-# Usage:
-#   docker compose -f docker-compose-test.yml up --abort-on-container-exit
+# Usage (from repo root):
+#   ./scripts/run_tests.sh
+#
+# Do NOT use --abort-on-container-exit — setup exits normally after install
+# and would abort the rest of the stack before Tavern runs.  The script uses
+# detached mode + "docker compose wait tavern" to avoid this.
 #
 # Note: all services connect to PostgreSQL via Unix socket (pg_socket volume)
 # to avoid pg_hba TCP access issues with the HAF image.
@@ -22,10 +26,10 @@ services:
       - ./blockchain:/home/hived/datadir/blockchain:ro   # pre-synced block_log
       - pg_socket:/var/run/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -U haf_admin -d haf_block_log"]
+      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -c 'SELECT 1' -q 2>/dev/null"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
       start_period: 5m
 
   haf-stats-setup:
