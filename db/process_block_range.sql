@@ -1,3 +1,5 @@
+SET ROLE haf_stats_owner;
+
 -- Block range dispatcher.
 -- Calls domain-specific processors in order. Add calls here as features are implemented.
 
@@ -14,3 +16,5 @@ BEGIN
     PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
 END;
 $$;
+
+RESET ROLE;

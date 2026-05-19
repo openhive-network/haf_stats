@@ -26,9 +26,11 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json:
         - status: "ok"
+          last_processed_block: !anything
+          version: !anything
 
 ---
 test_name: Account financial summary returns rows for known account
@@ -49,7 +51,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---
@@ -71,7 +73,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---
@@ -92,7 +94,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---
@@ -109,7 +111,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---
@@ -176,7 +178,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---
@@ -196,7 +198,7 @@ stages:
     response:
       status_code: 200
       headers:
-        content-type: application/json
+        content-type: "application/json; charset=utf-8"
       json: !anylist
 
 ---

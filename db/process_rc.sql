@@ -1,3 +1,5 @@
+SET ROLE haf_stats_owner;
+
 -- Feature: per-account RC footprint (get_account_rc_footprint endpoint).
 --
 -- RC costs are not stored on user operations. They appear as
@@ -17,6 +19,15 @@
 -- ---------------------------------------------------------------------------
 -- Table
 -- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.custom_json_app_registry (
+    app_id_pattern TEXT NOT NULL PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    homepage TEXT
+);
+
+GRANT SELECT ON haf_stats_backend.custom_json_app_registry TO haf_stats_user;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_operation_log (
     id BIGSERIAL PRIMARY KEY,
@@ -53,11 +64,11 @@ DECLARE
     _custom_json_op_id SMALLINT;
 BEGIN
     SELECT id INTO _rc_vop_type_id
-    FROM hive.operation_types
+    FROM hafd.operation_types
     WHERE name = 'rc_account_statuses_operation' LIMIT 1;
 
     SELECT id INTO _custom_json_op_id
-    FROM hive.operation_types
+    FROM hafd.operation_types
     WHERE name = 'custom_json_operation' LIMIT 1;
 
     INSERT INTO haf_stats_backend.rc_operation_log
@@ -114,3 +125,5 @@ BEGIN
 
 END;
 $$;
+
+RESET ROLE;
