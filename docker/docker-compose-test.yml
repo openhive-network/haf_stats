@@ -1,10 +1,14 @@
 version: "3.8"
 
-# Fast test stack — skips hived, loads a pre-synced block_log snapshot.
-# Use for CI and local development: no multi-day blockchain replay needed.
+# Test stack — starts HAF PostgreSQL (--skip-hived, no block replay) and
+# runs the full haf_stats install/process/API pipeline against an empty DB.
 #
-# Usage (from repo root):
-#   ./scripts/run_tests.sh
+# The PostgreSQL data directory is stored in the named volume "haf_pgdata"
+# so it survives container restarts.  Use --reset to wipe it for a clean run.
+#
+# Usage (from haf_stats/):
+#   ./scripts/run_tests.sh              # run tests, preserve data volume
+#   ./scripts/run_tests.sh --reset      # wipe data volume and start clean
 #
 # Do NOT use --abort-on-container-exit — setup exits normally after install
 # and would abort the rest of the stack before Tavern runs.  The script uses
@@ -14,23 +18,32 @@ version: "3.8"
 # to avoid pg_hba TCP access issues with the HAF image.
 
 services:
+  # Docker named volumes are created root:root — fix ownership to UID 1000
+  # (hived) before HAF tries to initialise the PostgreSQL data directory.
+  haf-pgdata-init:
+    image: alpine:latest
+    user: root
+    command: ["chown", "-R", "1000:1000", "/mnt"]
+    volumes:
+      - haf_pgdata:/mnt
+
   haf:
     image: ${HAF_REGISTRY}/haf:${HAF_VERSION}
-    command: >
-      /home/hived/run_hived.sh
-      --skip-hived
-      --psql-url="host=localhost dbname=haf_block_log user=haf_admin"
+    command: ["/home/hived/run_hived.sh", "--skip-hived"]
     ports:
       - "5432:5432"
     volumes:
-      - ./blockchain:/home/hived/datadir/blockchain:ro   # pre-synced block_log
+      - haf_pgdata:/home/hived/datadir/haf_db_store      # persistent PostgreSQL data
       - pg_socket:/var/run/postgresql
+    depends_on:
+      haf-pgdata-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -c 'SELECT 1' -q 2>/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 30
-      start_period: 5m
+      start_period: 10m
 
   haf-stats-setup:
     image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
@@ -86,3 +99,4 @@ services:
 
 volumes:
   pg_socket:
+  haf_pgdata:    # survives "down" — use "down -v" or --reset to wipe and re-replay
