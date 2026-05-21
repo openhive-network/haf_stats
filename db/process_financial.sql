@@ -35,6 +35,10 @@ GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Processor
+-- Each INSERT pre-aggregates with GROUP BY so that a single account can
+-- have multiple operations of the same type on the same day within one batch
+-- without hitting the "ON CONFLICT DO UPDATE cannot affect row a second time"
+-- error (which fires when two source rows target the same conflict key).
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_financial(
@@ -47,22 +51,23 @@ AS $$
 BEGIN
 
 -- Author rewards: income for the post author.
--- Amounts: hive_payout (HIVE), hbd_payout (HBD), vesting_payout (VESTS).
 INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Author Reward',
     'income',
-    COALESCE((ov.body -> 'value' -> 'hive_payout'    ->> 'amount')::BIGINT, 0),
-    COALESCE((ov.body -> 'value' -> 'hbd_payout'     ->> 'amount')::BIGINT, 0),
-    COALESCE((ov.body -> 'value' -> 'vesting_payout' ->> 'amount')::BIGINT, 0),
-    1
+    SUM(COALESCE((ov.body -> 'value' -> 'hive_payout'    ->> 'amount')::BIGINT, 0)),
+    SUM(COALESCE((ov.body -> 'value' -> 'hbd_payout'     ->> 'amount')::BIGINT, 0)),
+    SUM(COALESCE((ov.body -> 'value' -> 'vesting_payout' ->> 'amount')::BIGINT, 0)),
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'author')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'author_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai  = account_financial_daily.hive_nai  + EXCLUDED.hive_nai,
     hbd_nai   = account_financial_daily.hbd_nai   + EXCLUDED.hbd_nai,
@@ -74,17 +79,19 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Curation Reward',
     'income',
     0,
     0,
-    COALESCE((ov.body -> 'value' -> 'reward' ->> 'amount')::BIGINT, 0),
-    1
+    SUM(COALESCE((ov.body -> 'value' -> 'reward' ->> 'amount')::BIGINT, 0)),
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'curator')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'curation_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
     op_count  = account_financial_daily.op_count  + EXCLUDED.op_count;
@@ -94,17 +101,19 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'HBD Interest',
     'income',
     0,
-    COALESCE((ov.body -> 'value' -> 'interest' ->> 'amount')::BIGINT, 0),
+    SUM(COALESCE((ov.body -> 'value' -> 'interest' ->> 'amount')::BIGINT, 0)),
     0,
-    1
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'interest_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::interest_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hbd_nai  = account_financial_daily.hbd_nai + EXCLUDED.hbd_nai,
     op_count = account_financial_daily.op_count + EXCLUDED.op_count;
@@ -115,21 +124,23 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Transfer',
     'expense',
-    CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-         THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
-         ELSE 0 END,
-    CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-         THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
-         ELSE 0 END,
+    SUM(CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
+             ELSE 0 END),
+    SUM(CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
+             ELSE 0 END),
     0,
-    1
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
     hbd_nai  = account_financial_daily.hbd_nai  + EXCLUDED.hbd_nai,
@@ -140,64 +151,68 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Transfer',
     'income',
-    CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-         THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
-         ELSE 0 END,
-    CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-         THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
-         ELSE 0 END,
+    SUM(CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
+             ELSE 0 END),
+    SUM(CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)
+             ELSE 0 END),
     0,
-    1
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
     hbd_nai  = account_financial_daily.hbd_nai  + EXCLUDED.hbd_nai,
     op_count = account_financial_daily.op_count + EXCLUDED.op_count;
 
 -- Power Up (transfer_to_vesting): expense for the initiating account (HIVE spent).
--- "from" is the sender; "to" is the beneficiary (often the same account).
 INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Power Up',
     'expense',
-    COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0),
+    SUM(COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0)),
     0,
     0,
-    1
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'transfer_to_vesting_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_to_vesting_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai = account_financial_daily.hive_nai + EXCLUDED.hive_nai,
     op_count = account_financial_daily.op_count + EXCLUDED.op_count;
 
 -- Power Down (fill_vesting_withdraw): income for the withdrawing account.
--- withdrawn = VESTS consumed, deposited = HIVE received.
 INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Power Down',
     'income',
-    COALESCE((ov.body -> 'value' -> 'deposited'  ->> 'amount')::BIGINT, 0),
+    SUM(COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0)),
     0,
-    COALESCE((ov.body -> 'value' -> 'withdrawn'  ->> 'amount')::BIGINT, 0),
-    1
+    SUM(COALESCE((ov.body -> 'value' -> 'withdrawn' ->> 'amount')::BIGINT, 0)),
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from_account')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'fill_vesting_withdraw_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_vesting_withdraw_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hive_nai  = account_financial_daily.hive_nai  + EXCLUDED.hive_nai,
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
@@ -208,17 +223,19 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Witness Pay',
     'income',
     0,
     0,
-    COALESCE((ov.body -> 'value' -> 'vesting_shares' ->> 'amount')::BIGINT, 0),
-    1
+    SUM(COALESCE((ov.body -> 'value' -> 'vesting_shares' ->> 'amount')::BIGINT, 0)),
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'producer_reward_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::producer_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
     op_count  = account_financial_daily.op_count  + EXCLUDED.op_count;
@@ -228,17 +245,19 @@ INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     a.id,
-    ov.timestamp::DATE,
+    bv.created_at::DATE,
     'Proposal Pay',
     'income',
     0,
-    COALESCE((ov.body -> 'value' -> 'payment' ->> 'amount')::BIGINT, 0),
+    SUM(COALESCE((ov.body -> 'value' -> 'payment' ->> 'amount')::BIGINT, 0)),
     0,
-    1
+    COUNT(*)
 FROM hive.operations_view ov
+JOIN hive.blocks_view bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
-WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'proposal_pay_operation' LIMIT 1)
+WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::proposal_pay_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
+GROUP BY a.id, bv.created_at::DATE
 ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hbd_nai  = account_financial_daily.hbd_nai  + EXCLUDED.hbd_nai,
     op_count = account_financial_daily.op_count + EXCLUDED.op_count;
