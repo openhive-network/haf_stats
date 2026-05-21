@@ -35,10 +35,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./blockchain:/home/hived/datadir/blockchain         # block_log to replay
       - haf_pgdata:/home/hived/datadir/haf_db_store      # persistent PostgreSQL data
       - pg_socket:/var/run/postgresql
-      - ./hived_config.ini:/home/hived/datadir/config.ini:ro
     depends_on:
       haf-pgdata-init:
         condition: service_completed_successfully

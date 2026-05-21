@@ -96,7 +96,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE PROCEDURE haf_stats_app.main(
-    IN _context hafd.context_name DEFAULT 'haf_stats'
+    IN _context hafd.CONTEXT_NAME DEFAULT 'haf_stats'
 )
 LANGUAGE plpgsql
 AS $$
