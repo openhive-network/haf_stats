@@ -39,8 +39,10 @@ run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
 # 5. API endpoints
 psql_cmd -c "SET custom.swagger_url = '${SWAGGER_URL}';" -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
 
-# 6. Register HAF context (idempotent)
-psql_cmd -c "SELECT haf_stats_app.create_context_if_not_exists();"
+# 6. Register HAF context (idempotent) — must run as haf_stats_owner so that
+#    hafd.contexts.owner = haf_stats_owner, satisfying the RLS UPDATE policy in
+#    hive.app_next_block() (WITH CHECK: hive.can_impersonate(CURRENT_USER, owner)).
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
 
 # 7. Grant read access on current and future objects to haf_stats_user
 psql_cmd -c "

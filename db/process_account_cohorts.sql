@@ -78,9 +78,9 @@ BEGIN
       AND ov.op_type_id IN (
           SELECT id FROM hafd.operation_types
           WHERE name IN (
-              'account_create_operation',
-              'account_create_with_delegation_operation',
-              'create_claimed_account_operation'
+              'hive::protocol::account_create_operation',
+              'hive::protocol::account_create_with_delegation_operation',
+              'hive::protocol::create_claimed_account_operation'
           )
       )
     ON CONFLICT (account_id) DO NOTHING;

@@ -10,6 +10,6 @@ wait_for_postgres
 
 log "Starting block processing loop..."
 
-psql_cmd -c "SELECT haf_stats_app.main();"
+psql_cmd -c "CALL haf_stats_app.main('haf_stats');"
 
 log "Block processing loop exited."
