@@ -55,6 +55,12 @@ GRANT haf_stats_user TO haf_stats_owner;
 GRANT USAGE ON SCHEMA hafd TO haf_stats_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_user;
 
+-- haf_stats_owner needs USAGE+SELECT on hafd so LANGUAGE sql function bodies
+-- that reference hafd.* can be validated at creation time. plpgsql defers
+-- validation to call time; sql validates immediately and fails without access.
+GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
+GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
+
 -- ---------------------------------------------------------------------------
 -- Schemas
 -- ---------------------------------------------------------------------------
