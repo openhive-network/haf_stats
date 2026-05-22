@@ -732,7 +732,7 @@ AS $$
         JOIN hafd.accounts a ON a.id = rol.account_id
         LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
         WHERE a.name             = _account
-          AND rol.timestamp::DATE BETWEEN _from AND _to
+          AND rol."timestamp"::DATE BETWEEN _from AND _to
     ),
     totals AS (SELECT SUM(rc_cost) AS grand_total FROM base)
     SELECT
