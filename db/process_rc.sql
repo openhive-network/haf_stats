@@ -10,11 +10,12 @@ SET ROLE haf_stats_owner;
 -- (covers the common case of one op per tx on Hive).
 --
 -- rc_account_statuses_operation body shape (HF26+ / Shape B — array):
---   body -> 'value' -> 'account_statuses'  array of per-account entries, each with:
+--   body_value -> 'account_statuses'  array of per-account entries, each with:
 --     elem ->> 'account'              (account name)
 --     elem ->> 'previous_rc'          (mana before tx)
 --     elem -> 'rc' ->> 'current_mana' (mana after tx)
--- Uses hive.operations_view_extended (vs operations_view) to obtain the timestamp.
+--
+-- Uses hafd.operations + hafd.blocks directly (not hive.*_view) for performance.
 
 -- ---------------------------------------------------------------------------
 -- Table
@@ -76,37 +77,37 @@ BEGIN
     WITH rc_events AS (
         -- One rc_account_statuses_operation virtual op per tx, batching all accounts.
         -- CROSS JOIN expands the account_statuses array into one row per account.
-        -- operations_view_extended used (vs operations_view) to get the timestamp.
         SELECT
-            ov.block_num,
+            hafd.operation_id_to_block_num(ov.id)                        AS block_num,
             ov.trx_in_block,
-            ov.timestamp,
-            (elem ->> 'account')                                      AS account_name,
+            bk.created_at                                                 AS "timestamp",
+            (elem ->> 'account')                                          AS account_name,
             GREATEST(0,
                 (elem ->> 'previous_rc')::BIGINT -
                 (elem -> 'rc' ->> 'current_mana')::BIGINT
-            )                                                         AS rc_cost
-        FROM hive.operations_view_extended ov
-        CROSS JOIN jsonb_array_elements(ov.body -> 'value' -> 'account_statuses') AS elem
+            )                                                             AS rc_cost
+        FROM hafd.operations ov
+        JOIN hafd.blocks bk ON bk.num = hafd.operation_id_to_block_num(ov.id)
+        CROSS JOIN jsonb_array_elements(ov.body_value -> 'account_statuses') AS elem
         WHERE ov.op_type_id = _rc_vop_type_id
-          AND ov.block_num  BETWEEN _first_block AND _last_block
+          AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
           AND (elem ->> 'previous_rc')::BIGINT
             > (elem -> 'rc' ->> 'current_mana')::BIGINT
     ),
     user_ops AS (
         -- First non-virtual op per transaction for op-type attribution.
         -- For the common case of one op per tx this is exact.
-        SELECT DISTINCT ON (block_num, trx_in_block)
-            block_num,
+        SELECT DISTINCT ON (hafd.operation_id_to_block_num(id), trx_in_block)
+            hafd.operation_id_to_block_num(id) AS block_num,
             trx_in_block,
             op_type_id,
             CASE WHEN op_type_id = _custom_json_op_id
-                 THEN (body -> 'value' ->> 'id')
+                 THEN (body_value ->> 'id')
                  ELSE NULL END AS custom_json_id
-        FROM hive.operations_view
-        WHERE block_num BETWEEN _first_block AND _last_block
+        FROM hafd.operations
+        WHERE hafd.operation_id_to_block_num(id) BETWEEN _first_block AND _last_block
           AND op_type_id NOT IN (SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE)
-        ORDER BY block_num, trx_in_block, op_pos ASC
+        ORDER BY hafd.operation_id_to_block_num(id), trx_in_block, op_pos ASC
     )
     SELECT
         rc.block_num,

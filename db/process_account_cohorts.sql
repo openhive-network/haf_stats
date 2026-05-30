@@ -71,10 +71,10 @@ BEGIN
         a.id,
         DATE_TRUNC('month', hb.created_at)::DATE,
         hb.created_at
-    FROM hive.operations_view ov
-    JOIN hafd.blocks hb  ON hb.num  = ov.block_num
-    JOIN hafd.accounts a ON a.name  = (ov.body -> 'value' ->> 'new_account_name')
-    WHERE ov.block_num BETWEEN _first_block AND _last_block
+    FROM hafd.operations ov
+    JOIN hafd.blocks hb  ON hb.num  = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name  = (ov.body_value ->> 'new_account_name')
+    WHERE hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
       AND ov.op_type_id IN (
           SELECT id FROM hafd.operation_types
           WHERE name IN (
