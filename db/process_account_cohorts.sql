@@ -87,7 +87,10 @@ BEGIN
 
     -- Step 2: Mark activity flags for pending cohort members that have
     -- non-virtual ops in this block range, within their 90-day window.
-    -- Uses transacting_account_id (the account that signed/spent RCs).
+    -- Joins FROM account_cohort_members → hafd.account_operations using the
+    -- (account_id, op_type_id) index, avoiding a full scan of the 6B-row
+    -- hive.account_operations_view. Filters ao.transacting_account_id =
+    -- ao.account_id to count only operations the account signed itself.
     UPDATE haf_stats_backend.account_cohort_members acm
     SET
         active_7d  = acm.active_7d  OR (ra.earliest_ts <= acm.created_at + INTERVAL '7 days'),
@@ -95,19 +98,22 @@ BEGIN
         active_90d = acm.active_90d OR (ra.earliest_ts <= acm.created_at + INTERVAL '90 days')
     FROM (
         SELECT
-            aov.transacting_account_id  AS account_id,
-            MIN(hb.created_at)          AS earliest_ts
-        FROM hive.account_operations_view aov
-        JOIN hafd.blocks hb ON hb.num = aov.block_num
-        WHERE aov.block_num BETWEEN _first_block AND _last_block
-          AND aov.op_type_id NOT IN (
+            cm.account_id,
+            MIN(hb.created_at) AS earliest_ts
+        FROM haf_stats_backend.account_cohort_members cm
+        JOIN hafd.account_operations ao
+            ON ao.account_id = cm.account_id
+           AND ao.transacting_account_id = cm.account_id
+        JOIN hafd.blocks hb ON hb.num = hafd.operation_id_to_block_num(ao.operation_id)
+        WHERE NOT cm.active_90d
+          AND cm.created_at >= _block_time - INTERVAL '90 days'
+          AND hafd.operation_id_to_block_num(ao.operation_id) BETWEEN _first_block AND _last_block
+          AND ao.op_type_id NOT IN (
               SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE
           )
-        GROUP BY aov.transacting_account_id
+        GROUP BY cm.account_id
     ) ra
-    WHERE acm.account_id = ra.account_id
-      AND NOT acm.active_90d
-      AND acm.created_at >= _block_time - INTERVAL '90 days';
+    WHERE acm.account_id = ra.account_id;
 
     -- Step 3: Recompute cohort retention summary from member flags.
     -- active_at_Nd is NULL while the Nd window has not yet fully elapsed
