@@ -3,7 +3,7 @@ SET ROLE haf_stats_owner;
 /** openapi
 openapi: 3.1.0
 info:
-  title: HAF Stats — Blockchain Analytics
+  title: HAF Stats - Blockchain Analytics
   description: >-
     Blockchain statistics and analytics API for the Hive network.
     Provides per-account financial summaries, RC usage breakdowns,
@@ -27,7 +27,7 @@ servers:
  */
 
 -- ---------------------------------------------------------------------------
--- root() — serves the full OpenAPI spec at GET /
+-- root() - serves the full OpenAPI spec at GET /
 -- ---------------------------------------------------------------------------
 
 DO $__$
@@ -44,7 +44,7 @@ AS $func$
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "HAF Stats \u00e2\u20ac\u201d Blockchain Analytics",
+    "title": "HAF Stats - Blockchain Analytics",
     "description": "Blockchain statistics and analytics API for the Hive network. Provides per-account financial summaries, RC usage breakdowns, and network-wide stake distribution.",
     "license": {
       "name": "MIT License",
@@ -418,7 +418,7 @@ AS $func$
           "Network"
         ],
         "summary": "HP stake distribution",
-        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads from btracker_app \u00e2\u20ac\u201d requires cross-schema grant.",
+        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads from btracker_app - requires cross-schema grant.",
         "operationId": "haf_stats_endpoints.get_network_hp_distribution",
         "responses": {
           "200": {
@@ -433,7 +433,7 @@ AS $func$
                     "properties": {
                       "bucket": {
                         "type": "string",
-                        "example": "1\u00e2\u20ac\u201c10 HP"
+                        "example": "1-10 HP"
                       },
                       "account_count": {
                         "type": "integer"
@@ -854,7 +854,7 @@ $$;
     summary: HP stake distribution
     description: >-
       Bucketed distribution of Hive Power (HP) stake across all accounts.
-      Reads from btracker_app — requires cross-schema grant.
+      Reads from btracker_app - requires cross-schema grant.
     operationId: haf_stats_endpoints.get_network_hp_distribution
     responses:
       '200':
@@ -869,7 +869,7 @@ $$;
                 properties:
                   bucket:
                     type: string
-                    example: "1–10 HP"
+                    example: "1-10 HP"
                   account_count:
                     type: integer
                   pct_accounts:
@@ -944,7 +944,7 @@ $_$;
       - Network
     summary: New account cohort retention
     description: >-
-      Cohort retention for new accounts — percentage still active at 7, 30,
+      Cohort retention for new accounts - percentage still active at 7, 30,
       and 90 days after creation, grouped by month of account creation.
       active_at_Nd is null for cohorts whose Nd window has not yet elapsed.
     operationId: haf_stats_endpoints.get_network_account_funnel
