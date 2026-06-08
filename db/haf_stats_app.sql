@@ -23,8 +23,15 @@ CREATE TABLE IF NOT EXISTS haf_stats_app.app_status (
     last_processed_block INT NOT NULL DEFAULT 0
 );
 
-INSERT INTO haf_stats_app.app_status VALUES (TRUE, 0)
-ON CONFLICT DO NOTHING;
+-- Seed exactly one row, and only when empty: app_status has no unique constraint,
+-- so a plain INSERT (the ON CONFLICT DO NOTHING never fires without one) would add
+-- a duplicate (TRUE, 0) on every re-install — and get_health reads LIMIT 1 with no
+-- ORDER BY, so it could then report last_processed_block = 0.
+INSERT INTO haf_stats_app.app_status (continue_processing, last_processed_block)
+SELECT
+    TRUE AS continue_processing,
+    0 AS last_processed_block
+WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.app_status);
 
 CREATE TABLE IF NOT EXISTS haf_stats_app.app_version (
     git_hash TEXT NOT NULL

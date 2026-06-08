@@ -63,7 +63,7 @@ SELECT
     SUM(COALESCE((ov.body -> 'value' -> 'vesting_payout' ->> 'amount')::BIGINT, 0)),
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'author')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -87,7 +87,7 @@ SELECT
     SUM(COALESCE((ov.body -> 'value' -> 'reward' ->> 'amount')::BIGINT, 0)),
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'curator')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -109,7 +109,7 @@ SELECT
     0,
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::interest_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -136,7 +136,7 @@ SELECT
     0,
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -163,7 +163,7 @@ SELECT
     0,
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -186,7 +186,7 @@ SELECT
     0,
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_to_vesting_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -208,7 +208,7 @@ SELECT
     SUM(COALESCE((ov.body -> 'value' -> 'withdrawn' ->> 'amount')::BIGINT, 0)),
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from_account')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_vesting_withdraw_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -231,7 +231,7 @@ SELECT
     SUM(COALESCE((ov.body -> 'value' -> 'vesting_shares' ->> 'amount')::BIGINT, 0)),
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::producer_reward_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block
@@ -253,7 +253,7 @@ SELECT
     0,
     COUNT(*)
 FROM hive.operations_view ov
-JOIN hive.blocks_view bv ON bv.num = ov.block_num
+JOIN hafd.blocks bv ON bv.num = ov.block_num
 JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
 WHERE ov.op_type_id = (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::proposal_pay_operation' LIMIT 1)
   AND ov.block_num BETWEEN _first_block AND _last_block

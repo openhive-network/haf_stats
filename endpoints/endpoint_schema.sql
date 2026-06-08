@@ -30,17 +30,16 @@ servers:
 -- root() - serves the full OpenAPI spec at GET /
 -- ---------------------------------------------------------------------------
 
-DO $__$
-DECLARE
-    swagger_url TEXT;
-BEGIN
-    swagger_url := COALESCE(current_setting('custom.swagger_url', TRUE), 'localhost');
-
-    EXECUTE $exec$
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
-LANGUAGE sql STABLE
+LANGUAGE plpgsql STABLE
 AS $func$
-    SELECT $api_json$
+DECLARE
+    -- The OpenAPI spec below is generated from the /** openapi ... */ annotations
+    -- in this file by scripts/openapi_rewrite.sh (it fills the block after the
+    -- "-- openapi-spec" marker). Edit the annotations, not the generated JSON.
+-- openapi-spec
+-- openapi-generated-code-begin
+  openapi json = $$
 {
   "openapi": "3.1.0",
   "info": {
@@ -418,7 +417,7 @@ AS $func$
           "Network"
         ],
         "summary": "HP stake distribution",
-        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads from btracker_app - requires cross-schema grant.",
+        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads current VESTS balances from balance_tracker; its schema is deployment-dependent so the function auto-detects the first readable relation (btracker_app / btracker_backend / hafbe_bal) - grant SELECT to haf_stats_user on whichever applies. Returns an empty array (HTTP 200, not an error) when the data source is unavailable - no readable balance relation, or hafd.blocks has no rows yet (fresh node, no VESTS/HP ratio). Consumers should treat an empty array as \"distribution not available yet\", not \"zero accounts\". (#20.5)",
         "operationId": "haf_stats_endpoints.get_network_hp_distribution",
         "responses": {
           "200": {
@@ -450,14 +449,96 @@ AS $func$
           }
         }
       }
+    },
+    "/network/account-funnel": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "New account cohort retention",
+        "description": "Cohort retention for new accounts - percentage still active at 7, 30, and 90 days after creation, grouped by month of account creation. active_at_Nd is null for cohorts whose Nd window has not yet elapsed.",
+        "operationId": "haf_stats_endpoints.get_network_account_funnel",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start cohort month (inclusive), defaults to 1 year ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End cohort month (inclusive), defaults to today"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cohort retention rows ordered by month",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "cohort_month": {
+                        "type": "string",
+                        "example": "2026-01"
+                      },
+                      "new_accounts": {
+                        "type": "integer"
+                      },
+                      "active_at_7d": {
+                        "type": "integer"
+                      },
+                      "pct_7d": {
+                        "type": "number"
+                      },
+                      "active_at_30d": {
+                        "type": "integer"
+                      },
+                      "pct_30d": {
+                        "type": "number"
+                      },
+                      "active_at_90d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "pct_90d": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
-$api_json$::json;
-$func$;
-$exec$;
+$$;
+-- openapi-generated-code-end
+BEGIN
+    RETURN openapi;
 END
-$__$;
+$func$;
 
 -- ---------------------------------------------------------------------------
 -- Health / version
@@ -482,7 +563,7 @@ $__$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_version;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_version()
-RETURNS TEXT 
+RETURNS TEXT
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
@@ -517,7 +598,7 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_health()
-RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT) 
+RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
@@ -617,9 +698,11 @@ RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_n
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
-    IF "_granularity" NOT IN ('day', 'week', 'month') THEN
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
+    -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
+    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || "_granularity",
+            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
     RETURN QUERY
@@ -717,10 +800,17 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
     "_to" DATE = NOW()::DATE,
     "_group_by" TEXT = 'op_type'
 )
-RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC) 
+RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)
 -- openapi-generated-code-end
-LANGUAGE sql STABLE
+LANGUAGE plpgsql STABLE
 AS $$
+BEGIN
+    IF _group_by IS NULL OR _group_by NOT IN ('op_type', 'app') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _group_by: ' || COALESCE(_group_by, '(null)'),
+            HINT = 'Must be one of: op_type, app';
+    END IF;
+    RETURN QUERY
     WITH base AS (
         SELECT
             CASE _group_by
@@ -734,15 +824,16 @@ AS $$
         WHERE a.name             = _account
           AND rol."timestamp"::DATE BETWEEN _from AND _to
     ),
-    totals AS (SELECT SUM(rc_cost) AS grand_total FROM base)
+    totals AS (SELECT SUM(base.rc_cost) AS grand_total FROM base)
     SELECT
-        label,
-        SUM(rc_cost)::BIGINT                                          AS rc_consumed,
-        COUNT(*)::BIGINT                                              AS op_count,
-        ROUND(SUM(rc_cost) * 100.0 / NULLIF(t.grand_total, 0), 2)   AS pct
+        base.label,
+        SUM(base.rc_cost)::BIGINT                                       AS rc_consumed,
+        COUNT(*)::BIGINT                                                AS op_count,
+        ROUND(SUM(base.rc_cost) * 100.0 / NULLIF(t.grand_total, 0), 2)  AS pct
     FROM base, totals t
-    GROUP BY label, t.grand_total
-    ORDER BY rc_consumed DESC;
+    GROUP BY base.label, t.grand_total
+    ORDER BY 2 DESC;
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -816,10 +907,20 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
     "_to" DATE = NOW()::DATE,
     "_granularity" TEXT = 'day'
 )
-RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB) 
+RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
 -- openapi-generated-code-end
-LANGUAGE sql STABLE
+LANGUAGE plpgsql STABLE
 AS $$
+BEGIN
+    -- Validate granularity before it reaches DATE_TRUNC below: an unsupported
+    -- unit there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the
+    -- guard in get_account_financial_summary.
+    IF _granularity IS NULL OR _granularity NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE(_granularity, '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+    RETURN QUERY
     WITH per_label AS (
         SELECT
             DATE_TRUNC(_granularity, rol."timestamp")            AS period,
@@ -831,12 +932,13 @@ AS $$
         GROUP BY 1, 2
     )
     SELECT
-        TO_CHAR(period, 'YYYY-MM-DD')           AS period,
-        SUM(rc_label_total)::BIGINT             AS rc_total,
-        jsonb_object_agg(label, rc_label_total) AS by_label
+        TO_CHAR(per_label.period, 'YYYY-MM-DD')                     AS period,
+        SUM(per_label.rc_label_total)::BIGINT                       AS rc_total,
+        jsonb_object_agg(per_label.label, per_label.rc_label_total) AS by_label
     FROM per_label
-    GROUP BY period
+    GROUP BY per_label.period
     ORDER BY 1;
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -854,7 +956,14 @@ $$;
     summary: HP stake distribution
     description: >-
       Bucketed distribution of Hive Power (HP) stake across all accounts.
-      Reads from btracker_app - requires cross-schema grant.
+      Reads current VESTS balances from balance_tracker; its schema is
+      deployment-dependent so the function auto-detects the first readable
+      relation (btracker_app / btracker_backend / hafbe_bal) - grant SELECT to
+      haf_stats_user on whichever applies.
+      Returns an empty array (HTTP 200, not an error) when the data source is
+      unavailable - no readable balance relation, or hafd.blocks has no
+      rows yet (fresh node, no VESTS/HP ratio). Consumers should treat an empty
+      array as "distribution not available yet", not "zero accounts". (#20.5)
     operationId: haf_stats_endpoints.get_network_hp_distribution
     responses:
       '200':
@@ -879,57 +988,85 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_hp_distribution;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
-RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC) 
+RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $_$
+DECLARE
+    -- balance_tracker installs under different schemas depending on deployment:
+    -- standalone (btracker_app) vs. installed via the block explorer, which
+    -- exposes current balances as a btracker_backend view and/or the hafbe_bal
+    -- base table. Resolve the first current-balances relation this role can read.
+    -- information_schema.tables only lists relations we have privileges on, so the
+    -- pick is guaranteed to both exist and be readable; if none is found the
+    -- endpoint returns [] (documented contract), same as a fresh node.
+    _balance_rel TEXT;
 BEGIN
-    RETURN QUERY
-    WITH ratio AS (
-        SELECT (total_vesting_shares::NUMERIC * 1000)
-               / NULLIF(total_vesting_fund_hive, 0) AS r
-        FROM hafd.blocks
-        ORDER BY num DESC
-        LIMIT 1
-    ),
-    balances AS (
+    SELECT format('%I.%I', t.table_schema, t.table_name)
+      INTO _balance_rel
+      FROM (VALUES
+                ('btracker_app',     'current_account_balances',      1),
+                ('btracker_backend', 'current_account_balances_view',  2),
+                ('hafbe_bal',        'current_account_balances',      3)
+            ) AS cand (sch, rel, prio)
+      JOIN information_schema.tables t
+        ON t.table_schema = cand.sch AND t.table_name = cand.rel
+     ORDER BY cand.prio
+     LIMIT 1;
+
+    IF _balance_rel IS NULL THEN
+        RETURN;  -- no readable balance relation on this deployment
+    END IF;
+
+    -- #20.5: if hafd.blocks is empty (fresh node) the ratio CTE yields no row and
+    -- the result is [] (HTTP 200) rather than an error - intentional graceful
+    -- degradation; the empty-array contract is documented in the OpenAPI spec.
+    -- _balance_rel is built from format('%I.%I', ...) over a fixed allowlist, so
+    -- interpolating it (%s) into the dynamic query is injection-safe.
+    RETURN QUERY EXECUTE format($q$
+        WITH ratio AS (
+            SELECT (total_vesting_shares::NUMERIC * 1000)
+                   / NULLIF(total_vesting_fund_hive, 0) AS r
+            FROM hafd.blocks
+            ORDER BY num DESC
+            LIMIT 1
+        ),
+        balances AS (
+            SELECT
+                CASE
+                    WHEN b.balance < 1       * r.r THEN '0-1 HP'
+                    WHEN b.balance < 10      * r.r THEN '1-10 HP'
+                    WHEN b.balance < 100     * r.r THEN '10-100 HP'
+                    WHEN b.balance < 1000    * r.r THEN '100-1K HP'
+                    WHEN b.balance < 10000   * r.r THEN '1K-10K HP'
+                    WHEN b.balance < 100000  * r.r THEN '10K-100K HP'
+                    WHEN b.balance < 1000000 * r.r THEN '100K-1M HP'
+                    ELSE                               '1M+ HP'
+                END   AS bucket,
+                COUNT(*) AS cnt
+            FROM %s b, ratio r
+            WHERE b.nai = 37   -- VESTS (btracker nai smallint code: 13=HBD, 21=HIVE, 37=VESTS)
+              AND b.balance > 0
+            GROUP BY 1
+        ),
+        total AS (SELECT SUM(cnt) AS n FROM balances)
         SELECT
-            CASE
-                WHEN b.balance < 1       * r.r THEN '0-1 HP'
-                WHEN b.balance < 10      * r.r THEN '1-10 HP'
-                WHEN b.balance < 100     * r.r THEN '10-100 HP'
-                WHEN b.balance < 1000    * r.r THEN '100-1K HP'
-                WHEN b.balance < 10000   * r.r THEN '1K-10K HP'
-                WHEN b.balance < 100000  * r.r THEN '10K-100K HP'
-                WHEN b.balance < 1000000 * r.r THEN '100K-1M HP'
-                ELSE                               '1M+ HP'
-            END   AS bucket,
-            COUNT(*) AS cnt
-        FROM btracker_app.current_account_balances b, ratio r
-        WHERE b.nai = '@@000000037'
-          AND b.balance > 0
-        GROUP BY 1
-    ),
-    total AS (SELECT SUM(cnt) AS n FROM balances)
-    SELECT
-        bucket,
-        cnt::BIGINT                              AS account_count,
-        ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts
-    FROM balances, total
-    ORDER BY
-        CASE bucket
-            WHEN '0-1 HP'      THEN 1
-            WHEN '1-10 HP'     THEN 2
-            WHEN '10-100 HP'   THEN 3
-            WHEN '100-1K HP'   THEN 4
-            WHEN '1K-10K HP'   THEN 5
-            WHEN '10K-100K HP' THEN 6
-            WHEN '100K-1M HP'  THEN 7
-            ELSE                    8
-        END;
-EXCEPTION WHEN undefined_table THEN
-    -- btracker_app not installed; return empty result set
-    RETURN;
+            balances.bucket,
+            cnt::BIGINT                              AS account_count,
+            ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts
+        FROM balances, total
+        ORDER BY
+            CASE balances.bucket
+                WHEN '0-1 HP'      THEN 1
+                WHEN '1-10 HP'     THEN 2
+                WHEN '10-100 HP'   THEN 3
+                WHEN '100-1K HP'   THEN 4
+                WHEN '1K-10K HP'   THEN 5
+                WHEN '10K-100K HP' THEN 6
+                WHEN '100K-1M HP'  THEN 7
+                ELSE                    8
+            END
+    $q$, _balance_rel);
 END
 $_$;
 
@@ -1002,10 +1139,9 @@ $_$;
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_account_funnel;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_account_funnel(
     "_from" DATE = (NOW() - INTERVAL '1 year')::DATE,
-    "_to"   DATE = NOW()::DATE
+    "_to" DATE = NOW()::DATE
 )
-RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC,
-              active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
+RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$

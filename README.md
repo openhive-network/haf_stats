@@ -61,7 +61,7 @@ db/
   haf_stats_app.sql         Schemas, control tables, HAF context, main() loop
   process_block_range.sql   Block range dispatcher (calls all processors in order)
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
-  process_rc.sql            ✓ RC cost attribution from rc_account_statuses virtual ops
+  process_rc.sql            ⚠ RC cost attribution — BLOCKED: rc_account_statuses ops are not captured by HAF (see docs/VERIFICATION.md)
   process_delegations.sql   HP delegation current state (graph traversal only; per-account list → balance-api)
   process_governance.sql    Proxy chain current state only (witness + DHF proposal data → hafbe-api)
   process_network_stats.sql Supply snapshots from hafd.blocks (DAU/tx stats → hafbe-api)
@@ -109,8 +109,8 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_version` | ✅ Live | — | App git hash |
 | `GET /rpc/get_health` | ✅ Live | — | Last processed block + version |
 | `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account income/expense by category, granularity |
-| `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Per-account RC usage grouped by op type or DApp |
-| `GET /rpc/get_network_rc_utilization` | ✅ Live | *(uses rc_operation_log)* | Network-wide RC consumption by DApp category |
+| `GET /rpc/get_account_rc_footprint` | ⚠️ Blocked | process_rc.sql | Returns `[]` — RC consumption ops are not in HAF's op stream (see Known TODOs #2 / `docs/VERIFICATION.md`) |
+| `GET /rpc/get_network_rc_utilization` | ⚠️ Blocked | *(uses rc_operation_log)* | Returns `[]` — same RC ingest blocker as above |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
@@ -129,6 +129,21 @@ VALUES ('my_app_', 'My App', 'Gaming');
 Submit additions via MR to `db/seed_data.sql`.
 
 ## Known TODOs
+
+> **Verification status** (details in [`docs/VERIFICATION.md`](docs/VERIFICATION.md)):
+> - **#1 supply columns** — RESOLVED: `total_vesting_shares`, `total_vesting_fund_hive`,
+>   `total_reward_fund_hive`, `virtual_supply`, `current_supply`, `current_hbd_supply`
+>   all exist on `hafd.blocks` on a live node.
+> - **#2 rc_account_statuses body** — **BLOCKED, not just unverified:** that op type is
+>   absent from HAF's catalog on 2016, mainnet, and the live deployment. RC consumption
+>   lives in the `hive::plugins::rc` namespace, which `sql_serializer` does not capture,
+>   so the RC footprint endpoints return `[]` on any standard HAF node.
+> - **#3 app_next_iteration** — RESOLVED: the develop `main()` already matches the live
+>   signature `(IN _context, OUT _blocks_range hive.blocks_range, IN max_batch, IN limit)`.
+> - **#4 is_virtual** — moot: the code filters via `hafd.operation_types.is_virtual`
+>   (which exists), not `hive.operations_view`.
+>
+> The original pre-verification text is kept below for history.
 
 ### 1. Verify `hafd.blocks` supply column names
 

@@ -79,15 +79,45 @@ docker-build:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-# Full integration tests require a pre-synced HAF block_log artifact.
-# Uncomment and configure once a suitable snapshot is available in CI.
+# Full integration tests against a real HAF node (install + process + PostgREST +
+# Tavern via docker-compose-test.yml). KEPT COMMENTED so the pipeline matches
+# develop and stays green.
+#
+# Why it can't be enabled yet: the job replays from a pre-synced block_log at
+# docker/blockchain/, which CI runners do not have (docker/blockchain is
+# gitignored / local-only). balance_tracker solves this by including the
+# common-ci-configuration HAF data-prep templates, which provide a block_log at
+# /blockchain/block_log_5m and a shared NFS replay cache on the Hive CI runners.
+#
+# FOLLOW-UP (separate MR): wire haf_stats into those templates
+#   include:
+#     - project: 'hive/common-ci-configuration'
+#       file: ['/templates/base.gitlab-ci.yml',
+#              '/templates/haf_data_preparation.gitlab-ci.yml',
+#              '/templates/haf_app_testing.gitlab-ci.yml']
+# then replace the job body below with a prepare_haf_data-based job.
+#
+# The job body below is verified to work LOCALLY (build this commit's image +
+# bounded replay); enable it once the block_log is available in CI.
 #
 # integration-tests:
 #   stage: test
+#   image: docker:24
 #   services:
-#     - docker:dind
+#     - docker:24-dind
+#   variables:
+#     DOCKER_TLS_CERTDIR: "/certs"
+#     HAF_STATS_VERSION: "$CI_COMMIT_SHORT_SHA"   # build/test this commit's image
+#     REPLAY_STOP_AT_BLOCK: "100000"              # bounded replay keeps it fast
+#   before_script:
+#     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
 #   script:
+#     - export HAF_STATS_REGISTRY="${CI_REGISTRY_IMAGE%/*}"
+#     - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}" .
 #     - chmod +x scripts/run_tests.sh
-#     - ./scripts/run_tests.sh
+#     - ./scripts/run_tests.sh --reset
+#   after_script:
+#     - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-setup
+#     - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs tavern
 #   rules:
 #     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

@@ -1,7 +1,12 @@
 version: "3.8"
 
-# Test stack — starts HAF PostgreSQL (--skip-hived, no block replay) and
-# runs the full haf_stats install/process/API pipeline against an empty DB.
+# Test stack — replays a bounded range from the pre-synced block_log in
+# docker/blockchain (REPLAY_STOP_AT_BLOCK, default 100000) so hafd has real HAF
+# state, then runs the full haf_stats install/process/API pipeline and Tavern.
+#
+# Requires a pre-synced HAF block_log snapshot at docker/blockchain/.
+# An empty (--skip-hived) DB cannot host a HAF app context: app_create_context()
+# fails the fk_hive_app_context FK because hafd.events_queue is empty.
 #
 # The PostgreSQL data directory is stored in the named volume "haf_pgdata"
 # so it survives container restarts.  Use --reset to wipe it for a clean run.
@@ -9,6 +14,7 @@ version: "3.8"
 # Usage (from haf_stats/):
 #   ./scripts/run_tests.sh              # run tests, preserve data volume
 #   ./scripts/run_tests.sh --reset      # wipe data volume and start clean
+#   REPLAY_STOP_AT_BLOCK=10000 ./scripts/run_tests.sh --reset   # smaller/faster replay
 #
 # Do NOT use --abort-on-container-exit — setup exits normally after install
 # and would abort the rest of the stack before Tavern runs.  The script uses
@@ -29,23 +35,31 @@ services:
 
   haf:
     image: ${HAF_REGISTRY}/haf:${HAF_VERSION}
-    command: ["/home/hived/run_hived.sh", "--skip-hived"]
+    # Replay a bounded range from the pre-synced block_log so hafd has real HAF
+    # state (events_queue, fork, blocks). The old "--skip-hived" against an empty
+    # DB leaves events_queue empty, so hive.app_create_context() fails the
+    # fk_hive_app_context (events_id -> hafd.events_queue) FK during install.
+    # Override the stop block with REPLAY_STOP_AT_BLOCK (default 100000).
+    command: ["--replay", "--stop-at-block=${REPLAY_STOP_AT_BLOCK:-100000}"]
     environment:
       PGCTLTIMEOUT: 900
     ports:
       - "5432:5432"
     volumes:
       - haf_pgdata:/home/hived/datadir/haf_db_store      # persistent PostgreSQL data
+      - ./blockchain:/home/hived/datadir/blockchain       # pre-synced block_log (hived writes haf_wal/rocksdb here)
       - pg_socket:/var/run/postgresql
     depends_on:
       haf-pgdata-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -c 'SELECT 1' -q 2>/dev/null"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 10m
+      # Healthy only once replay has populated blocks, guaranteeing HAF state
+      # (events_queue/fork) exists before the app install (setup) runs.
+      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -tAc 'SELECT COALESCE(MAX(num),0) >= ${REPLAY_STOP_AT_BLOCK:-100000} FROM hafd.blocks' 2>/dev/null | grep -q t"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 30m
 
   haf-stats-setup:
     image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
@@ -76,7 +90,10 @@ services:
   haf-stats-api:
     image: postgrest/postgrest:${POSTGREST_VERSION}
     ports:
-      - "3001:3000"
+      # Tavern reaches the API over the compose network (haf-stats-api:3000);
+      # this host mapping is only for manual access. Override TEST_API_PORT to
+      # avoid clashes with other local services on 3001.
+      - "${TEST_API_PORT:-3001}:3000"
     environment:
       PGRST_DB_URI:       "postgres:///haf_block_log?user=haf_stats_user&host=/var/run/postgresql"
       PGRST_DB_SCHEMA:    "haf_stats_endpoints"
