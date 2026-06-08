@@ -110,20 +110,31 @@ BEGIN
       AND acm.created_at >= _block_time - INTERVAL '90 days';
 
     -- Step 3: Recompute cohort retention summary from member flags.
-    -- active_at_Nd is NULL while the Nd window has not yet fully elapsed
-    -- for the cohort (some members may still become active).
+    --
+    -- #20.4: a cohort's N-day window does not fully elapse until one month after
+    -- the cohort month begins (an account created on the last day of the month
+    -- still needs N more days). So reveal active_at_Nd only once
+    -- cohort_month + 1 month + N days <= _block_time; until then it stays NULL.
+    -- This avoids disclosing understated retention for the most recent cohort.
+    --
+    -- #20.3: only recompute cohorts whose flags can still change. Step 2 stops
+    -- updating members older than 90 days, so any cohort whose accounts are all
+    -- >90 days old is final. Restrict the aggregate to recent cohorts instead of
+    -- scanning the whole (ever-growing) table on every call. The extra month of
+    -- slack keeps a cohort in scope until its 90-day disclosure has been written.
     INSERT INTO haf_stats_backend.account_cohort_retention
         (cohort_month, new_accounts, active_at_7d, active_at_30d, active_at_90d)
     SELECT
         cohort_month,
         COUNT(*)                                                                AS new_accounts,
-        CASE WHEN cohort_month + INTERVAL '7 days'  <= _block_time
+        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '7 days'  <= _block_time
              THEN COUNT(*) FILTER (WHERE active_7d)  ELSE NULL END             AS active_at_7d,
-        CASE WHEN cohort_month + INTERVAL '30 days' <= _block_time
+        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '30 days' <= _block_time
              THEN COUNT(*) FILTER (WHERE active_30d) ELSE NULL END             AS active_at_30d,
-        CASE WHEN cohort_month + INTERVAL '90 days' <= _block_time
+        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '90 days' <= _block_time
              THEN COUNT(*) FILTER (WHERE active_90d) ELSE NULL END             AS active_at_90d
     FROM haf_stats_backend.account_cohort_members
+    WHERE cohort_month >= DATE_TRUNC('month', _block_time - INTERVAL '90 days') - INTERVAL '1 month'
     GROUP BY cohort_month
     ON CONFLICT (cohort_month) DO UPDATE SET
         new_accounts  = EXCLUDED.new_accounts,

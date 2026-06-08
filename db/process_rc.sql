@@ -67,9 +67,13 @@ BEGIN
     FROM hafd.operation_types
     WHERE name = 'rc_account_statuses_operation' LIMIT 1;
 
+    -- Operation-type names in hafd.operation_types are fully qualified with the
+    -- 'hive::protocol::' prefix (e.g. 'hive::protocol::custom_json_operation'),
+    -- matching the lookups in process_financial.sql. Without the prefix this
+    -- returns NULL and custom_json DApp attribution is silently lost.
     SELECT id INTO _custom_json_op_id
     FROM hafd.operation_types
-    WHERE name = 'custom_json_operation' LIMIT 1;
+    WHERE name = 'hive::protocol::custom_json_operation' LIMIT 1;
 
     INSERT INTO haf_stats_backend.rc_operation_log
         (block_num, account_id, op_type_id, custom_json_id, rc_cost, "timestamp")
@@ -89,7 +93,7 @@ BEGIN
         FROM hive.operations_view_extended ov
         CROSS JOIN jsonb_array_elements(ov.body -> 'value' -> 'account_statuses') AS elem
         WHERE ov.op_type_id = _rc_vop_type_id
-          AND ov.block_num  BETWEEN _first_block AND _last_block
+          AND ov.block_num BETWEEN _first_block AND _last_block
           AND (elem ->> 'previous_rc')::BIGINT
             > (elem -> 'rc' ->> 'current_mana')::BIGINT
     ),
