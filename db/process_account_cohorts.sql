@@ -88,6 +88,16 @@ BEGIN
     -- Step 2: Mark activity flags for pending cohort members that have
     -- non-virtual ops in this block range, within their 90-day window.
     -- Uses transacting_account_id (the account that signed/spent RCs).
+    --
+    -- Perf (#21): drive from the small set of recent pending members (accounts
+    -- still in their 90-day window that aren't active yet) and probe their
+    -- operations via the account_id index, instead of scanning
+    -- account_operations by block_num. account_operations is indexed on
+    -- (account_id, ...), NOT block_num, so the previous block_num-range scan was
+    -- a full seq scan of the entire table on every batch — catastrophic under
+    -- MASSIVE_PROCESSING. The signer is also listed as an impacted account, so
+    -- requiring aov.account_id = aov.transacting_account_id = the member keeps the
+    -- original "ops they signed" semantics.
     UPDATE haf_stats_backend.account_cohort_members acm
     SET
         active_7d  = acm.active_7d  OR (ra.earliest_ts <= acm.created_at + INTERVAL '7 days'),
@@ -95,19 +105,25 @@ BEGIN
         active_90d = acm.active_90d OR (ra.earliest_ts <= acm.created_at + INTERVAL '90 days')
     FROM (
         SELECT
-            aov.transacting_account_id  AS account_id,
-            MIN(hb.created_at)          AS earliest_ts
-        FROM hive.account_operations_view aov
+            p.account_id,
+            MIN(hb.created_at) AS earliest_ts
+        FROM (
+            SELECT account_id
+            FROM haf_stats_backend.account_cohort_members
+            WHERE NOT active_90d
+              AND created_at >= _block_time - INTERVAL '90 days'
+        ) p
+        JOIN hive.account_operations_view aov
+              ON aov.account_id = p.account_id
+             AND aov.transacting_account_id = p.account_id
+             AND aov.block_num BETWEEN _first_block AND _last_block
         JOIN hafd.blocks hb ON hb.num = aov.block_num
-        WHERE aov.block_num BETWEEN _first_block AND _last_block
-          AND aov.op_type_id NOT IN (
-              SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE
-          )
-        GROUP BY aov.transacting_account_id
+        WHERE aov.op_type_id NOT IN (
+                  SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE
+              )
+        GROUP BY p.account_id
     ) ra
-    WHERE acm.account_id = ra.account_id
-      AND NOT acm.active_90d
-      AND acm.created_at >= _block_time - INTERVAL '90 days';
+    WHERE acm.account_id = ra.account_id;
 
     -- Step 3: Recompute cohort retention summary from member flags.
     --
@@ -122,6 +138,14 @@ BEGIN
     -- >90 days old is final. Restrict the aggregate to recent cohorts instead of
     -- scanning the whole (ever-growing) table on every call. The extra month of
     -- slack keeps a cohort in scope until its 90-day disclosure has been written.
+    --
+    -- Perf (#21): the summary recompute is by far the dominant per-block cost,
+    -- yet retention is a coarse metric with day-granular disclosure windows.
+    -- Recompute only when the block range crosses a ~1200-block (~1 hour)
+    -- boundary, rather than on every single block range — cutting this from the
+    -- per-block hot path to roughly hourly. Multi-block (catch-up / massive)
+    -- ranges that span a boundary still refresh it.
+    IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     INSERT INTO haf_stats_backend.account_cohort_retention
         (cohort_month, new_accounts, active_at_7d, active_at_30d, active_at_90d)
     SELECT
@@ -141,6 +165,7 @@ BEGIN
         active_at_7d  = EXCLUDED.active_at_7d,
         active_at_30d = EXCLUDED.active_at_30d,
         active_at_90d = EXCLUDED.active_at_90d;
+    END IF;
 END;
 $$;
 
