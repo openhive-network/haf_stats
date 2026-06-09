@@ -13,3 +13,6 @@ scripts/process_openapi.py
 # Test output
 tests/tavern/.pytest_cache/
 *.log
+
+# Fetched on demand by scripts/openapi_rewrite.sh (not vendored)
+scripts/process_openapi.py

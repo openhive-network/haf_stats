@@ -55,6 +55,45 @@ stages:
       json: !anylist
 
 ---
+test_name: Account content stats returns rows for known account
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_content_stats for hiveio
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        _account: "hiveio"
+        _from:    "2026-01-01"
+        _to:      "2026-05-01"
+        _granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Account content stats rejects invalid granularity
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_account_content_stats with bad _granularity
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        _account:     "hiveio"
+        _granularity: "invalid"
+    response:
+      status_code: 400
+
+---
 test_name: Account RC footprint returns rows for known account
 
 includes:
