@@ -730,6 +730,101 @@ DECLARE
           }
         }
       }
+    },
+    "/network/vote-stats": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Network voting activity",
+        "description": "Network-wide voting activity over time - total votes, upvotes, downvotes, unvotes (weight 0), self-votes (voter = author), unique voters, and the downvote percentage per period. unique_voters is exact at the requested granularity (a voter active on several days counts once per period). downvote_pct is downvotes / (upvotes + downvotes) * 100, null when a period has no up- or down-votes.",
+        "operationId": "haf_stats_endpoints.get_network_vote_stats",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation period"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vote activity rows ordered by period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "example": "2026-04-01"
+                      },
+                      "total_votes": {
+                        "type": "integer"
+                      },
+                      "upvotes": {
+                        "type": "integer"
+                      },
+                      "downvotes": {
+                        "type": "integer"
+                      },
+                      "unvotes": {
+                        "type": "integer"
+                      },
+                      "self_votes": {
+                        "type": "integer"
+                      },
+                      "unique_voters": {
+                        "type": "integer"
+                      },
+                      "downvote_pct": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -1697,6 +1792,142 @@ BEGIN
         COALESCE(o.operations, 0)::BIGINT
     FROM accounts a
     LEFT JOIN ops o ON o.period = a.period
+    ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide voting activity
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/vote-stats:
+  get:
+    tags:
+      - Network
+    summary: Network voting activity
+    description: >-
+      Network-wide voting activity over time - total votes, upvotes, downvotes,
+      unvotes (weight 0), self-votes (voter = author), unique voters, and the
+      downvote percentage per period. unique_voters is exact at the requested
+      granularity (a voter active on several days counts once per period).
+      downvote_pct is downvotes / (upvotes + downvotes) * 100, null when a period
+      has no up- or down-votes.
+    operationId: haf_stats_endpoints.get_network_vote_stats
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum:
+            - day
+            - week
+            - month
+        description: Aggregation period
+    responses:
+      '200':
+        description: Vote activity rows ordered by period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "2026-04-01"
+                  total_votes:
+                    type: integer
+                  upvotes:
+                    type: integer
+                  downvotes:
+                    type: integer
+                  unvotes:
+                    type: integer
+                  self_votes:
+                    type: integer
+                  unique_voters:
+                    type: integer
+                  downvote_pct:
+                    type: number
+                    nullable: true
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_vote_stats;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_vote_stats(
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'day'
+)
+RETURNS TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
+    -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
+    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    RETURN QUERY
+    -- Counters and unique voters live in separate tables (unique_voters is not
+    -- additive across batches, so it is counted from the (day, voter) presence set
+    -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
+    WITH counts AS (
+        SELECT
+            DATE_TRUNC("_granularity", nvd.day) AS period,
+            SUM(nvd.upvotes)    AS upvotes,
+            SUM(nvd.downvotes)  AS downvotes,
+            SUM(nvd.unvotes)    AS unvotes,
+            SUM(nvd.self_votes) AS self_votes
+        FROM haf_stats_backend.network_vote_daily nvd
+        WHERE nvd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    ),
+    voters AS (
+        SELECT
+            DATE_TRUNC("_granularity", nvd.day) AS period,
+            COUNT(DISTINCT nvd.voter_id)        AS unique_voters
+        FROM haf_stats_backend.network_voter_daily nvd
+        WHERE nvd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    )
+    SELECT
+        TO_CHAR(c.period, 'YYYY-MM-DD'),
+        (c.upvotes + c.downvotes + c.unvotes)::BIGINT,
+        c.upvotes::BIGINT,
+        c.downvotes::BIGINT,
+        c.unvotes::BIGINT,
+        c.self_votes::BIGINT,
+        COALESCE(v.unique_voters, 0)::BIGINT,
+        ROUND(c.downvotes * 100.0 / NULLIF(c.upvotes + c.downvotes, 0), 2)
+    FROM counts c
+    LEFT JOIN voters v ON v.period = c.period
     ORDER BY 1;
 END;
 $$;

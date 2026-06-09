@@ -1,14 +1,19 @@
 SET ROLE haf_stats_owner;
 
--- Feature: per-account content & engagement stats (get_account_content_stats).
--- Creates the aggregation table and the block processor that populates it.
+-- Feature: content & engagement stats. One processor, two consumers that share
+-- the same comment-op and vote-op scans (so the two highest-volume op streams are
+-- read once per batch, not once per feature):
+--   * get_account_content_stats — per-account posts/comments/votes/replies
+--                                 (table account_content_daily)
+--   * get_network_vote_stats    — network-wide vote activity
+--                                 (tables network_vote_daily + network_voter_daily)
 --
 -- Author rewards are NOT stored here: they already live in
 -- haf_stats_backend.account_financial_daily (process_financial.sql) and the
--- endpoint JOINs them in, so there is nothing to re-process.
+-- account endpoint JOINs them in, so there is nothing to re-process.
 
 -- ---------------------------------------------------------------------------
--- Table
+-- Tables
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
@@ -27,6 +32,36 @@ ON haf_stats_backend.account_content_daily (account_id, day DESC);
 
 GRANT SELECT ON haf_stats_backend.account_content_daily TO haf_stats_user;
 
+-- Network-wide vote aggregates (get_network_vote_stats), populated from the same
+-- vote-op scan as the per-account stats below. Two tables, because the metrics
+-- split by how they combine across block-range batches:
+--   network_vote_daily   — additive per-day counters (ON CONFLICT ... col = col + ...).
+--   network_voter_daily  — one row per (day, voter); unique_voters is NOT additive
+--                          (a voter active in two batches on the same day must count
+--                          once), so we store the distinct (day, voter) set
+--                          idempotently and COUNT(DISTINCT) in the endpoint at the
+--                          requested grain. Same membership-table pattern as account
+--                          cohorts (process_account_cohorts.sql).
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
+    day        DATE NOT NULL,
+    upvotes    INT  NOT NULL DEFAULT 0,
+    downvotes  INT  NOT NULL DEFAULT 0,
+    unvotes    INT  NOT NULL DEFAULT 0,
+    self_votes INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (day)
+);
+
+GRANT SELECT ON haf_stats_backend.network_vote_daily TO haf_stats_user;
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
+    day      DATE NOT NULL,
+    voter_id INT  NOT NULL,
+    PRIMARY KEY (day, voter_id)
+);
+
+GRANT SELECT ON haf_stats_backend.network_voter_daily TO haf_stats_user;
+
 -- ---------------------------------------------------------------------------
 -- Processor
 --
@@ -40,7 +75,15 @@ GRANT SELECT ON haf_stats_backend.account_content_daily TO haf_stats_user;
 --    UNION ALL so the expensive operations_view scan + blocks join is not repeated
 --    (PG would otherwise inline the CTE and scan twice). Votes are the single
 --    highest-volume op on Hive, so halving the scans matters under
---    MASSIVE_PROCESSING.
+--    MASSIVE_PROCESSING. The vote-op scan does triple duty: the SAME MATERIALIZED
+--    rows feed account_content_daily (votes_cast/received), the network_vote_daily
+--    counters AND the network_voter_daily voter set — three outputs, one scan.
+--
+--  * Bound the scan by operation id as well as block_num. hafd.operation_id(b, 0)
+--    is the first op id in block b, so the half-open id range
+--    [op_id(first,0), op_id(last+1,0)) is exactly this block range and lets the
+--    planner range-scan the operations primary key — the canonical
+--    haf_block_explorer idiom (process_account_stats.sql, process_block_operations.sql).
 --
 --  * Drive from hive.operations_view by block_num. operations_view is indexed by
 --    block_num; hive.account_operations_view is NOT (it is keyed by account_id),
@@ -82,6 +125,8 @@ WITH comment_ops AS MATERIALIZED (
     JOIN hafd.blocks b ON b.num = ov.block_num
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
       AND ov.block_num BETWEEN _first_block AND _last_block
+      AND ov.id >= hafd.operation_id(_first_block, 0)
+      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
 contrib AS (
     -- authored content, keyed by the author
@@ -120,17 +165,28 @@ ON CONFLICT (account_id, day) DO UPDATE SET
     comments         = account_content_daily.comments         + EXCLUDED.comments,
     replies_received = account_content_daily.replies_received + EXCLUDED.replies_received;
 
--- Vote ops: votes_cast credited to the voter, votes_received to the author.
+-- Vote ops: ONE scan, three outputs.
+--   account_content_daily — votes_cast (voter) + votes_received (author)
+--   network_vote_daily    — daily up/down/un/self counters
+--   network_voter_daily   — distinct (day, voter) set for exact unique voters
+-- The two INSERTs feeding account_content_daily and network_vote_daily are
+-- data-modifying CTEs; the network_voter_daily INSERT is the main statement. All
+-- read the single MATERIALIZED vote_ops, so the op stream is scanned once.
 WITH vote_ops AS MATERIALIZED (
     SELECT
-        ov.body_value ->> 'voter'  AS voter,
-        ov.body_value ->> 'author' AS author,
-        b.created_at::DATE         AS day
+        ov.body_value ->> 'voter'                                  AS voter,
+        ov.body_value ->> 'author'                                 AS author,
+        (ov.body_value ->> 'weight')::INT                          AS weight,
+        (ov.body_value ->> 'voter') = (ov.body_value ->> 'author') AS is_self,
+        b.created_at::DATE                                         AS day
     FROM hive.operations_view ov
     JOIN hafd.blocks b ON b.num = ov.block_num
     WHERE ov.op_type_id = 0   -- hive::protocol::vote_operation
       AND ov.block_num BETWEEN _first_block AND _last_block
+      AND ov.id >= hafd.operation_id(_first_block, 0)
+      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
+-- Per-account: votes cast (voter) and votes received (author).
 contrib AS (
     SELECT voter AS account_name, day, COUNT(*) AS votes_cast, 0::BIGINT AS votes_received
     FROM vote_ops
@@ -139,20 +195,52 @@ contrib AS (
     SELECT author AS account_name, day, 0, COUNT(*)
     FROM vote_ops
     GROUP BY author, day
+),
+-- Network-wide daily counters (additive across batches).
+daily AS (
+    SELECT
+        day,
+        COUNT(*) FILTER (WHERE weight > 0) AS upvotes,
+        COUNT(*) FILTER (WHERE weight < 0) AS downvotes,
+        COUNT(*) FILTER (WHERE weight = 0) AS unvotes,
+        COUNT(*) FILTER (WHERE is_self)    AS self_votes
+    FROM vote_ops
+    GROUP BY day
+),
+upsert_account AS (
+    INSERT INTO haf_stats_backend.account_content_daily
+        (account_id, day, votes_cast, votes_received)
+    SELECT
+        a.id,
+        c.day,
+        SUM(c.votes_cast)::INT,
+        SUM(c.votes_received)::INT
+    FROM contrib c
+    JOIN hafd.accounts a ON a.name = c.account_name
+    GROUP BY a.id, c.day
+    ON CONFLICT (account_id, day) DO UPDATE SET
+        votes_cast     = account_content_daily.votes_cast     + EXCLUDED.votes_cast,
+        votes_received = account_content_daily.votes_received + EXCLUDED.votes_received
+),
+upsert_counts AS (
+    INSERT INTO haf_stats_backend.network_vote_daily AS nvd
+        (day, upvotes, downvotes, unvotes, self_votes)
+    SELECT day, upvotes, downvotes, unvotes, self_votes
+    FROM daily
+    ON CONFLICT (day) DO UPDATE SET
+        upvotes    = nvd.upvotes    + EXCLUDED.upvotes,
+        downvotes  = nvd.downvotes  + EXCLUDED.downvotes,
+        unvotes    = nvd.unvotes    + EXCLUDED.unvotes,
+        self_votes = nvd.self_votes + EXCLUDED.self_votes
 )
-INSERT INTO haf_stats_backend.account_content_daily
-    (account_id, day, votes_cast, votes_received)
-SELECT
-    a.id,
-    c.day,
-    SUM(c.votes_cast)::INT,
-    SUM(c.votes_received)::INT
-FROM contrib c
-JOIN hafd.accounts a ON a.name = c.account_name
-GROUP BY a.id, c.day
-ON CONFLICT (account_id, day) DO UPDATE SET
-    votes_cast     = account_content_daily.votes_cast     + EXCLUDED.votes_cast,
-    votes_received = account_content_daily.votes_received + EXCLUDED.votes_received;
+-- Distinct (day, voter) presence set, resolved to account id once per pair. The
+-- counters above never touch hafd.accounts, so an (impossible) unknown voter can
+-- never drop a counted vote.
+INSERT INTO haf_stats_backend.network_voter_daily (day, voter_id)
+SELECT DISTINCT vo.day, a.id
+FROM vote_ops vo
+JOIN hafd.accounts a ON a.name = vo.voter
+ON CONFLICT (day, voter_id) DO NOTHING;
 
 END;
 $$;

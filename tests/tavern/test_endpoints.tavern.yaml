@@ -362,3 +362,78 @@ stages:
         _from: "not-a-date"
     response:
       status_code: 400
+
+---
+test_name: Network vote stats returns activity for all granularities
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_vote_stats with day granularity
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        _from:        "2016-03-01"
+        _to:          "2016-03-31"
+        _granularity: "day"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_vote_stats with week granularity
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        _granularity: "week"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_vote_stats with month granularity
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        _granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Network vote stats rejects invalid granularity
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_vote_stats with bad _granularity
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        _granularity: "invalid"
+    response:
+      status_code: 400
+
+---
+test_name: Network vote stats rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_vote_stats with bad _to date
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        _to: "not-a-date"
+    response:
+      status_code: 400

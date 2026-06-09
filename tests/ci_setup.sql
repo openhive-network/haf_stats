@@ -181,4 +181,19 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     PRIMARY KEY (account_id, day)
 );
 
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
+    day        DATE NOT NULL,
+    upvotes    INT  NOT NULL DEFAULT 0,
+    downvotes  INT  NOT NULL DEFAULT 0,
+    unvotes    INT  NOT NULL DEFAULT 0,
+    self_votes INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (day)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
+    day      DATE NOT NULL,
+    voter_id INT  NOT NULL,
+    PRIMARY KEY (day, voter_id)
+);
+
 RESET ROLE;
