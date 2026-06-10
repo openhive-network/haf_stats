@@ -17,13 +17,13 @@ SET ROLE haf_stats_owner;
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
-    account_id       INT  NOT NULL,
-    day              DATE NOT NULL,
-    posts            INT  NOT NULL DEFAULT 0,
-    comments         INT  NOT NULL DEFAULT 0,
-    votes_cast       INT  NOT NULL DEFAULT 0,
-    votes_received   INT  NOT NULL DEFAULT 0,
-    replies_received INT  NOT NULL DEFAULT 0,
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    posts INT NOT NULL DEFAULT 0,
+    comments INT NOT NULL DEFAULT 0,
+    votes_cast INT NOT NULL DEFAULT 0,
+    votes_received INT NOT NULL DEFAULT 0,
+    replies_received INT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day)
 );
 
@@ -44,19 +44,19 @@ GRANT SELECT ON haf_stats_backend.account_content_daily TO haf_stats_user;
 --                          cohorts (process_account_cohorts.sql).
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
-    day        DATE NOT NULL,
-    upvotes    INT  NOT NULL DEFAULT 0,
-    downvotes  INT  NOT NULL DEFAULT 0,
-    unvotes    INT  NOT NULL DEFAULT 0,
-    self_votes INT  NOT NULL DEFAULT 0,
+    day DATE NOT NULL,
+    upvotes INT NOT NULL DEFAULT 0,
+    downvotes INT NOT NULL DEFAULT 0,
+    unvotes INT NOT NULL DEFAULT 0,
+    self_votes INT NOT NULL DEFAULT 0,
     PRIMARY KEY (day)
 );
 
 GRANT SELECT ON haf_stats_backend.network_vote_daily TO haf_stats_user;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
-    day      DATE NOT NULL,
-    voter_id INT  NOT NULL,
+    day DATE NOT NULL,
+    voter_id INT NOT NULL,
     PRIMARY KEY (day, voter_id)
 );
 
