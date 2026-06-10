@@ -99,7 +99,7 @@ INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('ci-test');
 
 -- ---------------------------------------------------------------------------
 -- Backend tables (from process_financial.sql, process_rc.sql,
--- process_account_cohorts.sql)
+-- process_account_cohorts.sql, process_content_stats.sql)
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.op_financial_categories (
@@ -168,6 +168,32 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
     op_class SMALLINT NOT NULL,
     operations BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (day, op_class)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    posts INT NOT NULL DEFAULT 0,
+    comments INT NOT NULL DEFAULT 0,
+    votes_cast INT NOT NULL DEFAULT 0,
+    votes_received INT NOT NULL DEFAULT 0,
+    replies_received INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
+    day        DATE NOT NULL,
+    upvotes    INT  NOT NULL DEFAULT 0,
+    downvotes  INT  NOT NULL DEFAULT 0,
+    unvotes    INT  NOT NULL DEFAULT 0,
+    self_votes INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (day)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
+    day      DATE NOT NULL,
+    voter_id INT  NOT NULL,
+    PRIMARY KEY (day, voter_id)
 );
 
 RESET ROLE;

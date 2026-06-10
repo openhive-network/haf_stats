@@ -18,9 +18,11 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 |---|---|
 | `get_account_financial_summary` | Categorized income/expense per account — not in any existing API |
 | `get_account_rc_footprint` | RC cost by op type and DApp — not in any existing API |
+| `get_account_content_stats` | Per-account posting & engagement (posts/comments/votes/replies) + author rewards — not aggregated in any existing API |
 | `get_network_rc_utilization` | Network-wide RC consumption by category — not in any existing API |
 | `get_network_supply` | HIVE/HBD/VESTS supply **time-series** — existing TVL endpoint is snapshot-only |
 | `get_network_hp_distribution` | Bucketed HP stake distribution — existing top-holders is a ranked list, not bucketed |
+| `get_network_vote_stats` | Network-wide vote activity time-series (up/down/unvotes, self-votes, unique voters) — no existing API aggregates votes |
 | `get_hp_delegation_graph` | Recursive delegation graph from a root account — per-account list exists in balance-api, recursive traversal does not |
 | `get_governance_proxy_chains` | Recursive proxy chain traversal (A→B→C→D) — hafbe-api has single-level proxy-power only |
 
@@ -109,11 +111,13 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_version` | ✅ Live | — | App git hash |
 | `GET /rpc/get_health` | ✅ Live | — | Last processed block + version |
 | `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account income/expense by category, granularity |
+| `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /rpc/get_account_rc_footprint` | ⚠️ Blocked | process_rc.sql | Returns `[]` — RC consumption ops are not in HAF's op stream (see Known TODOs #2 / `docs/VERIFICATION.md`) |
 | `GET /rpc/get_network_rc_utilization` | ⚠️ Blocked | *(uses rc_operation_log)* | Returns `[]` — same RC ingest blocker as above |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
 | `GET /rpc/get_daily_active_users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
+| `GET /rpc/get_network_vote_stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
 | `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
 

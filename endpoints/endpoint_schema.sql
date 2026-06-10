@@ -236,6 +236,114 @@ DECLARE
         }
       }
     },
+    "/account/{_account}/content-stats": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account content stats",
+        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
+        "operationId": "haf_stats_endpoints.get_account_content_stats",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "_account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation granularity"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Content and engagement rows grouped by period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, votes_received BIGINT, replies_received BIGINT, author_reward_hive_nai BIGINT, author_reward_hbd_nai BIGINT, author_reward_vests_nai BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "ISO-8601 date string for the aggregation bucket"
+                      },
+                      "posts": {
+                        "type": "integer",
+                        "description": "Root posts authored (parent_author = '')"
+                      },
+                      "comments": {
+                        "type": "integer",
+                        "description": "Replies authored (parent_author <> '')"
+                      },
+                      "votes_cast": {
+                        "type": "integer"
+                      },
+                      "votes_received": {
+                        "type": "integer"
+                      },
+                      "replies_received": {
+                        "type": "integer"
+                      },
+                      "author_reward_hive_nai": {
+                        "type": "integer"
+                      },
+                      "author_reward_hbd_nai": {
+                        "type": "integer"
+                      },
+                      "author_reward_vests_nai": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/account/{_account}/rc-footprint": {
       "get": {
         "tags": [
@@ -622,6 +730,101 @@ DECLARE
           }
         }
       }
+    },
+    "/network/vote-stats": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Network voting activity",
+        "description": "Network-wide voting activity over time - total votes, upvotes, downvotes, unvotes (weight 0), self-votes (voter = author), unique voters, and the downvote percentage per period. unique_voters is exact at the requested granularity (a voter active on several days counts once per period). downvote_pct is downvotes / (upvotes + downvotes) * 100, null when a period has no up- or down-votes.",
+        "operationId": "haf_stats_endpoints.get_network_vote_stats",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation period"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vote activity rows ordered by period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "example": "2026-04-01"
+                      },
+                      "total_votes": {
+                        "type": "integer"
+                      },
+                      "upvotes": {
+                        "type": "integer"
+                      },
+                      "downvotes": {
+                        "type": "integer"
+                      },
+                      "unvotes": {
+                        "type": "integer"
+                      },
+                      "self_votes": {
+                        "type": "integer"
+                      },
+                      "unique_voters": {
+                        "type": "integer"
+                      },
+                      "downvote_pct": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -812,6 +1015,164 @@ BEGIN
       AND afd.day BETWEEN "_from" AND "_to"
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: per-account content & engagement stats
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/account/{_account}/content-stats:
+  get:
+    tags:
+      - Account
+    summary: Account content stats
+    description: >-
+      Per-account posting and engagement summary — posts, comments, votes cast,
+      votes received, replies received, and author rewards — aggregated by the
+      chosen granularity. Author reward figures are sourced from the account's
+      financial daily aggregates.
+    operationId: haf_stats_endpoints.get_account_content_stats
+    parameters:
+      - in: path
+        name: _account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: month
+          enum: [day, week, month]
+        description: Aggregation granularity
+    responses:
+      '200':
+        description: Content and engagement rows grouped by period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, votes_received BIGINT, replies_received BIGINT, author_reward_hive_nai BIGINT, author_reward_hbd_nai BIGINT, author_reward_vests_nai BIGINT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: ISO-8601 date string for the aggregation bucket
+                  posts:
+                    type: integer
+                    description: Root posts authored (parent_author = '')
+                  comments:
+                    type: integer
+                    description: Replies authored (parent_author <> '')
+                  votes_cast:
+                    type: integer
+                  votes_received:
+                    type: integer
+                  replies_received:
+                    type: integer
+                  author_reward_hive_nai:
+                    type: integer
+                  author_reward_hbd_nai:
+                    type: integer
+                  author_reward_vests_nai:
+                    type: integer
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_content_stats;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_content_stats(
+    "_account" TEXT,
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'month'
+)
+RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, votes_received BIGINT, replies_received BIGINT, author_reward_hive_nai BIGINT, author_reward_hbd_nai BIGINT, author_reward_vests_nai BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _account_id INT;
+BEGIN
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
+    -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
+    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    -- Resolve the account name to its id once, then filter the daily tables on
+    -- account_id (their leading index column). Unknown account -> empty result.
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = "_account";
+    IF _account_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    -- FULL OUTER JOIN so a period with rewards but no tracked content (or vice
+    -- versa) still appears. Each side is pre-aggregated to the period so the join
+    -- is 1:1 on period and cannot fan out rows.
+    WITH content AS (
+        SELECT
+            DATE_TRUNC("_granularity", acd.day) AS period,
+            SUM(acd.posts)            AS posts,
+            SUM(acd.comments)         AS comments,
+            SUM(acd.votes_cast)       AS votes_cast,
+            SUM(acd.votes_received)   AS votes_received,
+            SUM(acd.replies_received) AS replies_received
+        FROM haf_stats_backend.account_content_daily acd
+        WHERE acd.account_id = _account_id
+          AND acd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    ),
+    rewards AS (
+        SELECT
+            DATE_TRUNC("_granularity", afd.day) AS period,
+            SUM(afd.hive_nai)  AS hive_nai,
+            SUM(afd.hbd_nai)   AS hbd_nai,
+            SUM(afd.vests_nai) AS vests_nai
+        FROM haf_stats_backend.account_financial_daily afd
+        WHERE afd.account_id = _account_id
+          AND afd.day BETWEEN "_from" AND "_to"
+          AND afd.category = 'Author Reward'
+          AND afd.direction = 'income'
+        GROUP BY 1
+    )
+    SELECT
+        TO_CHAR(COALESCE(c.period, r.period), 'YYYY-MM-DD'),
+        COALESCE(c.posts, 0)::BIGINT,
+        COALESCE(c.comments, 0)::BIGINT,
+        COALESCE(c.votes_cast, 0)::BIGINT,
+        COALESCE(c.votes_received, 0)::BIGINT,
+        COALESCE(c.replies_received, 0)::BIGINT,
+        COALESCE(r.hive_nai, 0)::BIGINT,
+        COALESCE(r.hbd_nai, 0)::BIGINT,
+        COALESCE(r.vests_nai, 0)::BIGINT
+    FROM content c
+    FULL OUTER JOIN rewards r ON c.period = r.period
+    ORDER BY 1;
 END;
 $$;
 
@@ -1431,6 +1792,142 @@ BEGIN
         COALESCE(o.operations, 0)::BIGINT
     FROM accounts a
     LEFT JOIN ops o ON o.period = a.period
+    ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide voting activity
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/vote-stats:
+  get:
+    tags:
+      - Network
+    summary: Network voting activity
+    description: >-
+      Network-wide voting activity over time - total votes, upvotes, downvotes,
+      unvotes (weight 0), self-votes (voter = author), unique voters, and the
+      downvote percentage per period. unique_voters is exact at the requested
+      granularity (a voter active on several days counts once per period).
+      downvote_pct is downvotes / (upvotes + downvotes) * 100, null when a period
+      has no up- or down-votes.
+    operationId: haf_stats_endpoints.get_network_vote_stats
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum:
+            - day
+            - week
+            - month
+        description: Aggregation period
+    responses:
+      '200':
+        description: Vote activity rows ordered by period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "2026-04-01"
+                  total_votes:
+                    type: integer
+                  upvotes:
+                    type: integer
+                  downvotes:
+                    type: integer
+                  unvotes:
+                    type: integer
+                  self_votes:
+                    type: integer
+                  unique_voters:
+                    type: integer
+                  downvote_pct:
+                    type: number
+                    nullable: true
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_vote_stats;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_vote_stats(
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'day'
+)
+RETURNS TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
+    -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
+    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    RETURN QUERY
+    -- Counters and unique voters live in separate tables (unique_voters is not
+    -- additive across batches, so it is counted from the (day, voter) presence set
+    -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
+    WITH counts AS (
+        SELECT
+            DATE_TRUNC("_granularity", nvd.day) AS period,
+            SUM(nvd.upvotes)    AS upvotes,
+            SUM(nvd.downvotes)  AS downvotes,
+            SUM(nvd.unvotes)    AS unvotes,
+            SUM(nvd.self_votes) AS self_votes
+        FROM haf_stats_backend.network_vote_daily nvd
+        WHERE nvd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    ),
+    voters AS (
+        SELECT
+            DATE_TRUNC("_granularity", nvd.day) AS period,
+            COUNT(DISTINCT nvd.voter_id)        AS unique_voters
+        FROM haf_stats_backend.network_voter_daily nvd
+        WHERE nvd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    )
+    SELECT
+        TO_CHAR(c.period, 'YYYY-MM-DD'),
+        (c.upvotes + c.downvotes + c.unvotes)::BIGINT,
+        c.upvotes::BIGINT,
+        c.downvotes::BIGINT,
+        c.unvotes::BIGINT,
+        c.self_votes::BIGINT,
+        COALESCE(v.unique_voters, 0)::BIGINT,
+        ROUND(c.downvotes * 100.0 / NULLIF(c.upvotes + c.downvotes, 0), 2)
+    FROM counts c
+    LEFT JOIN voters v ON v.period = c.period
     ORDER BY 1;
 END;
 $$;
