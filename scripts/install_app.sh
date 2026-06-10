@@ -39,6 +39,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 
 # 4. Seed lookup tables (app registry + financial op categories)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"

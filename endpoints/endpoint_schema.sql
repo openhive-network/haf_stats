@@ -530,6 +530,98 @@ DECLARE
           }
         }
       }
+    },
+    "/network/daily-active-users": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Daily active users",
+        "description": "Unique accounts that authored (signed) at least one operation per period, and the total volume of those operations, at the chosen granularity. An account is \"active\" when hive.get_required_authorities reports it as a required signer of an operation, so every authored op type counts and virtual (block/witness) activity is excluded. active_accounts is exact at the requested granularity (an account active on several days counts once per period); operations is a distinct-operation count (a multisig op counts once). operation_types selects which categories count: a comma-separated subset of post, comment, vote, transfer, custom_json, or \"all\" (the default), which counts every authored operation - not just the sum of the named categories.",
+        "operationId": "haf_stats_endpoints.get_daily_active_users",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation granularity"
+          },
+          {
+            "in": "query",
+            "name": "_operation_types",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all"
+            },
+            "description": "Comma-separated subset of post, comment, vote, transfer, custom_json, or \"all\" (every authored operation). Defaults to all."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Daily-active-user time-series ordered by period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "ISO-8601 date string for the aggregation bucket",
+                        "example": "2016-04-01"
+                      },
+                      "active_accounts": {
+                        "type": "integer",
+                        "description": "Distinct accounts that authored an op in the period"
+                      },
+                      "operations": {
+                        "type": "integer",
+                        "description": "Distinct operations authored in the period"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -1157,6 +1249,190 @@ AS $$
     FROM haf_stats_backend.account_cohort_retention acr
     WHERE acr.cohort_month BETWEEN _from AND _to
     ORDER BY acr.cohort_month;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: daily active users
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/daily-active-users:
+  get:
+    tags:
+      - Network
+    summary: Daily active users
+    description: >-
+      Unique accounts that authored (signed) at least one operation per period,
+      and the total volume of those operations, at the chosen granularity. An
+      account is "active" when hive.get_required_authorities reports it as a
+      required signer of an operation, so every authored op type counts and
+      virtual (block/witness) activity is excluded. active_accounts is exact at
+      the requested granularity (an account active on several days counts once
+      per period); operations is a distinct-operation count (a multisig op counts
+      once). operation_types selects which categories count: a comma-separated
+      subset of post, comment, vote, transfer, custom_json, or "all" (the
+      default), which counts every authored operation - not just the sum of the
+      named categories.
+    operationId: haf_stats_endpoints.get_daily_active_users
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum: [day, week, month]
+        description: Aggregation granularity
+      - in: query
+        name: _operation_types
+        required: false
+        schema:
+          type: string
+          default: all
+        description: >-
+          Comma-separated subset of post, comment, vote, transfer, custom_json,
+          or "all" (every authored operation). Defaults to all.
+    responses:
+      '200':
+        description: Daily-active-user time-series ordered by period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: ISO-8601 date string for the aggregation bucket
+                    example: "2016-04-01"
+                  active_accounts:
+                    type: integer
+                    description: Distinct accounts that authored an op in the period
+                  operations:
+                    type: integer
+                    description: Distinct operations authored in the period
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_daily_active_users;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_daily_active_users(
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'day',
+    "_operation_types" TEXT = 'all'
+)
+RETURNS TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    -- op_class codes resolved from _operation_types. -1 is the reserved ALL rollup
+    -- (every authored op); 1 post, 2 comment, 3 vote, 4 transfer, 5 custom_json.
+    _classes SMALLINT[];
+    _bad     TEXT;
+BEGIN
+    -- Validate granularity before it reaches DATE_TRUNC below: an unsupported unit
+    -- there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the guard in
+    -- get_network_rc_utilization.
+    IF _granularity IS NULL OR _granularity NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE(_granularity, '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    -- Resolve operation_types to op_class codes. 'all' (the default, also matched
+    -- when the list is empty or contains the token 'all') reads the reserved
+    -- op_class = -1 rollup, NOT the sum of the named classes (which omit op types
+    -- like account_update, witness ops, etc.).
+    IF _operation_types IS NULL
+       OR btrim(_operation_types) = ''
+       OR EXISTS (
+            SELECT 1 FROM unnest(string_to_array(lower(_operation_types), ',')) AS t
+            WHERE btrim(t) = 'all')
+    THEN
+        _classes := ARRAY[-1]::SMALLINT[];
+    ELSE
+        SELECT array_agg(m.code), MAX(m.bad) INTO _classes, _bad
+        FROM (
+            SELECT
+                (CASE btrim(lower(t))
+                    WHEN 'post'        THEN 1
+                    WHEN 'comment'     THEN 2
+                    WHEN 'vote'        THEN 3
+                    WHEN 'transfer'    THEN 4
+                    WHEN 'custom_json' THEN 5
+                 END)::SMALLINT AS code,
+                (CASE WHEN btrim(lower(t)) IN
+                        ('post', 'comment', 'vote', 'transfer', 'custom_json')
+                      THEN NULL ELSE btrim(t) END) AS bad
+            FROM unnest(string_to_array(_operation_types, ',')) AS t
+            WHERE btrim(t) <> ''
+        ) m;
+        IF _bad IS NOT NULL THEN
+            RAISE SQLSTATE '22023' USING
+                MESSAGE = 'invalid operation_type: ' || _bad,
+                HINT = 'Must be a comma-separated subset of: post, comment, vote, transfer, custom_json (or all)';
+        END IF;
+    END IF;
+
+    -- A list with no usable tokens (e.g. ",,," or whitespace) is an empty selection;
+    -- array_agg over zero rows leaves _classes NULL, and "op_class = ANY(NULL)" matches
+    -- nothing. Treat it as 'all', consistent with an empty string above.
+    IF _classes IS NULL THEN
+        _classes := ARRAY[-1]::SMALLINT[];
+    END IF;
+
+    RETURN QUERY
+    -- active_accounts counts the distinct presence set at the requested grain (rolling
+    -- daily membership up to week/month - summing daily counts would overcount). For a
+    -- multi-class request COUNT(DISTINCT) unions the classes (an account active in two
+    -- categories counts once). operations sums the additive per-class counters; each op
+    -- belongs to exactly one named class, so a subset never double-counts.
+    WITH accounts AS (
+        SELECT
+            DATE_TRUNC(_granularity, aud.day)  AS period,
+            COUNT(DISTINCT aud.account_id)      AS active_accounts
+        FROM haf_stats_backend.active_users_daily aud
+        WHERE aud.op_class = ANY(_classes)
+          AND aud.day BETWEEN _from AND _to
+        GROUP BY 1
+    ),
+    ops AS (
+        SELECT
+            DATE_TRUNC(_granularity, auo.day)  AS period,
+            SUM(auo.operations)                 AS operations
+        FROM haf_stats_backend.active_user_ops_daily auo
+        WHERE auo.op_class = ANY(_classes)
+          AND auo.day BETWEEN _from AND _to
+        GROUP BY 1
+    )
+    SELECT
+        TO_CHAR(a.period, 'YYYY-MM-DD'),
+        a.active_accounts::BIGINT,
+        COALESCE(o.operations, 0)::BIGINT
+    FROM accounts a
+    LEFT JOIN ops o ON o.period = a.period
+    ORDER BY 1;
+END;
 $$;
 
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;

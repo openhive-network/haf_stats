@@ -216,3 +216,110 @@ stages:
         _from: "not-a-date"
     response:
       status_code: 400
+
+---
+test_name: Daily active users returns time-series
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users returns rows
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Daily active users honours granularity and date range
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users monthly over an explicit range
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _from:        "2016-03-01"
+        _to:          "2016-12-31"
+        _granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Daily active users honours operation_types filter
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users for a subset of op types
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _from:            "2016-03-01"
+        _to:              "2016-12-31"
+        _operation_types: "vote,transfer"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Daily active users rejects invalid granularity
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users with bad _granularity
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _granularity: "decade"
+    response:
+      status_code: 400
+
+---
+test_name: Daily active users rejects invalid operation_type
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users with an unknown op type
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _operation_types: "post,wibble"
+    response:
+      status_code: 400
+
+---
+test_name: Daily active users rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users with bad _from date
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _from: "not-a-date"
+    response:
+      status_code: 400

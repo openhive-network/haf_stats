@@ -113,6 +113,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_network_rc_utilization` | ⚠️ Blocked | *(uses rc_operation_log)* | Returns `[]` — same RC ingest blocker as above |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
+| `GET /rpc/get_daily_active_users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
 | `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
 
