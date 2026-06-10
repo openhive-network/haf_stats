@@ -7,6 +7,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Fetched on demand by scripts/openapi_rewrite.sh (from common-ci-configuration)
+scripts/process_openapi.py
+
 # Test output
 tests/tavern/.pytest_cache/
 *.log

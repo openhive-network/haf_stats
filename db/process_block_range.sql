@@ -14,6 +14,7 @@ BEGIN
     PERFORM haf_stats_app.process_financial(_first_block, _last_block);
     PERFORM haf_stats_app.process_rc(_first_block, _last_block);
     PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
+    PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
 END;
 $$;
 

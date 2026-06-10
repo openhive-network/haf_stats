@@ -155,4 +155,19 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
     active_at_90d INT
 );
 
+-- Daily active users (process_active_users.sql)
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_daily (
+    day DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    account_id INT NOT NULL,
+    PRIMARY KEY (day, op_class, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
+    day DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    operations BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, op_class)
+);
+
 RESET ROLE;
