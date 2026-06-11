@@ -181,6 +181,26 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     PRIMARY KEY (account_id, day)
 );
 
+CREATE TABLE IF NOT EXISTS haf_stats_backend.comment_registry (
+    author_id INT  NOT NULL,
+    permlink  TEXT NOT NULL,
+    PRIMARY KEY (author_id, permlink)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_content_daily (
+    day      DATE NOT NULL,
+    posts    INT  NOT NULL DEFAULT 0,
+    comments INT  NOT NULL DEFAULT 0,
+    edits    INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (day)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_author_daily (
+    day       DATE NOT NULL,
+    author_id INT  NOT NULL,
+    PRIMARY KEY (day, author_id)
+);
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
     day        DATE NOT NULL,
     upvotes    INT  NOT NULL DEFAULT 0,

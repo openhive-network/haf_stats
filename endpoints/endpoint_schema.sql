@@ -825,6 +825,88 @@ DECLARE
           }
         }
       }
+    },
+    "/network/content-volume": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Posts and comments created over time",
+        "description": "Posts and comments created per period, with distinct authors. Counts follow chain semantics (comment_evaluator in hived): a comment_operation counts only when it actually creates the comment - edits of an existing (author, permlink) are not counted, while re-creating a previously deleted comment is. posts are root entries (parent_author = ''), comments everything else. unique_authors is exact at the requested granularity (an author active on several days counts once per period).",
+        "operationId": "haf_stats_endpoints.get_network_content_volume",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "_from",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "_to",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "_granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation period"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Content volume rows ordered by period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "example": "2026-04-01"
+                      },
+                      "posts": {
+                        "type": "integer"
+                      },
+                      "comments": {
+                        "type": "integer"
+                      },
+                      "unique_authors": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -1928,6 +2010,128 @@ BEGIN
         ROUND(c.downvotes * 100.0 / NULLIF(c.upvotes + c.downvotes, 0), 2)
     FROM counts c
     LEFT JOIN voters v ON v.period = c.period
+    ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide content volume
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/content-volume:
+  get:
+    tags:
+      - Network
+    summary: Posts and comments created over time
+    description: >-
+      Posts and comments created per period, with distinct authors. Counts follow
+      chain semantics (comment_evaluator in hived): a comment_operation counts
+      only when it actually creates the comment - edits of an existing
+      (author, permlink) are not counted, while re-creating a previously deleted
+      comment is. posts are root entries (parent_author = ''), comments
+      everything else. unique_authors is exact at the requested granularity (an
+      author active on several days counts once per period).
+    operationId: haf_stats_endpoints.get_network_content_volume
+    parameters:
+      - in: query
+        name: _from
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago
+      - in: query
+        name: _to
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today
+      - in: query
+        name: _granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum:
+            - day
+            - week
+            - month
+        description: Aggregation period
+    responses:
+      '200':
+        description: Content volume rows ordered by period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    example: "2026-04-01"
+                  posts:
+                    type: integer
+                  comments:
+                    type: integer
+                  unique_authors:
+                    type: integer
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_content_volume;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_content_volume(
+    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "_to" DATE = NOW()::DATE,
+    "_granularity" TEXT = 'day'
+)
+RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
+    -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
+    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    RETURN QUERY
+    -- Counters and unique authors live in separate tables (unique_authors is not
+    -- additive across days, so it is counted from the (day, author) presence set
+    -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
+    WITH counts AS (
+        SELECT
+            DATE_TRUNC("_granularity", ncd.day) AS period,
+            SUM(ncd.posts)    AS posts,
+            SUM(ncd.comments) AS comments
+        FROM haf_stats_backend.network_content_daily ncd
+        WHERE ncd.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    ),
+    authors AS (
+        SELECT
+            DATE_TRUNC("_granularity", nad.day) AS period,
+            COUNT(DISTINCT nad.author_id)       AS unique_authors
+        FROM haf_stats_backend.network_author_daily nad
+        WHERE nad.day BETWEEN "_from" AND "_to"
+        GROUP BY 1
+    )
+    SELECT
+        TO_CHAR(c.period, 'YYYY-MM-DD'),
+        c.posts::BIGINT,
+        c.comments::BIGINT,
+        COALESCE(a.unique_authors, 0)::BIGINT
+    FROM counts c
+    LEFT JOIN authors a ON a.period = c.period
     ORDER BY 1;
 END;
 $$;
