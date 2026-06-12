@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_daily (
     day DATE NOT NULL,
     op_class SMALLINT NOT NULL,
     account_id INT NOT NULL,
+    ops INT NOT NULL DEFAULT 0,
     PRIMARY KEY (day, op_class, account_id)
 );
 
