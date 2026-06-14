@@ -2368,6 +2368,8 @@ DECLARE
     _direction TEXT;
     _balance_rel TEXT;
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "author_rewards"); see issue #22.
+    "_metric" := TRIM('"' FROM "_metric");
     IF "_metric" IS NULL OR "_metric" NOT IN ('author_rewards', 'curation_rewards',
         'transfer_volume_in', 'transfer_volume_out', 'hp_balance', 'transaction_count') THEN
         RAISE SQLSTATE '22023' USING

@@ -170,6 +170,11 @@ membership AS (
     FROM resolved
     GROUP BY day, account_id
 ),
+-- ops is additive (DO UPDATE adds), so this table is now reprocess-sensitive:
+-- re-running the same block range double-counts ops. Safe because each block range
+-- is processed exactly once (op_id ranges are disjoint across batches) — the same
+-- exactly-once assumption the additive active_user_ops_daily counter already relies
+-- on. The presence aspect (one row per day/class/account) stays idempotent.
 ins_members AS (
     INSERT INTO haf_stats_backend.active_users_daily AS aud (day, op_class, account_id, ops)
     SELECT day, op_class, account_id, ops FROM membership
