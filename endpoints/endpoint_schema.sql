@@ -2096,6 +2096,8 @@ RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
+    "_granularity" := TRIM('"' FROM "_granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
     IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
