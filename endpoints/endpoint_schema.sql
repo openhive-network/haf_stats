@@ -993,6 +993,11 @@ RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_n
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
+    -- Wax's extendRest JSON-encodes string query params for custom namespaces,
+    -- sending e.g. "month" (%22month%22) instead of month. Strip a surrounding
+    -- pair of double quotes so the value passes the enum check below regardless of
+    -- whether the client sent a raw or JSON-encoded string. See haf_stats issue #22.
+    "_granularity" := TRIM('"' FROM "_granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
     IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
@@ -1115,6 +1120,8 @@ AS $$
 DECLARE
     _account_id INT;
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
+    "_granularity" := TRIM('"' FROM "_granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
     IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
@@ -1258,6 +1265,8 @@ RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "op_type"); see issue #22.
+    _group_by := TRIM('"' FROM _group_by);
     IF _group_by IS NULL OR _group_by NOT IN ('op_type', 'app') THEN
         RAISE SQLSTATE '22023' USING
             MESSAGE = 'invalid _group_by: ' || COALESCE(_group_by, '(null)'),
@@ -1365,6 +1374,8 @@ RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
+    _granularity := TRIM('"' FROM _granularity);
     -- Validate granularity before it reaches DATE_TRUNC below: an unsupported
     -- unit there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the
     -- guard in get_account_financial_summary.
@@ -1711,6 +1722,13 @@ DECLARE
     _classes SMALLINT[];
     _bad     TEXT;
 BEGIN
+    -- Wax's extendRest JSON-encodes string query params for custom namespaces,
+    -- sending e.g. "all"/"day" (%22all%22) instead of all/day, which makes the
+    -- strict _operation_types enum check below reject the value. Strip a surrounding
+    -- pair of double quotes from each text param so both raw and JSON-encoded strings
+    -- are accepted. See haf_stats issue #22.
+    _granularity     := TRIM('"' FROM _granularity);
+    _operation_types := TRIM('"' FROM _operation_types);
     -- Validate granularity before it reaches DATE_TRUNC below: an unsupported unit
     -- there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the guard in
     -- get_network_rc_utilization.
@@ -1886,6 +1904,8 @@ RETURNS TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT,
 LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
+    "_granularity" := TRIM('"' FROM "_granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
     IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN

@@ -364,6 +364,31 @@ stages:
       status_code: 400
 
 ---
+# Regression for issue #22: Wax's extendRest JSON-encodes string query params for
+# custom namespaces, so a client sends _granularity="day" / _operation_types="all"
+# (the quotes URL-encode to %22..%22). The quoted values below reproduce exactly
+# what Wax puts on the wire; the endpoint must strip the quotes and return 200
+# rather than rejecting "all" against the operation_types enum.
+test_name: Daily active users tolerates Wax JSON-encoded string params
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users with quote-wrapped string params
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        _granularity:     '"day"'
+        _operation_types: '"all"'
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
 test_name: Network vote stats returns activity for all granularities
 
 includes:
