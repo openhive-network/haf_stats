@@ -106,8 +106,10 @@ services:
 
   tavern:
     image: python:3.12-slim
+    # Pin pytest<9: pytest 9 dropped _pytest._code.code.FormattedExcinfo, which
+    # tavern 3.6.0 imports, so an unpinned install breaks collection at import time.
     command: >
-      sh -c "pip install tavern -q &&
+      sh -c "pip install tavern 'pytest<9' -q &&
              pytest /tests/tavern --tb=short -v"
     volumes:
       - ../tests/tavern:/tests/tavern:ro
