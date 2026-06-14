@@ -837,7 +837,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -849,7 +849,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -861,7 +861,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -2055,7 +2055,7 @@ $$;
     operationId: haf_stats_endpoints.get_network_content_volume
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -2064,7 +2064,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -2073,7 +2073,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -2107,9 +2107,9 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_content_volume;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_content_volume(
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'day'
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)
 -- openapi-generated-code-end
@@ -2117,12 +2117,12 @@ LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
-    "_granularity" := TRIM('"' FROM "_granularity");
+    "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
-    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
 
@@ -2132,19 +2132,19 @@ BEGIN
     -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
     WITH counts AS (
         SELECT
-            DATE_TRUNC("_granularity", ncd.day) AS period,
+            DATE_TRUNC("granularity", ncd.day) AS period,
             SUM(ncd.posts)    AS posts,
             SUM(ncd.comments) AS comments
         FROM haf_stats_backend.network_content_daily ncd
-        WHERE ncd.day BETWEEN "_from" AND "_to"
+        WHERE ncd.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     ),
     authors AS (
         SELECT
-            DATE_TRUNC("_granularity", nad.day) AS period,
+            DATE_TRUNC("granularity", nad.day) AS period,
             COUNT(DISTINCT nad.author_id)       AS unique_authors
         FROM haf_stats_backend.network_author_daily nad
-        WHERE nad.day BETWEEN "_from" AND "_to"
+        WHERE nad.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     )
     SELECT

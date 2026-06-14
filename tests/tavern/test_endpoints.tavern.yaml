@@ -475,9 +475,9 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _from:        "2016-06-01"
-        _to:          "2016-06-30"
-        _granularity: "day"
+        from_date:        "2016-06-01"
+        to_date:          "2016-06-30"
+        granularity: "day"
     response:
       status_code: 200
       headers:
@@ -488,7 +488,7 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "week"
+        granularity: "week"
     response:
       status_code: 200
       headers:
@@ -499,7 +499,7 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "month"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -513,12 +513,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_content_volume with bad _granularity
+  - name: GET /rpc/get_network_content_volume with bad granularity
     request:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "invalid"
+        granularity: "invalid"
     response:
       status_code: 400
 
@@ -529,11 +529,11 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_content_volume with bad _from date
+  - name: GET /rpc/get_network_content_volume with bad from_date date
     request:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _from: "not-a-date"
+        from_date: "not-a-date"
     response:
       status_code: 400
