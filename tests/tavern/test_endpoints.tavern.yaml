@@ -44,10 +44,10 @@ stages:
       url: "{api_url}/rpc/get_account_financial_summary"
       method: GET
       params:
-        _account: "hiveio"
-        _from:    "2026-01-01"
-        _to:      "2026-05-01"
-        _granularity: "month"
+        account: "hiveio"
+        from_date:    "2026-01-01"
+        to_date:      "2026-05-01"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -66,10 +66,10 @@ stages:
       url: "{api_url}/rpc/get_account_content_stats"
       method: GET
       params:
-        _account: "hiveio"
-        _from:    "2026-01-01"
-        _to:      "2026-05-01"
-        _granularity: "month"
+        account: "hiveio"
+        from_date:    "2026-01-01"
+        to_date:      "2026-05-01"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -83,13 +83,13 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_account_content_stats with bad _granularity
+  - name: GET /rpc/get_account_content_stats with bad granularity
     request:
       url: "{api_url}/rpc/get_account_content_stats"
       method: GET
       params:
-        _account:     "hiveio"
-        _granularity: "invalid"
+        account:     "hiveio"
+        granularity: "invalid"
     response:
       status_code: 400
 
@@ -105,10 +105,10 @@ stages:
       url: "{api_url}/rpc/get_account_rc_footprint"
       method: GET
       params:
-        _account:  "hiveio"
-        _from:     "2026-01-01"
-        _to:       "2026-05-01"
-        _group_by: "op_type"
+        account:  "hiveio"
+        from_date:     "2026-01-01"
+        to_date:       "2026-05-01"
+        group_by: "op_type"
     response:
       status_code: 200
       headers:
@@ -127,9 +127,9 @@ stages:
       url: "{api_url}/rpc/get_network_rc_utilization"
       method: GET
       params:
-        _from:        "2026-01-01"
-        _to:          "2026-01-07"
-        _granularity: "day"
+        from_date:        "2026-01-01"
+        to_date:          "2026-01-07"
+        granularity: "day"
     response:
       status_code: 200
       headers:
@@ -160,13 +160,13 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_account_financial_summary with bad _from date
+  - name: GET /rpc/get_account_financial_summary with bad from_date date
     request:
       url: "{api_url}/rpc/get_account_financial_summary"
       method: GET
       params:
-        _account: "hiveio"
-        _from:    "not-a-date"
+        account: "hiveio"
+        from_date:    "not-a-date"
     response:
       status_code: 400
 
@@ -177,13 +177,13 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_account_financial_summary with bad _granularity
+  - name: GET /rpc/get_account_financial_summary with bad granularity
     request:
       url: "{api_url}/rpc/get_account_financial_summary"
       method: GET
       params:
-        _account:     "hiveio"
-        _granularity: "invalid"
+        account:     "hiveio"
+        granularity: "invalid"
     response:
       status_code: 400
 
@@ -194,12 +194,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_rc_utilization with bad _to date
+  - name: GET /rpc/get_network_rc_utilization with bad to_date date
     request:
       url: "{api_url}/rpc/get_network_rc_utilization"
       method: GET
       params:
-        _to: "not-a-date"
+        to_date: "not-a-date"
     response:
       status_code: 400
 
@@ -232,8 +232,8 @@ stages:
       url: "{api_url}/rpc/get_network_account_funnel"
       method: GET
       params:
-        _from: "2016-03-01"
-        _to:   "2016-12-31"
+        from_date: "2016-03-01"
+        to_date:   "2016-12-31"
     response:
       status_code: 200
       headers:
@@ -247,12 +247,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_account_funnel with bad _from date
+  - name: GET /rpc/get_network_account_funnel with bad from_date date
     request:
       url: "{api_url}/rpc/get_network_account_funnel"
       method: GET
       params:
-        _from: "not-a-date"
+        from_date: "not-a-date"
     response:
       status_code: 400
 
@@ -285,9 +285,9 @@ stages:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _from:        "2016-03-01"
-        _to:          "2016-12-31"
-        _granularity: "month"
+        from_date:        "2016-03-01"
+        to_date:          "2016-12-31"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -306,9 +306,9 @@ stages:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _from:            "2016-03-01"
-        _to:              "2016-12-31"
-        _operation_types: "vote,transfer"
+        from_date:            "2016-03-01"
+        to_date:              "2016-12-31"
+        operation_types: "vote,transfer"
     response:
       status_code: 200
       headers:
@@ -322,12 +322,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_daily_active_users with bad _granularity
+  - name: GET /rpc/get_daily_active_users with bad granularity
     request:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _granularity: "decade"
+        granularity: "decade"
     response:
       status_code: 400
 
@@ -343,7 +343,7 @@ stages:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _operation_types: "post,wibble"
+        operation_types: "post,wibble"
     response:
       status_code: 400
 
@@ -354,18 +354,18 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_daily_active_users with bad _from date
+  - name: GET /rpc/get_daily_active_users with bad from_date date
     request:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _from: "not-a-date"
+        from_date: "not-a-date"
     response:
       status_code: 400
 
 ---
 # Regression for issue #22: Wax's extendRest JSON-encodes string query params for
-# custom namespaces, so a client sends _granularity="day" / _operation_types="all"
+# custom namespaces, so a client sends granularity="day" / operation_types="all"
 # (the quotes URL-encode to %22..%22). The quoted values below reproduce exactly
 # what Wax puts on the wire; the endpoint must strip the quotes and return 200
 # rather than rejecting "all" against the operation_types enum.
@@ -380,8 +380,8 @@ stages:
       url: "{api_url}/rpc/get_daily_active_users"
       method: GET
       params:
-        _granularity:     '"day"'
-        _operation_types: '"all"'
+        granularity:     '"day"'
+        operation_types: '"all"'
     response:
       status_code: 200
       headers:
@@ -400,9 +400,9 @@ stages:
       url: "{api_url}/rpc/get_network_vote_stats"
       method: GET
       params:
-        _from:        "2016-03-01"
-        _to:          "2016-03-31"
-        _granularity: "day"
+        from_date:        "2016-03-01"
+        to_date:          "2016-03-31"
+        granularity: "day"
     response:
       status_code: 200
       headers:
@@ -413,7 +413,7 @@ stages:
       url: "{api_url}/rpc/get_network_vote_stats"
       method: GET
       params:
-        _granularity: "week"
+        granularity: "week"
     response:
       status_code: 200
       headers:
@@ -424,7 +424,7 @@ stages:
       url: "{api_url}/rpc/get_network_vote_stats"
       method: GET
       params:
-        _granularity: "month"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -438,12 +438,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_vote_stats with bad _granularity
+  - name: GET /rpc/get_network_vote_stats with bad granularity
     request:
       url: "{api_url}/rpc/get_network_vote_stats"
       method: GET
       params:
-        _granularity: "invalid"
+        granularity: "invalid"
     response:
       status_code: 400
 
@@ -454,12 +454,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_vote_stats with bad _to date
+  - name: GET /rpc/get_network_vote_stats with bad to_date date
     request:
       url: "{api_url}/rpc/get_network_vote_stats"
       method: GET
       params:
-        _to: "not-a-date"
+        to_date: "not-a-date"
     response:
       status_code: 400
 
@@ -475,9 +475,9 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _from:        "2016-06-01"
-        _to:          "2016-06-30"
-        _granularity: "day"
+        from_date:        "2016-06-01"
+        to_date:          "2016-06-30"
+        granularity: "day"
     response:
       status_code: 200
       headers:
@@ -488,7 +488,7 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "week"
+        granularity: "week"
     response:
       status_code: 200
       headers:
@@ -499,7 +499,7 @@ stages:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "month"
+        granularity: "month"
     response:
       status_code: 200
       headers:
@@ -513,12 +513,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_content_volume with bad _granularity
+  - name: GET /rpc/get_network_content_volume with bad granularity
     request:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _granularity: "invalid"
+        granularity: "invalid"
     response:
       status_code: 400
 
@@ -529,11 +529,11 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_content_volume with bad _from date
+  - name: GET /rpc/get_network_content_volume with bad from_date date
     request:
       url: "{api_url}/rpc/get_network_content_volume"
       method: GET
       params:
-        _from: "not-a-date"
+        from_date: "not-a-date"
     response:
       status_code: 400

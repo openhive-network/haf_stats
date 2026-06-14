@@ -132,7 +132,7 @@ DECLARE
         }
       }
     },
-    "/account/{_account}/financial-summary": {
+    "/account/{account}/financial-summary": {
       "get": {
         "tags": [
           "Account"
@@ -143,7 +143,7 @@ DECLARE
         "parameters": [
           {
             "in": "path",
-            "name": "_account",
+            "name": "account",
             "required": true,
             "schema": {
               "type": "string"
@@ -152,7 +152,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -164,7 +164,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -176,7 +176,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -236,7 +236,7 @@ DECLARE
         }
       }
     },
-    "/account/{_account}/content-stats": {
+    "/account/{account}/content-stats": {
       "get": {
         "tags": [
           "Account"
@@ -247,7 +247,7 @@ DECLARE
         "parameters": [
           {
             "in": "path",
-            "name": "_account",
+            "name": "account",
             "required": true,
             "schema": {
               "type": "string"
@@ -256,7 +256,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -268,7 +268,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -280,7 +280,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -344,7 +344,7 @@ DECLARE
         }
       }
     },
-    "/account/{_account}/rc-footprint": {
+    "/account/{account}/rc-footprint": {
       "get": {
         "tags": [
           "Account"
@@ -355,7 +355,7 @@ DECLARE
         "parameters": [
           {
             "in": "path",
-            "name": "_account",
+            "name": "account",
             "required": true,
             "schema": {
               "type": "string"
@@ -364,7 +364,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -376,7 +376,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -388,7 +388,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_group_by",
+            "name": "group_by",
             "required": false,
             "schema": {
               "type": "string",
@@ -446,7 +446,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -458,7 +458,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -470,7 +470,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -569,7 +569,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -581,7 +581,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -650,7 +650,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -662,7 +662,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -674,7 +674,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -689,7 +689,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_operation_types",
+            "name": "operation_types",
             "required": false,
             "schema": {
               "type": "string",
@@ -742,7 +742,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -754,7 +754,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -766,7 +766,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -837,7 +837,7 @@ DECLARE
         "parameters": [
           {
             "in": "query",
-            "name": "_from",
+            "name": "from_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -849,7 +849,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_to",
+            "name": "to_date",
             "required": false,
             "schema": {
               "x-sql-datatype": "DATE",
@@ -861,7 +861,7 @@ DECLARE
           },
           {
             "in": "query",
-            "name": "_granularity",
+            "name": "granularity",
             "required": false,
             "schema": {
               "type": "string",
@@ -992,7 +992,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 /** openapi:paths
-/account/{_account}/financial-summary:
+/account/{account}/financial-summary:
   get:
     tags:
       - Account
@@ -1003,13 +1003,13 @@ $$;
     operationId: haf_stats_endpoints.get_account_financial_summary
     parameters:
       - in: path
-        name: _account
+        name: account
         required: true
         schema:
           type: string
         description: Hive account name
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1018,7 +1018,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 1 year ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1027,7 +1027,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -1065,10 +1065,10 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_financial_summary;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
-    "_account" TEXT,
-    "_from" DATE = (NOW() - INTERVAL '1 year')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'month'
+    "account" TEXT,
+    "from_date" DATE = (NOW() - INTERVAL '1 year')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'month'
 )
 RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT)
 -- openapi-generated-code-end
@@ -1079,17 +1079,17 @@ BEGIN
     -- sending e.g. "month" (%22month%22) instead of month. Strip a surrounding
     -- pair of double quotes so the value passes the enum check below regardless of
     -- whether the client sent a raw or JSON-encoded string. See haf_stats issue #22.
-    "_granularity" := TRIM('"' FROM "_granularity");
+    "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
-    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
     RETURN QUERY
     SELECT
-        TO_CHAR(DATE_TRUNC("_granularity", afd.day), 'YYYY-MM-DD') AS period,
+        TO_CHAR(DATE_TRUNC("granularity", afd.day), 'YYYY-MM-DD') AS period,
         afd.category,
         afd.direction,
         SUM(afd.hive_nai)::BIGINT,
@@ -1098,8 +1098,8 @@ BEGIN
         SUM(afd.op_count)::INT
     FROM haf_stats_backend.account_financial_daily afd
     JOIN hafd.accounts ha ON ha.id = afd.account_id
-    WHERE ha.name  = "_account"
-      AND afd.day BETWEEN "_from" AND "_to"
+    WHERE ha.name  = "account"
+      AND afd.day BETWEEN "from_date" AND "to_date"
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3;
 END;
@@ -1110,7 +1110,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 /** openapi:paths
-/account/{_account}/content-stats:
+/account/{account}/content-stats:
   get:
     tags:
       - Account
@@ -1123,13 +1123,13 @@ $$;
     operationId: haf_stats_endpoints.get_account_content_stats
     parameters:
       - in: path
-        name: _account
+        name: account
         required: true
         schema:
           type: string
         description: Hive account name
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1138,7 +1138,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1147,7 +1147,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -1190,10 +1190,10 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_content_stats;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_content_stats(
-    "_account" TEXT,
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'month'
+    "account" TEXT,
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'month'
 )
 RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, votes_received BIGINT, replies_received BIGINT, author_reward_hive_nai BIGINT, author_reward_hbd_nai BIGINT, author_reward_vests_nai BIGINT)
 -- openapi-generated-code-end
@@ -1203,18 +1203,18 @@ DECLARE
     _account_id INT;
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
-    "_granularity" := TRIM('"' FROM "_granularity");
+    "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
-    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
 
     -- Resolve the account name to its id once, then filter the daily tables on
     -- account_id (their leading index column). Unknown account -> empty result.
-    SELECT id INTO _account_id FROM hafd.accounts WHERE name = "_account";
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = "account";
     IF _account_id IS NULL THEN
         RETURN;
     END IF;
@@ -1225,7 +1225,7 @@ BEGIN
     -- is 1:1 on period and cannot fan out rows.
     WITH content AS (
         SELECT
-            DATE_TRUNC("_granularity", acd.day) AS period,
+            DATE_TRUNC("granularity", acd.day) AS period,
             SUM(acd.posts)            AS posts,
             SUM(acd.comments)         AS comments,
             SUM(acd.votes_cast)       AS votes_cast,
@@ -1233,18 +1233,18 @@ BEGIN
             SUM(acd.replies_received) AS replies_received
         FROM haf_stats_backend.account_content_daily acd
         WHERE acd.account_id = _account_id
-          AND acd.day BETWEEN "_from" AND "_to"
+          AND acd.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     ),
     rewards AS (
         SELECT
-            DATE_TRUNC("_granularity", afd.day) AS period,
+            DATE_TRUNC("granularity", afd.day) AS period,
             SUM(afd.hive_nai)  AS hive_nai,
             SUM(afd.hbd_nai)   AS hbd_nai,
             SUM(afd.vests_nai) AS vests_nai
         FROM haf_stats_backend.account_financial_daily afd
         WHERE afd.account_id = _account_id
-          AND afd.day BETWEEN "_from" AND "_to"
+          AND afd.day BETWEEN "from_date" AND "to_date"
           AND afd.category = 'Author Reward'
           AND afd.direction = 'income'
         GROUP BY 1
@@ -1270,7 +1270,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 /** openapi:paths
-/account/{_account}/rc-footprint:
+/account/{account}/rc-footprint:
   get:
     tags:
       - Account
@@ -1281,13 +1281,13 @@ $$;
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
-        name: _account
+        name: account
         required: true
         schema:
           type: string
         description: Hive account name
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1296,7 +1296,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1305,7 +1305,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _group_by
+        name: group_by
         required: false
         schema:
           type: string
@@ -1337,10 +1337,10 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
-    "_account" TEXT,
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_group_by" TEXT = 'op_type'
+    "account" TEXT,
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "group_by" TEXT = 'op_type'
 )
 RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)
 -- openapi-generated-code-end
@@ -1348,16 +1348,16 @@ LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "op_type"); see issue #22.
-    _group_by := TRIM('"' FROM _group_by);
-    IF _group_by IS NULL OR _group_by NOT IN ('op_type', 'app') THEN
+    group_by := TRIM('"' FROM group_by);
+    IF group_by IS NULL OR group_by NOT IN ('op_type', 'app') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _group_by: ' || COALESCE(_group_by, '(null)'),
+            MESSAGE = 'invalid group_by: ' || COALESCE(group_by, '(null)'),
             HINT = 'Must be one of: op_type, app';
     END IF;
     RETURN QUERY
     WITH base AS (
         SELECT
-            CASE _group_by
+            CASE group_by
                 WHEN 'app' THEN COALESCE(rol.custom_json_id, 'non-custom_json')
                 ELSE            COALESCE(ot.name, 'unknown')
             END      AS label,
@@ -1365,8 +1365,8 @@ BEGIN
         FROM haf_stats_backend.rc_operation_log rol
         JOIN hafd.accounts a ON a.id = rol.account_id
         LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
-        WHERE a.name             = _account
-          AND rol."timestamp"::DATE BETWEEN _from AND _to
+        WHERE a.name             = account
+          AND rol."timestamp"::DATE BETWEEN from_date AND to_date
     ),
     totals AS (SELECT SUM(base.rc_cost) AS grand_total FROM base)
     SELECT
@@ -1396,7 +1396,7 @@ $$;
     operationId: haf_stats_endpoints.get_network_rc_utilization
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1405,7 +1405,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1414,7 +1414,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -1447,9 +1447,9 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_rc_utilization;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'day'
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
 -- openapi-generated-code-end
@@ -1457,24 +1457,24 @@ LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
-    _granularity := TRIM('"' FROM _granularity);
+    granularity := TRIM('"' FROM granularity);
     -- Validate granularity before it reaches DATE_TRUNC below: an unsupported
     -- unit there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the
     -- guard in get_account_financial_summary.
-    IF _granularity IS NULL OR _granularity NOT IN ('day', 'week', 'month') THEN
+    IF granularity IS NULL OR granularity NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE(_granularity, '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE(granularity, '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
     RETURN QUERY
     WITH per_label AS (
         SELECT
-            DATE_TRUNC(_granularity, rol."timestamp")            AS period,
+            DATE_TRUNC(granularity, rol."timestamp")            AS period,
             COALESCE(rol.custom_json_id, ot.name, 'unknown')    AS label,
             SUM(rol.rc_cost)::BIGINT                             AS rc_label_total
         FROM haf_stats_backend.rc_operation_log rol
         LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
-        WHERE rol."timestamp"::DATE BETWEEN _from AND _to
+        WHERE rol."timestamp"::DATE BETWEEN from_date AND to_date
         GROUP BY 1, 2
     )
     SELECT
@@ -1633,7 +1633,7 @@ $_$;
     operationId: haf_stats_endpoints.get_network_account_funnel
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1642,7 +1642,7 @@ $_$;
           format: date
         description: Start cohort month (inclusive), defaults to 1 year ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1684,8 +1684,8 @@ $_$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_account_funnel;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_account_funnel(
-    "_from" DATE = (NOW() - INTERVAL '1 year')::DATE,
-    "_to" DATE = NOW()::DATE
+    "from_date" DATE = (NOW() - INTERVAL '1 year')::DATE,
+    "to_date" DATE = NOW()::DATE
 )
 RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
 -- openapi-generated-code-end
@@ -1701,7 +1701,7 @@ AS $$
         acr.active_at_90d,
         ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
     FROM haf_stats_backend.account_cohort_retention acr
-    WHERE acr.cohort_month BETWEEN _from AND _to
+    WHERE acr.cohort_month BETWEEN from_date AND to_date
     ORDER BY acr.cohort_month;
 $$;
 
@@ -1730,7 +1730,7 @@ $$;
     operationId: haf_stats_endpoints.get_daily_active_users
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1739,7 +1739,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1748,7 +1748,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -1756,7 +1756,7 @@ $$;
           enum: [day, week, month]
         description: Aggregation granularity
       - in: query
-        name: _operation_types
+        name: operation_types
         required: false
         schema:
           type: string
@@ -1789,34 +1789,34 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_daily_active_users;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_daily_active_users(
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'day',
-    "_operation_types" TEXT = 'all'
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'day',
+    "operation_types" TEXT = 'all'
 )
 RETURNS TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
-    -- op_class codes resolved from _operation_types. -1 is the reserved ALL rollup
+    -- op_class codes resolved from operation_types. -1 is the reserved ALL rollup
     -- (every authored op); 1 post, 2 comment, 3 vote, 4 transfer, 5 custom_json.
     _classes SMALLINT[];
     _bad     TEXT;
 BEGIN
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
     -- sending e.g. "all"/"day" (%22all%22) instead of all/day, which makes the
-    -- strict _operation_types enum check below reject the value. Strip a surrounding
+    -- strict operation_types enum check below reject the value. Strip a surrounding
     -- pair of double quotes from each text param so both raw and JSON-encoded strings
     -- are accepted. See haf_stats issue #22.
-    _granularity     := TRIM('"' FROM _granularity);
-    _operation_types := TRIM('"' FROM _operation_types);
+    granularity     := TRIM('"' FROM granularity);
+    operation_types := TRIM('"' FROM operation_types);
     -- Validate granularity before it reaches DATE_TRUNC below: an unsupported unit
     -- there raises 'unit "..." not recognized' (an HTTP 500). Mirrors the guard in
     -- get_network_rc_utilization.
-    IF _granularity IS NULL OR _granularity NOT IN ('day', 'week', 'month') THEN
+    IF granularity IS NULL OR granularity NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE(_granularity, '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE(granularity, '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
 
@@ -1824,10 +1824,10 @@ BEGIN
     -- when the list is empty or contains the token 'all') reads the reserved
     -- op_class = -1 rollup, NOT the sum of the named classes (which omit op types
     -- like account_update, witness ops, etc.).
-    IF _operation_types IS NULL
-       OR btrim(_operation_types) = ''
+    IF operation_types IS NULL
+       OR btrim(operation_types) = ''
        OR EXISTS (
-            SELECT 1 FROM unnest(string_to_array(lower(_operation_types), ',')) AS t
+            SELECT 1 FROM unnest(string_to_array(lower(operation_types), ',')) AS t
             WHERE btrim(t) = 'all')
     THEN
         _classes := ARRAY[-1]::SMALLINT[];
@@ -1845,7 +1845,7 @@ BEGIN
                 (CASE WHEN btrim(lower(t)) IN
                         ('post', 'comment', 'vote', 'transfer', 'custom_json')
                       THEN NULL ELSE btrim(t) END) AS bad
-            FROM unnest(string_to_array(_operation_types, ',')) AS t
+            FROM unnest(string_to_array(operation_types, ',')) AS t
             WHERE btrim(t) <> ''
         ) m;
         IF _bad IS NOT NULL THEN
@@ -1870,20 +1870,20 @@ BEGIN
     -- belongs to exactly one named class, so a subset never double-counts.
     WITH accounts AS (
         SELECT
-            DATE_TRUNC(_granularity, aud.day)  AS period,
+            DATE_TRUNC(granularity, aud.day)  AS period,
             COUNT(DISTINCT aud.account_id)      AS active_accounts
         FROM haf_stats_backend.active_users_daily aud
         WHERE aud.op_class = ANY(_classes)
-          AND aud.day BETWEEN _from AND _to
+          AND aud.day BETWEEN from_date AND to_date
         GROUP BY 1
     ),
     ops AS (
         SELECT
-            DATE_TRUNC(_granularity, auo.day)  AS period,
+            DATE_TRUNC(granularity, auo.day)  AS period,
             SUM(auo.operations)                 AS operations
         FROM haf_stats_backend.active_user_ops_daily auo
         WHERE auo.op_class = ANY(_classes)
-          AND auo.day BETWEEN _from AND _to
+          AND auo.day BETWEEN from_date AND to_date
         GROUP BY 1
     )
     SELECT
@@ -1916,7 +1916,7 @@ $$;
     operationId: haf_stats_endpoints.get_network_vote_stats
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1925,7 +1925,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -1934,7 +1934,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -1977,9 +1977,9 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_vote_stats;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_vote_stats(
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'day'
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)
 -- openapi-generated-code-end
@@ -1987,12 +1987,12 @@ LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
-    "_granularity" := TRIM('"' FROM "_granularity");
+    "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
-    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
 
@@ -2002,21 +2002,21 @@ BEGIN
     -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
     WITH counts AS (
         SELECT
-            DATE_TRUNC("_granularity", nvd.day) AS period,
+            DATE_TRUNC("granularity", nvd.day) AS period,
             SUM(nvd.upvotes)    AS upvotes,
             SUM(nvd.downvotes)  AS downvotes,
             SUM(nvd.unvotes)    AS unvotes,
             SUM(nvd.self_votes) AS self_votes
         FROM haf_stats_backend.network_vote_daily nvd
-        WHERE nvd.day BETWEEN "_from" AND "_to"
+        WHERE nvd.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     ),
     voters AS (
         SELECT
-            DATE_TRUNC("_granularity", nvd.day) AS period,
+            DATE_TRUNC("granularity", nvd.day) AS period,
             COUNT(DISTINCT nvd.voter_id)        AS unique_voters
         FROM haf_stats_backend.network_voter_daily nvd
-        WHERE nvd.day BETWEEN "_from" AND "_to"
+        WHERE nvd.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     )
     SELECT
@@ -2055,7 +2055,7 @@ $$;
     operationId: haf_stats_endpoints.get_network_content_volume
     parameters:
       - in: query
-        name: _from
+        name: from_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -2064,7 +2064,7 @@ $$;
           format: date
         description: Start date (inclusive), defaults to 30 days ago
       - in: query
-        name: _to
+        name: to_date
         required: false
         schema:
           x-sql-datatype: DATE
@@ -2073,7 +2073,7 @@ $$;
           format: date
         description: End date (inclusive), defaults to today
       - in: query
-        name: _granularity
+        name: granularity
         required: false
         schema:
           type: string
@@ -2107,9 +2107,9 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_content_volume;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_content_volume(
-    "_from" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "_to" DATE = NOW()::DATE,
-    "_granularity" TEXT = 'day'
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)
 -- openapi-generated-code-end
@@ -2117,12 +2117,12 @@ LANGUAGE plpgsql STABLE
 AS $$
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
-    "_granularity" := TRIM('"' FROM "_granularity");
+    "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
     -- a NULL granularity would otherwise slip past and reach DATE_TRUNC.
-    IF "_granularity" IS NULL OR "_granularity" NOT IN ('day', 'week', 'month') THEN
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
         RAISE SQLSTATE '22023' USING
-            MESSAGE = 'invalid _granularity: ' || COALESCE("_granularity", '(null)'),
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
 
@@ -2132,19 +2132,19 @@ BEGIN
     -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
     WITH counts AS (
         SELECT
-            DATE_TRUNC("_granularity", ncd.day) AS period,
+            DATE_TRUNC("granularity", ncd.day) AS period,
             SUM(ncd.posts)    AS posts,
             SUM(ncd.comments) AS comments
         FROM haf_stats_backend.network_content_daily ncd
-        WHERE ncd.day BETWEEN "_from" AND "_to"
+        WHERE ncd.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     ),
     authors AS (
         SELECT
-            DATE_TRUNC("_granularity", nad.day) AS period,
+            DATE_TRUNC("granularity", nad.day) AS period,
             COUNT(DISTINCT nad.author_id)       AS unique_authors
         FROM haf_stats_backend.network_author_daily nad
-        WHERE nad.day BETWEEN "_from" AND "_to"
+        WHERE nad.day BETWEEN "from_date" AND "to_date"
         GROUP BY 1
     )
     SELECT
