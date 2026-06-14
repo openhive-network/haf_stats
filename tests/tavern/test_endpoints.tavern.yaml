@@ -462,3 +462,78 @@ stages:
         to_date: "not-a-date"
     response:
       status_code: 400
+
+---
+test_name: Network content volume returns data for all granularities
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_content_volume with day granularity
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        _from:        "2016-06-01"
+        _to:          "2016-06-30"
+        _granularity: "day"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_content_volume with week granularity
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        _granularity: "week"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_content_volume with month granularity
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        _granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Network content volume rejects invalid granularity
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_content_volume with bad _granularity
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        _granularity: "invalid"
+    response:
+      status_code: 400
+
+---
+test_name: Network content volume rejects invalid date format
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_content_volume with bad _from date
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        _from: "not-a-date"
+    response:
+      status_code: 400
