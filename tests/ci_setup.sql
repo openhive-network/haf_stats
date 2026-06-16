@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
     category TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense')),
+    direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
     hive_nai BIGINT NOT NULL DEFAULT 0,
     hbd_nai BIGINT NOT NULL DEFAULT 0,
     vests_nai BIGINT NOT NULL DEFAULT 0,

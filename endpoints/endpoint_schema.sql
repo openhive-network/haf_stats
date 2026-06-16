@@ -190,7 +190,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account financial summary",
-        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (in/out).",
+        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (incoming/outgoing).",
         "operationId": "haf_stats_endpoints.get_account_financial_summary",
         "parameters": [
           {
@@ -256,13 +256,14 @@ DECLARE
                         "description": "ISO-8601 date string for the aggregation bucket"
                       },
                       "category": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "Canonical Hive operation type name, e.g. author_reward_operation"
                       },
                       "direction": {
                         "type": "string",
                         "enum": [
-                          "in",
-                          "out"
+                          "incoming",
+                          "outgoing"
                         ]
                       },
                       "hive_nai": {
@@ -1228,7 +1229,7 @@ $$;
     summary: Account financial summary
     description: >-
       Aggregated HBD/HIVE/VESTS flows for an account over a time range,
-      grouped by financial category and direction (in/out).
+      grouped by financial category and direction (incoming/outgoing).
     operationId: haf_stats_endpoints.get_account_financial_summary
     parameters:
       - in: path
@@ -1277,9 +1278,10 @@ $$;
                     description: ISO-8601 date string for the aggregation bucket
                   category:
                     type: string
+                    description: Canonical Hive operation type name, e.g. author_reward_operation
                   direction:
                     type: string
-                    enum: [in, out]
+                    enum: [incoming, outgoing]
                   hive_nai:
                     type: integer
                   hbd_nai:
@@ -1481,8 +1483,8 @@ BEGIN
         FROM haf_stats_backend.account_financial_daily afd
         WHERE afd.account_id = _account_id
           AND afd.day BETWEEN _from AND _to
-          AND afd.category = 'Author Reward'
-          AND afd.direction = 'income'
+          AND afd.category = 'author_reward_operation'
+          AND afd.direction = 'incoming'
         GROUP BY 1
     )
     SELECT
