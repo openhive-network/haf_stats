@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
 CREATE INDEX IF NOT EXISTS idx_afd_account_day
 ON haf_stats_backend.account_financial_daily (account_id, day DESC);
 
+-- Leaderboard access path (get_network_top_accounts): a category + direction +
+-- day-range scan across ALL accounts, which the account_id-leading PK cannot
+-- serve. Columns are a subset of the PK, so this index adds no new HOT-blocking
+-- attributes to the additive nai/op_count upserts.
+CREATE INDEX IF NOT EXISTS idx_afd_category_direction_day
+ON haf_stats_backend.account_financial_daily (category, direction, day);
+
 GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------

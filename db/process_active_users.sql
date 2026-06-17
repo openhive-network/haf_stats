@@ -37,9 +37,14 @@ SET ROLE haf_stats_owner;
 --   active_users_daily      one row per (day, op_class, account_id). active_accounts
 --                           is NOT additive across batches (an account active in two
 --                           batches on the same day must count once), so we store the
---                           distinct presence set idempotently (ON CONFLICT DO NOTHING)
---                           and COUNT(DISTINCT account_id) in the endpoint at the
---                           requested grain. Exact for week/month too.
+--                           distinct presence set idempotently and COUNT(DISTINCT
+--                           account_id) in the endpoint at the requested grain. Exact
+--                           for week/month too. Each row also carries ops — the
+--                           account's authored-op count for that day/class — which IS
+--                           additive (op_id sets are disjoint across batches), used by
+--                           get_network_top_accounts' transaction_count leaderboard.
+--                           COUNT(DISTINCT op_id) per account, so an op listing the
+--                           same signer under several roles still counts once for it.
 --   active_user_ops_daily   additive per-(day, op_class) operation counter. operations
 --                           is COUNT(DISTINCT op_id) within a batch (a multisig op is
 --                           one operation, not one-per-signer); op_id ranges are
@@ -53,8 +58,13 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_daily (
     day DATE NOT NULL,
     op_class SMALLINT NOT NULL,
     account_id INT NOT NULL,
+    ops INT NOT NULL DEFAULT 0,
     PRIMARY KEY (day, op_class, account_id)
 );
+
+-- Idempotent upgrade for installs that created the table before ops existed.
+ALTER TABLE haf_stats_backend.active_users_daily
+ADD COLUMN IF NOT EXISTS ops INT NOT NULL DEFAULT 0;
 
 GRANT SELECT ON haf_stats_backend.active_users_daily TO haf_stats_user;
 
@@ -146,21 +156,30 @@ resolved AS MATERIALIZED (
     FROM authored a
     JOIN name_ids ni ON ni.name = a.actor_name
 ),
--- Presence set: per-class rows plus the -1 ALL rollup (every authored op).
+-- Presence set + per-account op counts: per-class rows plus the -1 ALL rollup
+-- (every authored op). COUNT(DISTINCT op_id), not COUNT(*): get_required_authorities
+-- can emit the same account under several roles for one op, and that is still one
+-- operation for that account.
 membership AS (
-    SELECT day, op_class, account_id
+    SELECT day, op_class, account_id, COUNT(DISTINCT op_id) AS ops
     FROM resolved
     WHERE op_class IS NOT NULL
     GROUP BY day, op_class, account_id
     UNION ALL
-    SELECT day, -1::SMALLINT, account_id
+    SELECT day, -1::SMALLINT, account_id, COUNT(DISTINCT op_id)
     FROM resolved
     GROUP BY day, account_id
 ),
+-- ops is additive (DO UPDATE adds), so this table is now reprocess-sensitive:
+-- re-running the same block range double-counts ops. Safe because each block range
+-- is processed exactly once (op_id ranges are disjoint across batches) — the same
+-- exactly-once assumption the additive active_user_ops_daily counter already relies
+-- on. The presence aspect (one row per day/class/account) stays idempotent.
 ins_members AS (
-    INSERT INTO haf_stats_backend.active_users_daily (day, op_class, account_id)
-    SELECT day, op_class, account_id FROM membership
-    ON CONFLICT (day, op_class, account_id) DO NOTHING
+    INSERT INTO haf_stats_backend.active_users_daily AS aud (day, op_class, account_id, ops)
+    SELECT day, op_class, account_id, ops FROM membership
+    ON CONFLICT (day, op_class, account_id) DO UPDATE SET
+        ops = aud.ops + EXCLUDED.ops
     RETURNING 1
 ),
 -- Operation volume: COUNT(DISTINCT op_id) per class plus the -1 ALL rollup. DISTINCT

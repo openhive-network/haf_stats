@@ -907,6 +907,110 @@ DECLARE
           }
         }
       }
+    },
+    "/network/top-accounts": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Top accounts per metric",
+        "description": "Top N accounts ranked by the chosen metric. Reward and transfer metrics sum haf_stats financial data over [from_date, to_date]; transaction_count sums authored (signed) operations over the same range; hp_balance ranks the CURRENT own vesting balance from balance_tracker and ignores from_date/to_date (empty result if no balance_tracker schema is readable on the deployment). Sort keys - author_rewards and curation_rewards: vests, then hbd, then hive sums; transfer_volume_in/out: hive, then hbd sums; transaction_count: op count; hp_balance: vesting balance. Ties broken by account id (creation order). Value fields not applicable to a metric are 0.",
+        "operationId": "haf_stats_endpoints.get_network_top_accounts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "metric",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "author_rewards",
+              "enum": [
+                "author_rewards",
+                "curation_rewards",
+                "transfer_volume_in",
+                "transfer_volume_out",
+                "hp_balance",
+                "transaction_count"
+              ]
+            },
+            "description": "Metric to rank accounts by"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive), defaults to 30 days ago; ignored for hp_balance"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "DATE",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive), defaults to today; ignored for hp_balance"
+          },
+          {
+            "in": "query",
+            "name": "limit_count",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 25,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Number of rows to return (1-100)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked accounts, rank 1 is the top account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGINT, value_vests_nai BIGINT, op_count BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "rank": {
+                        "type": "integer",
+                        "example": 1
+                      },
+                      "account": {
+                        "type": "string",
+                        "example": "blocktrades"
+                      },
+                      "value_hive_nai": {
+                        "type": "integer"
+                      },
+                      "value_hbd_nai": {
+                        "type": "integer"
+                      },
+                      "value_vests_nai": {
+                        "type": "integer"
+                      },
+                      "op_count": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -2155,6 +2259,274 @@ BEGIN
     FROM counts c
     LEFT JOIN authors a ON a.period = c.period
     ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: per-metric account leaderboard
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/top-accounts:
+  get:
+    tags:
+      - Network
+    summary: Top accounts per metric
+    description: >-
+      Top N accounts ranked by the chosen metric. Reward and transfer metrics sum
+      haf_stats financial data over [from_date, to_date]; transaction_count sums authored
+      (signed) operations over the same range; hp_balance ranks the CURRENT own
+      vesting balance from balance_tracker and ignores from_date/to_date (empty result if
+      no balance_tracker schema is readable on the deployment). Sort keys -
+      author_rewards and curation_rewards: vests, then hbd, then hive sums;
+      transfer_volume_in/out: hive, then hbd sums; transaction_count: op count;
+      hp_balance: vesting balance. Ties broken by account id (creation order).
+      Value fields not applicable to a metric are 0.
+    operationId: haf_stats_endpoints.get_network_top_accounts
+    parameters:
+      - in: query
+        name: metric
+        required: false
+        schema:
+          type: string
+          default: author_rewards
+          enum:
+            - author_rewards
+            - curation_rewards
+            - transfer_volume_in
+            - transfer_volume_out
+            - hp_balance
+            - transaction_count
+        description: Metric to rank accounts by
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+          format: date
+        description: Start date (inclusive), defaults to 30 days ago; ignored for hp_balance
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: DATE
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+          format: date
+        description: End date (inclusive), defaults to today; ignored for hp_balance
+      - in: query
+        name: limit_count
+        required: false
+        schema:
+          type: integer
+          default: 25
+          minimum: 1
+          maximum: 100
+        description: Number of rows to return (1-100)
+    responses:
+      '200':
+        description: Ranked accounts, rank 1 is the top account
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGINT, value_vests_nai BIGINT, op_count BIGINT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  rank:
+                    type: integer
+                    example: 1
+                  account:
+                    type: string
+                    example: "blocktrades"
+                  value_hive_nai:
+                    type: integer
+                  value_hbd_nai:
+                    type: integer
+                  value_vests_nai:
+                    type: integer
+                  op_count:
+                    type: integer
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_top_accounts;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_top_accounts(
+    "metric" TEXT = 'author_rewards',
+    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
+    "to_date" DATE = NOW()::DATE,
+    "limit_count" INT = 25
+)
+RETURNS TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGINT, value_vests_nai BIGINT, op_count BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _category TEXT;
+    _direction TEXT;
+    _balance_rel TEXT;
+BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "author_rewards"); see issue #22.
+    "metric" := TRIM('"' FROM "metric");
+    IF "metric" IS NULL OR "metric" NOT IN ('author_rewards', 'curation_rewards',
+        'transfer_volume_in', 'transfer_volume_out', 'hp_balance', 'transaction_count') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid metric: ' || COALESCE("metric", '(null)'),
+            HINT = 'Must be one of: author_rewards, curation_rewards, transfer_volume_in, '
+                || 'transfer_volume_out, hp_balance, transaction_count';
+    END IF;
+
+    IF "limit_count" IS NULL OR "limit_count" < 1 OR "limit_count" > 100 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid limit_count: ' || COALESCE("limit_count"::TEXT, '(null)'),
+            HINT = 'Must be between 1 and 100';
+    END IF;
+
+    -- Reward + transfer metrics share account_financial_daily; the
+    -- (category, direction, day) index makes each branch a targeted range scan.
+    -- Accounts are resolved AFTER aggregation + LIMIT (top N names only).
+    IF "metric" IN ('author_rewards', 'curation_rewards') THEN
+        _category := CASE "metric"
+            WHEN 'author_rewards' THEN 'Author Reward'
+            ELSE 'Curation Reward'
+        END;
+
+        RETURN QUERY
+        -- Rewards are HBD/VESTS mixes; VESTS (the HP part) is the dominant and
+        -- always-present component, so it leads the sort key.
+        WITH top AS (
+            SELECT
+                f.account_id,
+                SUM(f.hive_nai)  AS hive,
+                SUM(f.hbd_nai)   AS hbd,
+                SUM(f.vests_nai) AS vests,
+                SUM(f.op_count)  AS ops
+            FROM haf_stats_backend.account_financial_daily f
+            WHERE f.category = _category
+              AND f.direction = 'income'
+              AND f.day BETWEEN "from_date" AND "to_date"
+            GROUP BY f.account_id
+            ORDER BY SUM(f.vests_nai) DESC, SUM(f.hbd_nai) DESC,
+                SUM(f.hive_nai) DESC, f.account_id ASC
+            LIMIT "limit_count"
+        )
+        SELECT
+            (ROW_NUMBER() OVER (ORDER BY t.vests DESC, t.hbd DESC, t.hive DESC,
+                t.account_id ASC))::INT,
+            a.name::TEXT,
+            t.hive::BIGINT,
+            t.hbd::BIGINT,
+            t.vests::BIGINT,
+            t.ops::BIGINT
+        FROM top t
+        JOIN hafd.accounts a ON a.id = t.account_id
+        ORDER BY 1;
+
+    ELSIF "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN
+        _direction := CASE "metric"
+            WHEN 'transfer_volume_in' THEN 'income'
+            ELSE 'expense'
+        END;
+
+        RETURN QUERY
+        -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
+        -- leads the sort key.
+        WITH top AS (
+            SELECT
+                f.account_id,
+                SUM(f.hive_nai) AS hive,
+                SUM(f.hbd_nai)  AS hbd,
+                SUM(f.op_count) AS ops
+            FROM haf_stats_backend.account_financial_daily f
+            WHERE f.category = 'Transfer'
+              AND f.direction = _direction
+              AND f.day BETWEEN "from_date" AND "to_date"
+            GROUP BY f.account_id
+            ORDER BY SUM(f.hive_nai) DESC, SUM(f.hbd_nai) DESC, f.account_id ASC
+            LIMIT "limit_count"
+        )
+        SELECT
+            (ROW_NUMBER() OVER (ORDER BY t.hive DESC, t.hbd DESC,
+                t.account_id ASC))::INT,
+            a.name::TEXT,
+            t.hive::BIGINT,
+            t.hbd::BIGINT,
+            0::BIGINT,
+            t.ops::BIGINT
+        FROM top t
+        JOIN hafd.accounts a ON a.id = t.account_id
+        ORDER BY 1;
+
+    ELSIF "metric" = 'transaction_count' THEN
+        RETURN QUERY
+        -- op_class -1 is the ALL rollup: every authored op, counted once per
+        -- distinct signer (see process_active_users.sql).
+        WITH top AS (
+            SELECT au.account_id, SUM(au.ops) AS ops
+            FROM haf_stats_backend.active_users_daily au
+            WHERE au.op_class = -1
+              AND au.day BETWEEN "from_date" AND "to_date"
+            GROUP BY au.account_id
+            ORDER BY SUM(au.ops) DESC, au.account_id ASC
+            LIMIT "limit_count"
+        )
+        SELECT
+            (ROW_NUMBER() OVER (ORDER BY t.ops DESC, t.account_id ASC))::INT,
+            a.name::TEXT,
+            0::BIGINT,
+            0::BIGINT,
+            0::BIGINT,
+            t.ops::BIGINT
+        FROM top t
+        JOIN hafd.accounts a ON a.id = t.account_id
+        ORDER BY 1;
+
+    ELSE  -- hp_balance
+        -- Same balance-relation resolution as get_network_hp_distribution:
+        -- balance_tracker installs under different schemas per deployment, and
+        -- information_schema.tables only lists relations this role can read, so
+        -- the pick is guaranteed readable; [] when none exists (documented).
+        SELECT format('%I.%I', t.table_schema, t.table_name)
+          INTO _balance_rel
+          FROM (VALUES
+                    ('btracker_app',     'current_account_balances',      1),
+                    ('btracker_backend', 'current_account_balances_view', 2),
+                    ('hafbe_bal',        'current_account_balances',      3)
+               ) AS cand (sch, rel, prio)
+          JOIN information_schema.tables t
+            ON t.table_schema = cand.sch AND t.table_name = cand.rel
+         ORDER BY cand.prio
+         LIMIT 1;
+
+        IF _balance_rel IS NULL THEN
+            RETURN;  -- no readable balance relation on this deployment
+        END IF;
+
+        -- _balance_rel comes from format('%I.%I', ...) over a fixed allowlist,
+        -- so interpolating it (%s) into the dynamic query is injection-safe.
+        RETURN QUERY EXECUTE format($q$
+            WITH top AS (
+                SELECT b.account AS account_id, b.balance AS vests
+                FROM %s b
+                WHERE b.nai = 37   -- VESTS (btracker nai smallint code)
+                  AND b.balance > 0
+                ORDER BY b.balance DESC, b.account ASC
+                LIMIT $1
+            )
+            SELECT
+                (ROW_NUMBER() OVER (ORDER BY t.vests DESC, t.account_id ASC))::INT,
+                a.name::TEXT,
+                0::BIGINT,
+                0::BIGINT,
+                t.vests::BIGINT,
+                0::BIGINT
+            FROM top t
+            JOIN hafd.accounts a ON a.id = t.account_id
+            ORDER BY 1
+        $q$, _balance_rel) USING "limit_count";
+    END IF;
 END;
 $$;
 

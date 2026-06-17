@@ -537,3 +537,124 @@ stages:
         from_date: "not-a-date"
     response:
       status_code: 400
+
+---
+test_name: Network top accounts returns ranked results for every metric
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_top_accounts author_rewards
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "author_rewards"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_top_accounts curation_rewards
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "curation_rewards"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_top_accounts transfer_volume_in
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transfer_volume_in"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_top_accounts transfer_volume_out
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transfer_volume_out"
+        limit_count:  10
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_top_accounts hp_balance
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "hp_balance"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+  - name: GET /rpc/get_network_top_accounts transaction_count
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transaction_count"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: !anylist
+
+---
+test_name: Network top accounts rejects invalid metric
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_top_accounts with bad metric
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "invalid"
+    response:
+      status_code: 400
+
+---
+test_name: Network top accounts rejects out-of-range limit
+
+includes:
+  - !include common.yaml
+
+stages:
+  - name: GET /rpc/get_network_top_accounts with limit_count 0
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        limit_count: 0
+    response:
+      status_code: 400
+  - name: GET /rpc/get_network_top_accounts with limit_count 101
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        limit_count: 101
+    response:
+      status_code: 400
