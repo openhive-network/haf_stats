@@ -550,9 +550,9 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "author_rewards"
-        _from:   "2016-06-01"
-        _to:     "2016-08-31"
+        metric: "author_rewards"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
     response:
       status_code: 200
       headers:
@@ -563,9 +563,9 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "curation_rewards"
-        _from:   "2016-06-01"
-        _to:     "2016-08-31"
+        metric: "curation_rewards"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
     response:
       status_code: 200
       headers:
@@ -576,7 +576,7 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "transfer_volume_in"
+        metric: "transfer_volume_in"
     response:
       status_code: 200
       headers:
@@ -587,8 +587,8 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "transfer_volume_out"
-        _limit:  10
+        metric: "transfer_volume_out"
+        limit_count:  10
     response:
       status_code: 200
       headers:
@@ -599,7 +599,7 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "hp_balance"
+        metric: "hp_balance"
     response:
       status_code: 200
       headers:
@@ -610,9 +610,9 @@ stages:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "transaction_count"
-        _from:   "2016-06-01"
-        _to:     "2016-08-31"
+        metric: "transaction_count"
+        from_date:   "2016-06-01"
+        to_date:     "2016-08-31"
     response:
       status_code: 200
       headers:
@@ -626,12 +626,12 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_top_accounts with bad _metric
+  - name: GET /rpc/get_network_top_accounts with bad metric
     request:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _metric: "invalid"
+        metric: "invalid"
     response:
       status_code: 400
 
@@ -642,19 +642,19 @@ includes:
   - !include common.yaml
 
 stages:
-  - name: GET /rpc/get_network_top_accounts with _limit 0
+  - name: GET /rpc/get_network_top_accounts with limit_count 0
     request:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _limit: 0
+        limit_count: 0
     response:
       status_code: 400
-  - name: GET /rpc/get_network_top_accounts with _limit 101
+  - name: GET /rpc/get_network_top_accounts with limit_count 101
     request:
       url: "{api_url}/rpc/get_network_top_accounts"
       method: GET
       params:
-        _limit: 101
+        limit_count: 101
     response:
       status_code: 400
