@@ -65,7 +65,7 @@ DECLARE
 BEGIN
     SELECT id INTO _rc_vop_type_id
     FROM hafd.operation_types
-    WHERE name = 'rc_account_statuses_operation' LIMIT 1;
+    WHERE name = 'hive::protocol::rc_account_statuses_operation' LIMIT 1;
 
     -- Operation-type names in hafd.operation_types are fully qualified with the
     -- 'hive::protocol::' prefix (e.g. 'hive::protocol::custom_json_operation'),
