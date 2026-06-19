@@ -2,10 +2,13 @@ SET ROLE haf_stats_owner;
 
 -- ---------------------------------------------------------------------------
 -- #23: from_date / to_date filter inputs accept EITHER a block number OR a
--- date/timestamp string. Co-located here (rather than db/) so it is present
--- whenever the endpoints are installed, including the stub endpoint-test stack
--- that loads only this file. An integer input resolves to that block's date
--- (clamped to head); anything else is parsed as a date; NULL/'' -> the default.
+-- date/timestamp string. Co-located here (not db/) so it is present whenever the
+-- endpoints are installed, including the stub endpoint-test stack that loads only
+-- this file. Integer -> that block's date; anything else -> parsed date; NULL/'' ->
+-- the caller default. NOTE: resolution reads hafd.blocks (irreversible blocks only)
+-- and clamps via LEAST(_block, MAX(num)); a still-reversible (very recent) block
+-- number therefore resolves to the head irreversible block's date. Harmless at the
+-- day-bucket granularity of these endpoints.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION haf_stats_app.to_filter_date(_input TEXT, _default DATE)
 RETURNS DATE
@@ -206,10 +209,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 1 year ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago"
           },
           {
             "in": "query",
@@ -218,10 +220,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -310,10 +311,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -322,10 +322,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -418,10 +417,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -430,10 +428,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -500,10 +497,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -512,10 +508,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -623,10 +618,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start cohort month (inclusive), defaults to 1 year ago"
+            "description": "Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago"
           },
           {
             "in": "query",
@@ -635,10 +629,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End cohort month (inclusive), defaults to today"
+            "description": "Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today"
           }
         ],
         "responses": {
@@ -704,10 +697,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -716,10 +708,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -796,10 +787,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -808,10 +798,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -891,10 +880,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
@@ -903,10 +891,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -991,10 +978,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago; ignored for hp_balance"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance"
           },
           {
             "in": "query",
@@ -1003,10 +989,9 @@ DECLARE
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today; ignored for hp_balance"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today; ignored for hp_balance"
           },
           {
             "in": "query",
@@ -1168,8 +1153,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 1 year ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago
       - in: query
         name: to_date
         required: false
@@ -1177,8 +1161,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1294,8 +1277,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -1303,8 +1285,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1457,8 +1438,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -1466,8 +1446,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: group_by
         required: false
@@ -1572,8 +1551,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -1581,8 +1559,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1815,8 +1792,7 @@ $_$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
           type: string
-          format: date
-        description: Start cohort month (inclusive), defaults to 1 year ago
+        description: Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago
       - in: query
         name: to_date
         required: false
@@ -1824,8 +1800,7 @@ $_$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End cohort month (inclusive), defaults to today
+        description: Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today
     responses:
       '200':
         description: Cohort retention rows ordered by month
@@ -1914,8 +1889,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -1923,8 +1897,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1967,8 +1940,8 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_daily_active_users;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_daily_active_users(
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'day',
     "operation_types" TEXT = 'all'
 )
@@ -1977,11 +1950,16 @@ RETURNS TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
+    _from DATE;
+    _to DATE;
     -- op_class codes resolved from operation_types. -1 is the reserved ALL rollup
     -- (every authored op); 1 post, 2 comment, 3 vote, 4 transfer, 5 custom_json.
     _classes SMALLINT[];
     _bad     TEXT;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
     -- sending e.g. "all"/"day" (%22all%22) instead of all/day, which makes the
     -- strict operation_types enum check below reject the value. Strip a surrounding
@@ -2052,7 +2030,7 @@ BEGIN
             COUNT(DISTINCT aud.account_id)      AS active_accounts
         FROM haf_stats_backend.active_users_daily aud
         WHERE aud.op_class = ANY(_classes)
-          AND aud.day BETWEEN from_date AND to_date
+          AND aud.day BETWEEN _from AND _to
         GROUP BY 1
     ),
     ops AS (
@@ -2061,7 +2039,7 @@ BEGIN
             SUM(auo.operations)                 AS operations
         FROM haf_stats_backend.active_user_ops_daily auo
         WHERE auo.op_class = ANY(_classes)
-          AND auo.day BETWEEN from_date AND to_date
+          AND auo.day BETWEEN _from AND _to
         GROUP BY 1
     )
     SELECT
@@ -2100,8 +2078,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -2109,8 +2086,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -2245,8 +2221,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
@@ -2254,8 +2229,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -2391,8 +2365,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago; ignored for hp_balance
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance
       - in: query
         name: to_date
         required: false
@@ -2400,8 +2373,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today; ignored for hp_balance
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today; ignored for hp_balance
       - in: query
         name: limit_count
         required: false
