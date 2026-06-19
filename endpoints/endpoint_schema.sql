@@ -1,5 +1,54 @@
 SET ROLE haf_stats_owner;
 
+-- ---------------------------------------------------------------------------
+-- #23: from_date / to_date filter inputs accept EITHER a block number OR a
+-- date/timestamp string. Co-located here (rather than db/) so it is present
+-- whenever the endpoints are installed, including the stub endpoint-test stack
+-- that loads only this file. An integer input resolves to that block's date
+-- (clamped to head); anything else is parsed as a date; NULL/'' -> the default.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION haf_stats_app.to_filter_date(_input TEXT, _default DATE)
+RETURNS DATE
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _block BIGINT;
+    _result DATE;
+BEGIN
+    _input := TRIM('"' FROM COALESCE(_input, ''));
+    IF _input = '' THEN
+        RETURN _default;
+    END IF;
+
+    BEGIN
+        _block := _input::BIGINT;
+    EXCEPTION WHEN OTHERS THEN
+        _block := NULL;
+    END;
+
+    IF _block IS NOT NULL THEN
+        IF _block <= 0 THEN
+            RAISE SQLSTATE '22023' USING
+                MESSAGE = 'block number must be positive, got: ' || _input;
+        END IF;
+        SELECT b.created_at::DATE INTO _result
+        FROM hafd.blocks b
+        WHERE b.num = LEAST(_block, (SELECT MAX(num) FROM hafd.blocks));
+        RETURN _result;
+    END IF;
+
+    BEGIN
+        RETURN _input::DATE;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid from/to value (expected a block number or YYYY-MM-DD date): ' || _input;
+    END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
+
 /** openapi
 openapi: 3.1.0
 info:
