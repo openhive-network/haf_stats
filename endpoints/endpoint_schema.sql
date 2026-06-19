@@ -1,5 +1,57 @@
 SET ROLE haf_stats_owner;
 
+-- ---------------------------------------------------------------------------
+-- #23: from_date / to_date filter inputs accept EITHER a block number OR a
+-- date/timestamp string. Co-located here (not db/) so it is present whenever the
+-- endpoints are installed, including the stub endpoint-test stack that loads only
+-- this file. Integer -> that block's date; anything else -> parsed date; NULL/'' ->
+-- the caller default. NOTE: resolution reads hafd.blocks (irreversible blocks only)
+-- and clamps via LEAST(_block, MAX(num)); a still-reversible (very recent) block
+-- number therefore resolves to the head irreversible block's date. Harmless at the
+-- day-bucket granularity of these endpoints.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION haf_stats_app.to_filter_date(_input TEXT, _default DATE)
+RETURNS DATE
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _block BIGINT;
+    _result DATE;
+BEGIN
+    _input := TRIM('"' FROM COALESCE(_input, ''));
+    IF _input = '' THEN
+        RETURN _default;
+    END IF;
+
+    BEGIN
+        _block := _input::BIGINT;
+    EXCEPTION WHEN OTHERS THEN
+        _block := NULL;
+    END;
+
+    IF _block IS NOT NULL THEN
+        IF _block <= 0 THEN
+            RAISE SQLSTATE '22023' USING
+                MESSAGE = 'block number must be positive, got: ' || _input;
+        END IF;
+        SELECT b.created_at::DATE INTO _result
+        FROM hafd.blocks b
+        WHERE b.num = LEAST(_block, (SELECT MAX(num) FROM hafd.blocks));
+        RETURN _result;
+    END IF;
+
+    BEGIN
+        RETURN _input::DATE;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid from/to value (expected a block number or YYYY-MM-DD date): ' || _input;
+    END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
+
 /** openapi
 openapi: 3.1.0
 info:
@@ -155,24 +207,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 1 year ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -259,24 +309,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -367,24 +415,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -449,24 +495,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -572,24 +616,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '1 year')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start cohort month (inclusive), defaults to 1 year ago"
+            "description": "Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End cohort month (inclusive), defaults to today"
+            "description": "Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today"
           }
         ],
         "responses": {
@@ -653,24 +695,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -745,24 +785,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -840,24 +878,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
           },
           {
             "in": "query",
@@ -940,24 +976,22 @@ DECLARE
             "name": "from_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "Start date (inclusive), defaults to 30 days ago; ignored for hp_balance"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance"
           },
           {
             "in": "query",
             "name": "to_date",
             "required": false,
             "schema": {
-              "x-sql-datatype": "DATE",
+              "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NOW()::DATE",
-              "type": "string",
-              "format": "date"
+              "type": "string"
             },
-            "description": "End date (inclusive), defaults to today; ignored for hp_balance"
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today; ignored for hp_balance"
           },
           {
             "in": "query",
@@ -1116,20 +1150,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 1 year ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1170,15 +1202,21 @@ $$;
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_financial_summary;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_financial_summary(
     "account" TEXT,
-    "from_date" DATE = (NOW() - INTERVAL '1 year')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'month'
 )
 RETURNS TABLE(period TEXT, category TEXT, direction TEXT, hive_nai BIGINT, hbd_nai BIGINT, vests_nai BIGINT, op_count INT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
     -- sending e.g. "month" (%22month%22) instead of month. Strip a surrounding
     -- pair of double quotes so the value passes the enum check below regardless of
@@ -1203,7 +1241,7 @@ BEGIN
     FROM haf_stats_backend.account_financial_daily afd
     JOIN hafd.accounts ha ON ha.id = afd.account_id
     WHERE ha.name  = "account"
-      AND afd.day BETWEEN "from_date" AND "to_date"
+      AND afd.day BETWEEN _from AND _to
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3;
 END;
@@ -1236,20 +1274,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1295,8 +1331,8 @@ $$;
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_content_stats;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_content_stats(
     "account" TEXT,
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'month'
 )
 RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, votes_received BIGINT, replies_received BIGINT, author_reward_hive_nai BIGINT, author_reward_hbd_nai BIGINT, author_reward_vests_nai BIGINT)
@@ -1304,8 +1340,13 @@ RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, votes_cast BIGINT, vot
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
+    _from DATE;
+    _to DATE;
     _account_id INT;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
     "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
@@ -1337,7 +1378,7 @@ BEGIN
             SUM(acd.replies_received) AS replies_received
         FROM haf_stats_backend.account_content_daily acd
         WHERE acd.account_id = _account_id
-          AND acd.day BETWEEN "from_date" AND "to_date"
+          AND acd.day BETWEEN _from AND _to
         GROUP BY 1
     ),
     rewards AS (
@@ -1348,7 +1389,7 @@ BEGIN
             SUM(afd.vests_nai) AS vests_nai
         FROM haf_stats_backend.account_financial_daily afd
         WHERE afd.account_id = _account_id
-          AND afd.day BETWEEN "from_date" AND "to_date"
+          AND afd.day BETWEEN _from AND _to
           AND afd.category = 'Author Reward'
           AND afd.direction = 'income'
         GROUP BY 1
@@ -1394,20 +1435,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: group_by
         required: false
@@ -1442,15 +1481,21 @@ $$;
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
     "account" TEXT,
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "group_by" TEXT = 'op_type'
 )
 RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "op_type"); see issue #22.
     group_by := TRIM('"' FROM group_by);
     IF group_by IS NULL OR group_by NOT IN ('op_type', 'app') THEN
@@ -1470,7 +1515,7 @@ BEGIN
         JOIN hafd.accounts a ON a.id = rol.account_id
         LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
         WHERE a.name             = account
-          AND rol."timestamp"::DATE BETWEEN from_date AND to_date
+          AND rol."timestamp"::DATE BETWEEN _from AND _to
     ),
     totals AS (SELECT SUM(base.rc_cost) AS grand_total FROM base)
     SELECT
@@ -1503,20 +1548,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1551,15 +1594,21 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_rc_utilization;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
     granularity := TRIM('"' FROM granularity);
     -- Validate granularity before it reaches DATE_TRUNC below: an unsupported
@@ -1578,7 +1627,7 @@ BEGIN
             SUM(rol.rc_cost)::BIGINT                             AS rc_label_total
         FROM haf_stats_backend.rc_operation_log rol
         LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
-        WHERE rol."timestamp"::DATE BETWEEN from_date AND to_date
+        WHERE rol."timestamp"::DATE BETWEEN _from AND _to
         GROUP BY 1, 2
     )
     SELECT
@@ -1740,20 +1789,18 @@ $_$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '1 year')::DATE"
           type: string
-          format: date
-        description: Start cohort month (inclusive), defaults to 1 year ago
+        description: Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End cohort month (inclusive), defaults to today
+        description: Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today
     responses:
       '200':
         description: Cohort retention rows ordered by month
@@ -1788,8 +1835,8 @@ $_$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_account_funnel;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_account_funnel(
-    "from_date" DATE = (NOW() - INTERVAL '1 year')::DATE,
-    "to_date" DATE = NOW()::DATE
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL
 )
 RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
 -- openapi-generated-code-end
@@ -1805,7 +1852,9 @@ AS $$
         acr.active_at_90d,
         ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
     FROM haf_stats_backend.account_cohort_retention acr
-    WHERE acr.cohort_month BETWEEN from_date AND to_date
+    WHERE acr.cohort_month
+        BETWEEN haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE)
+        AND haf_stats_app.to_filter_date("to_date", NOW()::DATE)
     ORDER BY acr.cohort_month;
 $$;
 
@@ -1837,20 +1886,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -1893,8 +1940,8 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_daily_active_users;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_daily_active_users(
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'day',
     "operation_types" TEXT = 'all'
 )
@@ -1903,11 +1950,16 @@ RETURNS TABLE(period TEXT, active_accounts BIGINT, operations BIGINT)
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
+    _from DATE;
+    _to DATE;
     -- op_class codes resolved from operation_types. -1 is the reserved ALL rollup
     -- (every authored op); 1 post, 2 comment, 3 vote, 4 transfer, 5 custom_json.
     _classes SMALLINT[];
     _bad     TEXT;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
     -- sending e.g. "all"/"day" (%22all%22) instead of all/day, which makes the
     -- strict operation_types enum check below reject the value. Strip a surrounding
@@ -1978,7 +2030,7 @@ BEGIN
             COUNT(DISTINCT aud.account_id)      AS active_accounts
         FROM haf_stats_backend.active_users_daily aud
         WHERE aud.op_class = ANY(_classes)
-          AND aud.day BETWEEN from_date AND to_date
+          AND aud.day BETWEEN _from AND _to
         GROUP BY 1
     ),
     ops AS (
@@ -1987,7 +2039,7 @@ BEGIN
             SUM(auo.operations)                 AS operations
         FROM haf_stats_backend.active_user_ops_daily auo
         WHERE auo.op_class = ANY(_classes)
-          AND auo.day BETWEEN from_date AND to_date
+          AND auo.day BETWEEN _from AND _to
         GROUP BY 1
     )
     SELECT
@@ -2023,20 +2075,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -2081,15 +2131,21 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_vote_stats;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_vote_stats(
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, total_votes BIGINT, upvotes BIGINT, downvotes BIGINT, unvotes BIGINT, self_votes BIGINT, unique_voters BIGINT, downvote_pct NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
     "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
@@ -2112,7 +2168,7 @@ BEGIN
             SUM(nvd.unvotes)    AS unvotes,
             SUM(nvd.self_votes) AS self_votes
         FROM haf_stats_backend.network_vote_daily nvd
-        WHERE nvd.day BETWEEN "from_date" AND "to_date"
+        WHERE nvd.day BETWEEN _from AND _to
         GROUP BY 1
     ),
     voters AS (
@@ -2120,7 +2176,7 @@ BEGIN
             DATE_TRUNC("granularity", nvd.day) AS period,
             COUNT(DISTINCT nvd.voter_id)        AS unique_voters
         FROM haf_stats_backend.network_voter_daily nvd
-        WHERE nvd.day BETWEEN "from_date" AND "to_date"
+        WHERE nvd.day BETWEEN _from AND _to
         GROUP BY 1
     )
     SELECT
@@ -2162,20 +2218,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
         name: granularity
         required: false
@@ -2211,15 +2265,21 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_content_volume;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_content_volume(
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "granularity" TEXT = 'day'
 )
 RETURNS TABLE(period TEXT, posts BIGINT, comments BIGINT, unique_authors BIGINT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
     "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
@@ -2240,7 +2300,7 @@ BEGIN
             SUM(ncd.posts)    AS posts,
             SUM(ncd.comments) AS comments
         FROM haf_stats_backend.network_content_daily ncd
-        WHERE ncd.day BETWEEN "from_date" AND "to_date"
+        WHERE ncd.day BETWEEN _from AND _to
         GROUP BY 1
     ),
     authors AS (
@@ -2248,7 +2308,7 @@ BEGIN
             DATE_TRUNC("granularity", nad.day) AS period,
             COUNT(DISTINCT nad.author_id)       AS unique_authors
         FROM haf_stats_backend.network_author_daily nad
-        WHERE nad.day BETWEEN "from_date" AND "to_date"
+        WHERE nad.day BETWEEN _from AND _to
         GROUP BY 1
     )
     SELECT
@@ -2302,20 +2362,18 @@ $$;
         name: from_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
           type: string
-          format: date
-        description: Start date (inclusive), defaults to 30 days ago; ignored for hp_balance
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance
       - in: query
         name: to_date
         required: false
         schema:
-          x-sql-datatype: DATE
+          x-sql-datatype: TEXT
           x-sql-default-value: "NOW()::DATE"
           type: string
-          format: date
-        description: End date (inclusive), defaults to today; ignored for hp_balance
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today; ignored for hp_balance
       - in: query
         name: limit_count
         required: false
@@ -2355,8 +2413,8 @@ $$;
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_top_accounts;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_top_accounts(
     "metric" TEXT = 'author_rewards',
-    "from_date" DATE = (NOW() - INTERVAL '30 days')::DATE,
-    "to_date" DATE = NOW()::DATE,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
     "limit_count" INT = 25
 )
 RETURNS TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGINT, value_vests_nai BIGINT, op_count BIGINT)
@@ -2364,10 +2422,15 @@ RETURNS TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGIN
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
+    _from DATE;
+    _to DATE;
     _category TEXT;
     _direction TEXT;
     _balance_rel TEXT;
 BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
     -- Tolerate Wax's JSON-encoded string params (e.g. "author_rewards"); see issue #22.
     "metric" := TRIM('"' FROM "metric");
     IF "metric" IS NULL OR "metric" NOT IN ('author_rewards', 'curation_rewards',
@@ -2406,7 +2469,7 @@ BEGIN
             FROM haf_stats_backend.account_financial_daily f
             WHERE f.category = _category
               AND f.direction = 'income'
-              AND f.day BETWEEN "from_date" AND "to_date"
+              AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id
             ORDER BY SUM(f.vests_nai) DESC, SUM(f.hbd_nai) DESC,
                 SUM(f.hive_nai) DESC, f.account_id ASC
@@ -2442,7 +2505,7 @@ BEGIN
             FROM haf_stats_backend.account_financial_daily f
             WHERE f.category = 'Transfer'
               AND f.direction = _direction
-              AND f.day BETWEEN "from_date" AND "to_date"
+              AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id
             ORDER BY SUM(f.hive_nai) DESC, SUM(f.hbd_nai) DESC, f.account_id ASC
             LIMIT "limit_count"
@@ -2467,7 +2530,7 @@ BEGIN
             SELECT au.account_id, SUM(au.ops) AS ops
             FROM haf_stats_backend.active_users_daily au
             WHERE au.op_class = -1
-              AND au.day BETWEEN "from_date" AND "to_date"
+              AND au.day BETWEEN _from AND _to
             GROUP BY au.account_id
             ORDER BY SUM(au.ops) DESC, au.account_id ASC
             LIMIT "limit_count"
