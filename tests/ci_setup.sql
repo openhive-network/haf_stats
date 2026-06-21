@@ -171,6 +171,15 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
     PRIMARY KEY (day, op_class)
 );
 
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_period_counts (
+    period_type TEXT NOT NULL,
+    period DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    active_accounts BIGINT NOT NULL DEFAULT 0,
+    operations BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, op_class, period)
+);
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
