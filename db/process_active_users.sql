@@ -77,6 +77,106 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
 
 GRANT SELECT ON haf_stats_backend.active_user_ops_daily TO haf_stats_user;
 
+-- Pre-aggregated endpoint rollup for get_daily_active_users. active_accounts is
+-- non-additive (an account active on several days in a week/month counts once), so
+-- the endpoint cannot sum daily counts and previously COUNT(DISTINCT)-scanned the
+-- whole active_users_daily membership (500M+ rows, 80+ GB) on every request - several
+-- seconds per call regardless of how few rows it returned, because all granularities
+-- dedup the same member rows. Mirroring account_cohort_retention, we precompute one
+-- row per (period_type, period, op_class) and let the endpoint do a cheap indexed
+-- read. period is DATE_TRUNC(period_type, day); period_type is 'day' | 'week' |
+-- 'month'; op_class matches active_users_daily (-1 = ALL, 1..5 named). The refresh is
+-- exact - a full re-aggregation of the affected periods, no HLL/approximation. The PK
+-- is ordered (period_type, op_class, period) to make the endpoint's
+-- period-range-within-a-class read a single index range scan.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_period_counts (
+    period_type TEXT NOT NULL,
+    period DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    active_accounts BIGINT NOT NULL DEFAULT 0,
+    operations BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, op_class, period)
+);
+
+GRANT SELECT ON haf_stats_backend.active_users_period_counts TO haf_stats_user;
+
+-- ---------------------------------------------------------------------------
+-- Rollup refresh (feeds get_daily_active_users)
+--
+-- Recomputes active_users_period_counts for every day/week/month period that
+-- includes a day >= _lo, exactly (re-aggregates active_users_daily and
+-- active_user_ops_daily). The ON CONFLICT upsert is idempotent, so callers pass a
+-- recent _lo for the cheap incremental refresh (current period + slack) and the
+-- genesis day for a one-time full rebuild on an already-synced node. Daily distinct
+-- is just COUNT(*) - the (day, op_class, account_id) PK already guarantees one row
+-- per account per day; week/month need COUNT(DISTINCT account_id). active_accounts
+-- comes from the membership table, operations from the additive op counter, joined
+-- per (period, op_class).
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_active_users_periods(_lo DATE)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- day: distinct-per-day == row count of the membership PK
+    INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
+    SELECT 'day', COALESCE(a.period, o.period), COALESCE(a.op_class, o.op_class), COALESCE(a.acct, 0), COALESCE(o.ops, 0)
+    FROM (
+        SELECT day AS period, op_class, COUNT(*) AS acct
+        FROM haf_stats_backend.active_users_daily
+        WHERE day >= _lo
+        GROUP BY day, op_class
+    ) a
+    FULL JOIN (
+        SELECT day AS period, op_class, operations AS ops
+        FROM haf_stats_backend.active_user_ops_daily
+        WHERE day >= _lo
+    ) o ON o.period = a.period AND o.op_class = a.op_class
+    ON CONFLICT (period_type, op_class, period) DO UPDATE SET
+        active_accounts = EXCLUDED.active_accounts,
+        operations = EXCLUDED.operations;
+
+    -- week
+    INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
+    SELECT 'week', COALESCE(a.period, o.period), COALESCE(a.op_class, o.op_class), COALESCE(a.acct, 0), COALESCE(o.ops, 0)
+    FROM (
+        SELECT DATE_TRUNC('week', day)::DATE AS period, op_class, COUNT(DISTINCT account_id) AS acct
+        FROM haf_stats_backend.active_users_daily
+        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        GROUP BY 1, 2
+    ) a
+    FULL JOIN (
+        SELECT DATE_TRUNC('week', day)::DATE AS period, op_class, SUM(operations) AS ops
+        FROM haf_stats_backend.active_user_ops_daily
+        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        GROUP BY 1, 2
+    ) o ON o.period = a.period AND o.op_class = a.op_class
+    ON CONFLICT (period_type, op_class, period) DO UPDATE SET
+        active_accounts = EXCLUDED.active_accounts,
+        operations = EXCLUDED.operations;
+
+    -- month
+    INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
+    SELECT 'month', COALESCE(a.period, o.period), COALESCE(a.op_class, o.op_class), COALESCE(a.acct, 0), COALESCE(o.ops, 0)
+    FROM (
+        SELECT DATE_TRUNC('month', day)::DATE AS period, op_class, COUNT(DISTINCT account_id) AS acct
+        FROM haf_stats_backend.active_users_daily
+        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        GROUP BY 1, 2
+    ) a
+    FULL JOIN (
+        SELECT DATE_TRUNC('month', day)::DATE AS period, op_class, SUM(operations) AS ops
+        FROM haf_stats_backend.active_user_ops_daily
+        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        GROUP BY 1, 2
+    ) o ON o.period = a.period AND o.op_class = a.op_class
+    ON CONFLICT (period_type, op_class, period) DO UPDATE SET
+        active_accounts = EXCLUDED.active_accounts,
+        operations = EXCLUDED.operations;
+END;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- Processor
 --
@@ -117,6 +217,8 @@ SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 SET enable_bitmapscan = 'off'
 AS $$
+DECLARE
+    _block_day DATE;
 BEGIN
 
 WITH authored AS MATERIALIZED (
@@ -198,6 +300,21 @@ INSERT INTO haf_stats_backend.active_user_ops_daily (day, op_class, operations)
 SELECT day, op_class, operations FROM op_counts
 ON CONFLICT (day, op_class) DO UPDATE SET
     operations = active_user_ops_daily.operations + EXCLUDED.operations;
+
+-- Refresh the get_daily_active_users rollup. Like account_cohort_retention this is the
+-- dominant per-batch cost yet feeds a coarse metric, so refresh only when the range
+-- crosses a ~1200-block (~1 hour) boundary, and only periods recent enough to still
+-- change: the current month (back to the start of the week straddling it, via the
+-- function's DATE_TRUNC) plus one month of slack. Older periods are final and keep
+-- their last-written values. A fresh replay builds the whole rollup this way as chain
+-- time advances; an already-synced node needs a one-time full refresh
+-- (SELECT haf_stats_app.refresh_active_users_periods(<genesis day>)).
+IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
+    SELECT created_at::DATE INTO _block_day FROM hafd.blocks WHERE num = _last_block;
+    PERFORM haf_stats_app.refresh_active_users_periods(
+        (DATE_TRUNC('month', _block_day) - INTERVAL '1 month')::DATE
+    );
+END IF;
 
 END;
 $$;
