@@ -2018,28 +2018,50 @@ BEGIN
         _classes := ARRAY[-1]::SMALLINT[];
     END IF;
 
+    -- Fast path: ALL (-1) or a single named class is pre-aggregated per period in
+    -- active_users_period_counts (maintained by process_active_users), so read it
+    -- directly instead of COUNT(DISTINCT)-scanning the membership table. Every period
+    -- overlapping [_from, _to] is returned at its FULL-period value: a from/to landing
+    -- mid-period yields that period's full count, not a partial slice - consistent with
+    -- account_cohort_retention and what a time-series chart expects.
+    IF array_length(_classes, 1) = 1 THEN
+        RETURN QUERY
+        SELECT
+            TO_CHAR(pc.period, 'YYYY-MM-DD'),
+            pc.active_accounts,
+            pc.operations
+        FROM haf_stats_backend.active_users_period_counts pc
+        WHERE pc.period_type = granularity
+          AND pc.op_class = _classes[1]
+          AND pc.period >= DATE_TRUNC(granularity, _from)::DATE
+          AND pc.period <= _to
+        ORDER BY 1;
+        RETURN;
+    END IF;
+
+    -- Multi-class subset (>=2 named classes): active_accounts is the DISTINCT union
+    -- across the selected classes (an account active in two of them counts once), which
+    -- the per-class rollup cannot pre-sum, so re-aggregate the membership for these
+    -- uncommon requests. operations is additive per class. Same full-period bucketing.
     RETURN QUERY
-    -- active_accounts counts the distinct presence set at the requested grain (rolling
-    -- daily membership up to week/month - summing daily counts would overcount). For a
-    -- multi-class request COUNT(DISTINCT) unions the classes (an account active in two
-    -- categories counts once). operations sums the additive per-class counters; each op
-    -- belongs to exactly one named class, so a subset never double-counts.
     WITH accounts AS (
         SELECT
-            DATE_TRUNC(granularity, aud.day)  AS period,
-            COUNT(DISTINCT aud.account_id)      AS active_accounts
+            DATE_TRUNC(granularity, aud.day)::DATE AS period,
+            COUNT(DISTINCT aud.account_id) AS active_accounts
         FROM haf_stats_backend.active_users_daily aud
         WHERE aud.op_class = ANY(_classes)
-          AND aud.day BETWEEN _from AND _to
+          AND aud.day >= DATE_TRUNC(granularity, _from)::DATE
+          AND aud.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
         GROUP BY 1
     ),
     ops AS (
         SELECT
-            DATE_TRUNC(granularity, auo.day)  AS period,
-            SUM(auo.operations)                 AS operations
+            DATE_TRUNC(granularity, auo.day)::DATE AS period,
+            SUM(auo.operations) AS operations
         FROM haf_stats_backend.active_user_ops_daily auo
         WHERE auo.op_class = ANY(_classes)
-          AND auo.day BETWEEN _from AND _to
+          AND auo.day >= DATE_TRUNC(granularity, _from)::DATE
+          AND auo.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
         GROUP BY 1
     )
     SELECT
