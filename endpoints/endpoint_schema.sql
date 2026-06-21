@@ -2051,7 +2051,7 @@ BEGIN
         FROM haf_stats_backend.active_users_daily aud
         WHERE aud.op_class = ANY(_classes)
           AND aud.day >= DATE_TRUNC(granularity, _from)::DATE
-          AND aud.day <= _to
+          AND aud.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
         GROUP BY 1
     ),
     ops AS (
@@ -2061,7 +2061,7 @@ BEGIN
         FROM haf_stats_backend.active_user_ops_daily auo
         WHERE auo.op_class = ANY(_classes)
           AND auo.day >= DATE_TRUNC(granularity, _from)::DATE
-          AND auo.day <= _to
+          AND auo.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
         GROUP BY 1
     )
     SELECT

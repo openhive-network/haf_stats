@@ -180,6 +180,28 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_period_counts (
     PRIMARY KEY (period_type, op_class, period)
 );
 
+-- Fixtures for the get_daily_active_users exact-value tavern tests.
+-- Fast path (ALL / single class) reads active_users_period_counts directly.
+INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
+VALUES
+    ('month', '2020-01-01', -1, 100, 5000),
+    ('month', '2020-02-01', -1, 150, 6000)
+ON CONFLICT DO NOTHING;
+
+-- Fallback fixture (multi-class re-aggregation): a post+vote query with to_date mid-February
+-- must still return the FULL February - accounts active after the 15th are included and an
+-- account active in both classes counts once. op_class 1 = post, 3 = vote.
+INSERT INTO haf_stats_backend.active_users_daily (day, op_class, account_id, ops)
+VALUES
+    ('2020-02-10', 1, 1001, 1), ('2020-02-10', 3, 1001, 1),
+    ('2020-02-20', 1, 1002, 1),
+    ('2020-02-20', 3, 1003, 1)
+ON CONFLICT DO NOTHING;
+INSERT INTO haf_stats_backend.active_user_ops_daily (day, op_class, operations)
+VALUES
+    ('2020-02-10', 1, 1), ('2020-02-10', 3, 1), ('2020-02-20', 1, 1), ('2020-02-20', 3, 1)
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,

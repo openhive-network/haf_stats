@@ -304,13 +304,15 @@ ON CONFLICT (day, op_class) DO UPDATE SET
 -- Refresh the get_daily_active_users rollup. Like account_cohort_retention this is the
 -- dominant per-batch cost yet feeds a coarse metric, so refresh only when the range
 -- crosses a ~1200-block (~1 hour) boundary, and only periods recent enough to still
--- change: the current month (back to the start of the week straddling it, via the
--- function's DATE_TRUNC) plus one month of slack. Older periods are final and keep
--- their last-written values. A fresh replay builds the whole rollup this way as chain
--- time advances; an already-synced node needs a one-time full refresh
+-- change. The lower bound is derived from the batch's FIRST block (not the last) minus
+-- one month of slack, so refresh covers every period this batch touched even if a large
+-- catch-up batch spans several months of chain time - the build stays gap-free without
+-- assuming a bound on batch size. Older periods are final and keep their last-written
+-- values. A fresh replay builds the whole rollup this way as chain time advances; an
+-- already-synced node needs a one-time full refresh
 -- (SELECT haf_stats_app.refresh_active_users_periods(<genesis day>)).
 IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-    SELECT created_at::DATE INTO _block_day FROM hafd.blocks WHERE num = _last_block;
+    SELECT created_at::DATE INTO _block_day FROM hafd.blocks WHERE num = _first_block;
     PERFORM haf_stats_app.refresh_active_users_periods(
         (DATE_TRUNC('month', _block_day) - INTERVAL '1 month')::DATE
     );

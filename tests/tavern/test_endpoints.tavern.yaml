@@ -316,6 +316,62 @@ stages:
       json: !anylist
 
 ---
+test_name: Daily active users fast path returns exact precomputed full-period values
+
+includes:
+  - !include common.yaml
+
+# ALL (op_class -1) reads the active_users_period_counts rollup directly. The fixture
+# (ci_setup.sql) has full-month values for Jan/Feb 2020; a to_date mid-February must
+# still return the FULL February, not a partial slice.
+stages:
+  - name: GET /rpc/get_daily_active_users monthly, ALL, to_date mid-period
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        from_date:   "2020-01-01"
+        to_date:     "2020-02-15"
+        granularity: "month"
+        operation_types: "all"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          active_accounts: 100
+          operations: 5000
+        - period: "2020-02-01"
+          active_accounts: 150
+          operations: 6000
+
+---
+test_name: Daily active users multi-class fallback uses full-period bucketing
+
+includes:
+  - !include common.yaml
+
+# post+vote (>=2 classes) re-aggregates the membership. With to_date mid-February the
+# whole month must be counted: accounts active on the 20th are included, and the account
+# active in both post and vote counts once -> 3 distinct accounts, 4 operations. A
+# truncating upper bound (day <= to_date) would wrongly return 1 account / 1 operation.
+stages:
+  - name: GET /rpc/get_daily_active_users monthly, post+vote, to_date mid-period
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        from_date:   "2020-02-01"
+        to_date:     "2020-02-15"
+        granularity: "month"
+        operation_types: "post,vote"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-02-01"
+          active_accounts: 3
+          operations: 4
+
+---
 test_name: Daily active users rejects invalid granularity
 
 includes:
