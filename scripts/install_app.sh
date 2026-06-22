@@ -42,7 +42,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 
-# 4. Seed lookup tables (app registry + financial op categories)
+# 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
 
 # 5. API endpoints

@@ -17,9 +17,9 @@ hardcoded constants as truth; each derives the value by an independent route.
 Both run in CI inside the integration stack (`scripts/run_verification.sh`, invoked by
 the `integration-tests` job) and fail the job on any divergence.
 
-## Verified (2016-04, against a full 5,000,000-block replay)
+## Verified against a full 5,000,000-block replay
 
-All 22 asserted fields reproduce under **both** guards:
+All asserted fields reproduce under the applicable guards:
 
 | Endpoint | Value | Independent (raw ops) | External (hived) |
 |----------|-------|:---:|:---:|
@@ -28,7 +28,8 @@ All 22 asserted fields reproduce under **both** guards:
 | daily_active_users | accounts 3739 / ops 116298 | ✓ | — |
 | top_accounts transfer_in (bittrex) | 320700219 / 971 ops | ✓ | ✓ |
 | account_content_stats (tuck-fheman) | 54 / 100 / cast 112 / recv 265 / replies 86 | ✓ | ✓ (posts/comments/cast) |
-| account_financial_summary (bittrex) | income 320700219·971 / expense 169015773·322 | ✓ | ✓ |
+| account_financial_summary (bittrex) | transfer_operation incoming 320700219·971 / outgoing 169015773·322 | ✓ | ✓ |
+| expanded financial categories | fill_order legs, routed/re-vested power downs, liquidity rewards | ✓ | — |
 | account_funnel | new_accounts 6840 | ✓ | — |
 
 (Network-wide aggregates have no native hived endpoint, so they are covered by the

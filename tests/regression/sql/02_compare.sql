@@ -41,11 +41,11 @@ BEGIN
         ) v(account, field, expected, actual)
         WHERE expected IS DISTINCT FROM actual;
 
-        -- Financial endpoint: Transfer income / expense for the month.
-        SELECT COALESCE(SUM(hive_nai) FILTER (WHERE direction='income'  AND category='Transfer'), 0),
-               COALESCE(SUM(op_count) FILTER (WHERE direction='income'  AND category='Transfer'), 0),
-               COALESCE(SUM(hive_nai) FILTER (WHERE direction='expense' AND category='Transfer'), 0),
-               COALESCE(SUM(op_count) FILTER (WHERE direction='expense' AND category='Transfer'), 0)
+        -- Financial endpoint: transfer_operation incoming / outgoing for the month.
+        SELECT COALESCE(SUM(hive_nai) FILTER (WHERE direction='incoming' AND category='transfer_operation'), 0),
+               COALESCE(SUM(op_count) FILTER (WHERE direction='incoming' AND category='transfer_operation'), 0),
+               COALESCE(SUM(hive_nai) FILTER (WHERE direction='outgoing' AND category='transfer_operation'), 0),
+               COALESCE(SUM(op_count) FILTER (WHERE direction='outgoing' AND category='transfer_operation'), 0)
           INTO inc_hive, inc_ops, exp_hive, exp_ops
           FROM haf_stats_endpoints.get_account_financial_summary(e.account, '2016-04-01', '2016-04-30', 'month');
 

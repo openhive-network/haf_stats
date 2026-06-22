@@ -2688,8 +2688,8 @@ BEGIN
     -- Accounts are resolved AFTER aggregation + LIMIT (top N names only).
     IF "metric" IN ('author_rewards', 'curation_rewards') THEN
         _category := CASE "metric"
-            WHEN 'author_rewards' THEN 'Author Reward'
-            ELSE 'Curation Reward'
+            WHEN 'author_rewards' THEN 'author_reward_operation'
+            ELSE 'curation_reward_operation'
         END;
 
         RETURN QUERY
@@ -2704,7 +2704,7 @@ BEGIN
                 SUM(f.op_count)  AS ops
             FROM haf_stats_backend.account_financial_daily f
             WHERE f.category = _category
-              AND f.direction = 'income'
+              AND f.direction = 'incoming'
               AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id
             ORDER BY SUM(f.vests_nai) DESC, SUM(f.hbd_nai) DESC,
@@ -2725,8 +2725,8 @@ BEGIN
 
     ELSIF "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN
         _direction := CASE "metric"
-            WHEN 'transfer_volume_in' THEN 'income'
-            ELSE 'expense'
+            WHEN 'transfer_volume_in' THEN 'incoming'
+            ELSE 'outgoing'
         END;
 
         RETURN QUERY
@@ -2739,7 +2739,7 @@ BEGIN
                 SUM(f.hbd_nai)  AS hbd,
                 SUM(f.op_count) AS ops
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = 'Transfer'
+            WHERE f.category = 'transfer_operation'
               AND f.direction = _direction
               AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id

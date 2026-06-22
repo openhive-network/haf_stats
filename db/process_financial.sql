@@ -7,14 +7,10 @@ SET ROLE haf_stats_owner;
 -- Table
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS haf_stats_backend.op_financial_categories (
-    op_type_name TEXT NOT NULL PRIMARY KEY,
-    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense', 'neutral')),
-    category TEXT NOT NULL,
-    asset TEXT NOT NULL
-);
-
-GRANT SELECT ON haf_stats_backend.op_financial_categories TO haf_stats_user;
+-- Legacy op-category registry: the processor below inlines all category/
+-- direction logic and never reads this table, and it was seeded with the old
+-- income/expense vocabulary. Drop it (haf_stats issue #26).
+DROP TABLE IF EXISTS haf_stats_backend.op_financial_categories;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
@@ -27,6 +23,30 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     op_count INT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day, category, direction)
 );
+
+-- Migrate already-deployed tables created with the old income/expense CHECK:
+-- CREATE TABLE IF NOT EXISTS is a no-op when the table exists, so the stale
+-- constraint would otherwise reject the new incoming/outgoing inserts. NOT VALID
+-- skips re-checking existing rows; the DELETE below removes them outright so the
+-- constraint holds for everything that remains.
+ALTER TABLE haf_stats_backend.account_financial_daily
+DROP CONSTRAINT IF EXISTS account_financial_daily_direction_check;
+ALTER TABLE haf_stats_backend.account_financial_daily
+ADD CONSTRAINT account_financial_daily_direction_check
+CHECK (direction IN ('incoming', 'outgoing')) NOT VALID;
+
+-- Production resumes block processing immediately after install, and the new
+-- canonical-keyed upserts never overwrite rows written under the old
+-- income/expense + display-name vocabulary. Delete those stale rows here so the
+-- endpoint can never serve a mix of both vocabularies. Idempotent: a no-op once
+-- only canonical rows remain (and on fresh installs). Historical coverage is
+-- restored by scripts/rebuild_financial.sh (forward processing only fills new
+-- blocks).
+DELETE FROM haf_stats_backend.account_financial_daily
+WHERE direction NOT IN ('incoming', 'outgoing');
+
+ALTER TABLE haf_stats_backend.account_financial_daily
+VALIDATE CONSTRAINT account_financial_daily_direction_check;
 
 CREATE INDEX IF NOT EXISTS idx_afd_account_day
 ON haf_stats_backend.account_financial_daily (account_id, day DESC);
@@ -54,8 +74,15 @@ GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 --
 -- category = canonical Hive operation type name; direction = incoming/outgoing
 -- (aligns with the block explorer's ops vocabulary, haf_stats issue #26).
--- Op-type ids resolve via hive.get_op_type_id('<short_name>'), which handles
--- the 'hive::protocol::' prefix internally.
+-- Op-type ids are resolved once into locals from hafd.operation_types, whose
+-- names are fully qualified with the 'hive::protocol::' prefix (same lookup
+-- pattern as process_rc.sql / process_account_cohorts.sql).
+--
+-- DOUBLE COUNT (intentional): reward *accrual* (author_reward,
+-- comment_benefactor_reward, curation_reward) and reward *claim*
+-- (claim_reward_balance) are both 'incoming', so the same funds appear under the
+-- accrual and the claim category. Consumers must not sum across both as a net
+-- inflow.
 --
 -- Asset NAI: HIVE = @@000000021, HBD = @@000000013 (split where an `amount`
 -- field can be either). transfer and fill_order are multi-leg (sender/receiver,
@@ -69,6 +96,22 @@ CREATE OR REPLACE FUNCTION haf_stats_app.process_financial(
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    _author_reward_id              INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation');
+    _comment_benefactor_reward_id  INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::comment_benefactor_reward_operation');
+    _curation_reward_id            INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation');
+    _claim_reward_balance_id       INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::claim_reward_balance_operation');
+    _interest_id                   INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::interest_operation');
+    _transfer_id                   INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation');
+    _transfer_to_savings_id        INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_to_savings_operation');
+    _transfer_from_savings_id      INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_from_savings_operation');
+    _fill_transfer_from_savings_id INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_transfer_from_savings_operation');
+    _transfer_to_vesting_id        INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_to_vesting_operation');
+    _fill_vesting_withdraw_id      INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_vesting_withdraw_operation');
+    _producer_reward_id            INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::producer_reward_operation');
+    _liquidity_reward_id           INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::liquidity_reward_operation');
+    _proposal_pay_id               INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::proposal_pay_operation');
+    _fill_order_id                 INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_order_operation');
 BEGIN
 
 INSERT INTO haf_stats_backend.account_financial_daily
@@ -97,7 +140,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'author')
-    WHERE ov.op_type_id = hive.get_op_type_id('author_reward_operation')
+    WHERE ov.op_type_id = _author_reward_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -115,7 +158,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'benefactor')
-    WHERE ov.op_type_id = hive.get_op_type_id('comment_benefactor_reward_operation')
+    WHERE ov.op_type_id = _comment_benefactor_reward_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -133,7 +176,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'curator')
-    WHERE ov.op_type_id = hive.get_op_type_id('curation_reward_operation')
+    WHERE ov.op_type_id = _curation_reward_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -151,7 +194,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'account')
-    WHERE ov.op_type_id = hive.get_op_type_id('claim_reward_balance_operation')
+    WHERE ov.op_type_id = _claim_reward_balance_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -169,7 +212,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('interest_operation')
+    WHERE ov.op_type_id = _interest_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -189,7 +232,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-    WHERE ov.op_type_id = hive.get_op_type_id('transfer_operation')
+    WHERE ov.op_type_id = _transfer_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -209,7 +252,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
-    WHERE ov.op_type_id = hive.get_op_type_id('transfer_operation')
+    WHERE ov.op_type_id = _transfer_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -229,7 +272,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-    WHERE ov.op_type_id = hive.get_op_type_id('transfer_to_savings_operation')
+    WHERE ov.op_type_id = _transfer_to_savings_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -249,7 +292,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-    WHERE ov.op_type_id = hive.get_op_type_id('transfer_from_savings_operation')
+    WHERE ov.op_type_id = _transfer_from_savings_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -269,7 +312,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_transfer_from_savings_operation')
+    WHERE ov.op_type_id = _fill_transfer_from_savings_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -287,25 +330,31 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
-    WHERE ov.op_type_id = hive.get_op_type_id('transfer_to_vesting_operation')
+    WHERE ov.op_type_id = _transfer_to_vesting_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
 
-    -- 12. Power down (fill_vesting_withdraw): incoming for the withdrawing account.
+    -- 12. Power down (fill_vesting_withdraw): incoming for the deposit recipient.
+    -- `deposited` is credited to to_account (usually == from_account, but a
+    -- withdrawal route can send it elsewhere) and may be HIVE (normal power-down)
+    -- or VESTS (route that re-vests). `withdrawn` is the from_account's own VESTS
+    -- leaving its vesting balance, not a value inflow, so it is not recorded here.
     SELECT
         a.id,
         bv.created_at::DATE,
         'fill_vesting_withdraw_operation',
         'incoming',
-        COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0),
+        CASE WHEN (ov.body -> 'value' -> 'deposited' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
-        COALESCE((ov.body -> 'value' -> 'withdrawn' ->> 'amount')::BIGINT, 0),
+        CASE WHEN (ov.body -> 'value' -> 'deposited' ->> 'nai') = '@@000000037'
+             THEN COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         1
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from_account')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_vesting_withdraw_operation')
+    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to_account')
+    WHERE ov.op_type_id = _fill_vesting_withdraw_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -323,7 +372,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
-    WHERE ov.op_type_id = hive.get_op_type_id('producer_reward_operation')
+    WHERE ov.op_type_id = _producer_reward_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -341,7 +390,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('liquidity_reward_operation')
+    WHERE ov.op_type_id = _liquidity_reward_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -359,7 +408,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
-    WHERE ov.op_type_id = hive.get_op_type_id('proposal_pay_operation')
+    WHERE ov.op_type_id = _proposal_pay_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -379,7 +428,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'current_owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_order_operation')
+    WHERE ov.op_type_id = _fill_order_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -399,7 +448,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'current_owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_order_operation')
+    WHERE ov.op_type_id = _fill_order_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -419,7 +468,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'open_owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_order_operation')
+    WHERE ov.op_type_id = _fill_order_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
     UNION ALL
@@ -439,7 +488,7 @@ FROM (
     FROM hive.operations_view ov
     JOIN hafd.blocks bv ON bv.num = ov.block_num
     JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'open_owner')
-    WHERE ov.op_type_id = hive.get_op_type_id('fill_order_operation')
+    WHERE ov.op_type_id = _fill_order_id
       AND ov.block_num BETWEEN _first_block AND _last_block
 
 ) impacts

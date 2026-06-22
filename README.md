@@ -16,7 +16,7 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 
 | Endpoint | Unique because |
 |---|---|
-| `get_account_financial_summary` | Categorized income/expense per account — not in any existing API |
+| `get_account_financial_summary` | Categorized incoming/outgoing flows per account — not in any existing API |
 | `get_account_rc_footprint` | RC cost by op type and DApp — not in any existing API |
 | `get_account_content_stats` | Per-account posting & engagement (posts/comments/votes/replies) + author rewards — not aggregated in any existing API |
 | `get_network_rc_utilization` | Network-wide RC consumption by category — not in any existing API |
@@ -80,6 +80,7 @@ scripts/
   process_blocks.sh         Starts the infinite block-processing loop
   rebuild_account_cohorts.sh
                             Rebuilds account cohorts after definition changes
+  rebuild_financial.sh      Rebuilds account financial aggregates after category changes
 
 docker/
   docker-compose.yml        Production stack (4 services)
@@ -119,6 +120,25 @@ historical cohort tables. Stop the block processor, then run:
 `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may be supplied as environment
 variables. Restart the processor after the rebuild completes.
 
+### Rebuilding financial aggregates
+
+The financial category/direction vocabulary changed in issue #26 (canonical
+op-type names + `incoming`/`outgoing`). On an already-populated deployment the old
+rows are keyed differently and are never overwritten, so they must be cleared and
+reprocessed. Stop the block processor first, re-run `install_app.sh` (it migrates
+and validates the direction CHECK, deletes legacy rows, and drops the legacy
+`op_financial_categories` table), then:
+
+```bash
+./scripts/rebuild_financial.sh
+```
+
+`FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may be supplied as environment
+variables. By default `TO_BLOCK` is the app's recorded `last_processed_block`,
+not the HAF head; values beyond `last_processed_block` are rejected so restarting
+the processor cannot process rebuilt blocks a second time. Restart the processor
+after the rebuild completes.
+
 ## API Endpoints
 
 All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
@@ -127,7 +147,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 |---|---|---|---|
 | `GET /rpc/get_version` | ✅ Live | — | App git hash |
 | `GET /rpc/get_health` | ✅ Live | — | Last processed block + version |
-| `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account income/expense by category, granularity |
+| `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
 | `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /rpc/get_account_rc_footprint` | ⚠️ Blocked | process_rc.sql | Returns `[]` — RC consumption ops are not in HAF's op stream (see Known TODOs #2 / `docs/VERIFICATION.md`) |
 | `GET /rpc/get_network_rc_utilization` | ⚠️ Blocked | *(uses rc_operation_log)* | Returns `[]` — same RC ingest blocker as above |
