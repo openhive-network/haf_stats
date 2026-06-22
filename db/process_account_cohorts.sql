@@ -3,7 +3,21 @@ SET ROLE haf_stats_owner;
 -- Feature: new account cohort retention (get_network_account_funnel endpoint).
 --
 -- Tracks what percentage of accounts created in a given month are still active
--- (have at least one non-virtual operation) at 7, 30, and 90 days after creation.
+-- (authored an operation) at 7, 30, and 90 days after creation.
+--
+-- NOTE — this deliberately redefines the metric in TWO ways vs the prior
+-- (develop) implementation; both are intentional and called out in the MR:
+--   1. Activity SOURCE: "authored" now means the account is a required signing
+--      authority of a non-virtual op (hive.get_required_authorities), not any
+--      account_operations_view row. This excludes pow/pow2 mining, so a mining
+--      bot is no longer counted as a retained user (2016-04: 508/203/231 ->
+--      325/89/219).
+--   2. Activity WINDOW: Day-N retention is now activity during the exact 24-hour
+--      bracket [created_at + N days, created_at + N + 1 days), NOT the previous
+--      cumulative "active within N days" (earliest op <= created + N days). The
+--      bracket is the standard cohort-retention definition and makes D7/D30/D90
+--      independent signals; the cumulative form made every later window
+--      automatically true once an earlier one was.
 --
 -- Two tables:
 --   account_cohort_members  — one row per account, tracks per-account activity flags
@@ -30,9 +44,39 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_members (
 CREATE INDEX IF NOT EXISTS idx_acm_cohort
 ON haf_stats_backend.account_cohort_members (cohort_month);
 
-CREATE INDEX IF NOT EXISTS idx_acm_pending
-ON haf_stats_backend.account_cohort_members (created_at)
-WHERE NOT active_90d;
+-- The old idx_acm_pending partial index used WHERE NOT active_90d. That worked
+-- only when active_90d meant "ever active within 90 days"; with true D90
+-- retention, most accounts legitimately remain false forever and would bloat
+-- the partial index. A full created_at index keeps the 91-day range probe
+-- bounded without retaining a misleading notion of "pending".
+--
+-- CONCURRENTLY: this index swap is the one that can hit a populated table on an
+-- upgrade (idx_acm_created_at is new; the pre-existing idx_acm_cohort is a
+-- CREATE ... IF NOT EXISTS no-op there). install_app.sh loads each file with a
+-- plain psql -f (no --single-transaction), so every statement autocommits and
+-- CONCURRENTLY is permitted; it avoids the ACCESS EXCLUSIVE lock that would
+-- otherwise stall the live processor while the index builds.
+--
+-- A CONCURRENTLY build interrupted partway leaves an INVALID index behind, which
+-- the CREATE ... IF NOT EXISTS below would then skip forever. Drop any invalid
+-- leftover first (plain DROP — a brief lock, but only on this rare recovery
+-- path) so the create can rebuild it cleanly.
+DROP INDEX CONCURRENTLY IF EXISTS haf_stats_backend.idx_acm_pending;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'haf_stats_backend'
+          AND c.relname = 'idx_acm_created_at'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX haf_stats_backend.idx_acm_created_at;
+    END IF;
+END $$;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_acm_created_at
+ON haf_stats_backend.account_cohort_members (created_at);
 
 GRANT SELECT ON haf_stats_backend.account_cohort_members TO haf_stats_user;
 
@@ -47,7 +91,41 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
 GRANT SELECT ON haf_stats_backend.account_cohort_retention TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
--- Processor
+-- Summary refresh
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_account_cohort_retention(
+    _as_of TIMESTAMP,
+    _from_month DATE = NULL,
+    _to_month DATE = NULL
+)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+    INSERT INTO haf_stats_backend.account_cohort_retention
+        (cohort_month, new_accounts, active_at_7d, active_at_30d, active_at_90d)
+    SELECT
+        cohort_month,
+        COUNT(*) AS new_accounts,
+        CASE WHEN MAX(created_at) + INTERVAL '8 days' <= _as_of
+             THEN COUNT(*) FILTER (WHERE active_7d) ELSE NULL END AS active_at_7d,
+        CASE WHEN MAX(created_at) + INTERVAL '31 days' <= _as_of
+             THEN COUNT(*) FILTER (WHERE active_30d) ELSE NULL END AS active_at_30d,
+        CASE WHEN MAX(created_at) + INTERVAL '91 days' <= _as_of
+             THEN COUNT(*) FILTER (WHERE active_90d) ELSE NULL END AS active_at_90d
+    FROM haf_stats_backend.account_cohort_members
+    WHERE (_from_month IS NULL OR cohort_month >= _from_month)
+      AND (_to_month IS NULL OR cohort_month <= _to_month)
+    GROUP BY cohort_month
+    ON CONFLICT (cohort_month) DO UPDATE SET
+        new_accounts  = EXCLUDED.new_accounts,
+        active_at_7d  = EXCLUDED.active_at_7d,
+        active_at_30d = EXCLUDED.active_at_30d,
+        active_at_90d = EXCLUDED.active_at_90d;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Incremental processor
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_account_cohorts(
@@ -56,6 +134,14 @@ CREATE OR REPLACE FUNCTION haf_stats_app.process_account_cohorts(
 )
 RETURNS VOID
 LANGUAGE plpgsql
+-- Planner pins mirror process_active_users: the Step 2 activity scan is an
+-- operations PK range-scan + LATERAL, so keep jit off, raise the collapse
+-- limits for the CTE chain, and disable bitmapscan so the id-range index scan
+-- is preferred over a bitmap heap scan.
+SET jit = OFF
+SET from_collapse_limit = '16'
+SET join_collapse_limit = '16'
+SET enable_bitmapscan = 'off'
 AS $$
 DECLARE
     _block_time TIMESTAMP;
@@ -63,8 +149,13 @@ BEGIN
     SELECT created_at INTO _block_time FROM hafd.blocks WHERE num = _last_block;
 
     -- Step 1: Record newly created accounts in this block range.
-    -- Covers account_create_operation, account_create_with_delegation_operation,
-    -- and create_claimed_account_operation — all use new_account_name in body.
+    -- Driven by the virtual account_created_operation, which the chain emits
+    -- exactly once per account at its creation, for EVERY creation mechanism —
+    -- account_create / _with_delegation / create_claimed_account AND pow/pow2
+    -- mining (the dominant path in early 2016). Counting only the explicit
+    -- *_create ops undercounts massively pre-HF (e.g. 224 vs 6840 for 2016-04).
+    -- account_created carries new_account_name and fires at the creation block, so
+    -- it agrees with hafd.accounts.block_num (the parity guard checks against that).
     INSERT INTO haf_stats_backend.account_cohort_members
         (account_id, cohort_month, created_at)
     SELECT
@@ -75,63 +166,90 @@ BEGIN
     JOIN hafd.blocks hb  ON hb.num  = ov.block_num
     JOIN hafd.accounts a ON a.name  = (ov.body -> 'value' ->> 'new_account_name')
     WHERE ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.op_type_id IN (
+      AND ov.op_type_id = (
           SELECT id FROM hafd.operation_types
-          WHERE name IN (
-              'hive::protocol::account_create_operation',
-              'hive::protocol::account_create_with_delegation_operation',
-              'hive::protocol::create_claimed_account_operation'
-          )
+          WHERE name = 'hive::protocol::account_created_operation'
       )
     ON CONFLICT (account_id) DO NOTHING;
 
-    -- Step 2: Mark activity flags for pending cohort members that have
-    -- non-virtual ops in this block range, within their 90-day window.
-    -- Uses transacting_account_id (the account that signed/spent RCs).
+    -- Step 2: Mark independent day-N retention flags. An account is retained at
+    -- N days only when it AUTHORS a non-virtual operation during [N, N+1) days
+    -- after creation. Early activation therefore does not automatically count as
+    -- D30 or D90 retention.
     --
-    -- Perf (#21): drive from the small set of recent pending members (accounts
-    -- still in their 90-day window that aren't active yet) and probe their
-    -- operations via the account_id index, instead of scanning
-    -- account_operations by block_num. account_operations is indexed on
-    -- (account_id, ...), NOT block_num, so the previous block_num-range scan was
-    -- a full seq scan of the entire table on every batch — catastrophic under
-    -- MASSIVE_PROCESSING. The signer is also listed as an impacted account, so
-    -- requiring aov.account_id = aov.transacting_account_id = the member keeps the
-    -- original "ops they signed" semantics.
+    -- "Authored" = the account is a required signing authority of the op
+    -- (hive.get_required_authorities), the same definition process_active_users
+    -- uses. This deliberately EXCLUDES pow/pow2 mining (authorless), so a mining
+    -- bot re-mining at D7 is not counted as user retention.
+    --
+    -- Perf: drive from the bounded set of operations IN THIS BATCH, not from the
+    -- ever-growing member table. The previous member-driven probe scanned all
+    -- ~12k members whose 91-day window overlapped the batch and index-probed
+    -- account_operations once each — O(accumulated members), ~4.3s/batch and
+    -- worsening as the cohort grows. account_operations has no block/operation_id
+    -- index (only (account_id, ...)), so it cannot be range-scanned by block at
+    -- all. operations_view CAN: bound by the operation_id half-open range
+    -- [op_id(first,0), op_id(last+1,0)) to PK range-scan exactly this block range
+    -- (the process_active_users / haf_block_explorer idiom), making Step 2
+    -- O(ops in batch) — a few hundred rows — instead of O(members).
+    WITH batch_authored AS MATERIALIZED (
+        -- One row per (authoring account, op timestamp) in this block range.
+        -- Pre-exclude virtual ops so get_required_authorities is never evaluated
+        -- on the ~half of the stream that can never yield an author; authorless
+        -- real ops (pow/pow2) are dropped by the INNER LATERAL join.
+        --
+        -- Use the crash-safe wrapper (haf_stats_app.sql), not raw
+        -- hive.get_required_authorities: a handful of legacy ops past the 5M CI cap
+        -- FC_ASSERT inside it, which would abort the batch and restart-loop the
+        -- processor; the wrapper yields no rows for such an op (treated authorless).
+        SELECT DISTINCT ni.id AS account_id, b.created_at AS op_time
+        FROM hive.operations_view ov
+        JOIN hafd.blocks b ON b.num = ov.block_num
+        CROSS JOIN LATERAL haf_stats_app.get_required_authorities_safe(ov.body) ra
+        JOIN hive.accounts_view ni ON ni.name = ra.account_name
+        WHERE ov.block_num BETWEEN _first_block AND _last_block
+          AND ov.id >= hafd.operation_id(_first_block, 0)
+          AND ov.id <  hafd.operation_id(_last_block + 1, 0)
+          AND ov.op_type_id IN (
+              SELECT id FROM hafd.operation_types WHERE NOT is_virtual
+          )
+    )
     UPDATE haf_stats_backend.account_cohort_members acm
     SET
-        active_7d  = acm.active_7d  OR (ra.earliest_ts <= acm.created_at + INTERVAL '7 days'),
-        active_30d = acm.active_30d OR (ra.earliest_ts <= acm.created_at + INTERVAL '30 days'),
-        active_90d = acm.active_90d OR (ra.earliest_ts <= acm.created_at + INTERVAL '90 days')
+        active_7d  = acm.active_7d  OR ra.active_7d,
+        active_30d = acm.active_30d OR ra.active_30d,
+        active_90d = acm.active_90d OR ra.active_90d
     FROM (
         SELECT
-            p.account_id,
-            MIN(hb.created_at) AS earliest_ts
-        FROM (
-            SELECT account_id
-            FROM haf_stats_backend.account_cohort_members
-            WHERE NOT active_90d
-              AND created_at >= _block_time - INTERVAL '90 days'
-        ) p
-        JOIN hive.account_operations_view aov
-              ON aov.account_id = p.account_id
-             AND aov.transacting_account_id = p.account_id
-             AND aov.block_num BETWEEN _first_block AND _last_block
-        JOIN hafd.blocks hb ON hb.num = aov.block_num
-        WHERE aov.op_type_id NOT IN (
-                  SELECT id FROM hafd.operation_types WHERE is_virtual = TRUE
-              )
-        GROUP BY p.account_id
+            m.account_id,
+            BOOL_OR(
+                ba.op_time >= m.created_at + INTERVAL '7 days'
+                AND ba.op_time < m.created_at + INTERVAL '8 days'
+            ) AS active_7d,
+            BOOL_OR(
+                ba.op_time >= m.created_at + INTERVAL '30 days'
+                AND ba.op_time < m.created_at + INTERVAL '31 days'
+            ) AS active_30d,
+            BOOL_OR(
+                ba.op_time >= m.created_at + INTERVAL '90 days'
+                AND ba.op_time < m.created_at + INTERVAL '91 days'
+            ) AS active_90d
+        FROM batch_authored ba
+        JOIN haf_stats_backend.account_cohort_members m
+              ON m.account_id = ba.account_id
+        WHERE NOT (m.active_7d AND m.active_30d AND m.active_90d)
+          AND ba.op_time >= m.created_at + INTERVAL '7 days'
+          AND ba.op_time <  m.created_at + INTERVAL '91 days'
+        GROUP BY m.account_id
     ) ra
-    WHERE acm.account_id = ra.account_id;
+    WHERE acm.account_id = ra.account_id
+      AND (ra.active_7d OR ra.active_30d OR ra.active_90d);
 
     -- Step 3: Recompute cohort retention summary from member flags.
     --
-    -- #20.4: a cohort's N-day window does not fully elapse until one month after
-    -- the cohort month begins (an account created on the last day of the month
-    -- still needs N more days). So reveal active_at_Nd only once
-    -- cohort_month + 1 month + N days <= _block_time; until then it stays NULL.
-    -- This avoids disclosing understated retention for the most recent cohort.
+    -- A cohort's Dn result is disclosed only after the latest-created member's
+    -- [N,N+1) window has closed. refresh_account_cohort_retention derives this
+    -- from MAX(created_at), avoiding both partial results and month-long delays.
     --
     -- #20.3: only recompute cohorts whose flags can still change. Step 2 stops
     -- updating members older than 90 days, so any cohort whose accounts are all
@@ -146,25 +264,13 @@ BEGIN
     -- per-block hot path to roughly hourly. Multi-block (catch-up / massive)
     -- ranges that span a boundary still refresh it.
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-    INSERT INTO haf_stats_backend.account_cohort_retention
-        (cohort_month, new_accounts, active_at_7d, active_at_30d, active_at_90d)
-    SELECT
-        cohort_month,
-        COUNT(*)                                                                AS new_accounts,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '7 days'  <= _block_time
-             THEN COUNT(*) FILTER (WHERE active_7d)  ELSE NULL END             AS active_at_7d,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '30 days' <= _block_time
-             THEN COUNT(*) FILTER (WHERE active_30d) ELSE NULL END             AS active_at_30d,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '90 days' <= _block_time
-             THEN COUNT(*) FILTER (WHERE active_90d) ELSE NULL END             AS active_at_90d
-    FROM haf_stats_backend.account_cohort_members
-    WHERE cohort_month >= DATE_TRUNC('month', _block_time - INTERVAL '90 days') - INTERVAL '1 month'
-    GROUP BY cohort_month
-    ON CONFLICT (cohort_month) DO UPDATE SET
-        new_accounts  = EXCLUDED.new_accounts,
-        active_at_7d  = EXCLUDED.active_at_7d,
-        active_at_30d = EXCLUDED.active_at_30d,
-        active_at_90d = EXCLUDED.active_at_90d;
+        PERFORM haf_stats_app.refresh_account_cohort_retention(
+            _block_time,
+            (
+                DATE_TRUNC('month', _block_time - INTERVAL '91 days')
+                - INTERVAL '1 month'
+            )::DATE
+        );
     END IF;
 END;
 $$;

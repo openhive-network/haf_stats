@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": null,
+  "message": "invalid from/to value (expected a block number or YYYY-MM-DD date): not-a-date"
+}

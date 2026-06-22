@@ -1,0 +1,33 @@
+---
+test_name: Daily active users accepts block numbers for from_date/to_date
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_daily_active_users for 2016-04 via block numbers
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        # blocks 209769 -> 2016-04-01, 1023600 -> 2016-04-30 (chain timestamps
+        # are immutable). to_filter_date resolves each block to that block's date,
+        # so this must return the SAME rows as the date-based get_daily_active_users.pat.json,
+        # proving block-number and date inputs are equivalent on real data.
+        from_date: "209769"
+        to_date: "1023600"
+        granularity: "month"
+        operation_types: "all"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          # Reuse the date-based test's expectation: block and date inputs must
+          # produce the same rows, and the value lives in exactly one file.
+          pattern_file: get_daily_active_users.pat.json

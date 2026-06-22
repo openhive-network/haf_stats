@@ -1,0 +1,23 @@
+---
+test_name: Network RC utilization rejects invalid granularity
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject unsupported granularity
+    request:
+      url: "{api_url}/rpc/get_network_rc_utilization"
+      method: GET
+      params:
+        granularity: "invalid"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

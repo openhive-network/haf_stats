@@ -1,0 +1,42 @@
+[
+  {
+    "rank": 1,
+    "account": "bittrex",
+    "value_hive_nai": 320700219,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 971
+  },
+  {
+    "rank": 2,
+    "account": "smooth",
+    "value_hive_nai": 71415000,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 245
+  },
+  {
+    "rank": 3,
+    "account": "openledger",
+    "value_hive_nai": 61148250,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 140
+  },
+  {
+    "rank": 4,
+    "account": "puppies",
+    "value_hive_nai": 37062730,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 30128
+  },
+  {
+    "rank": 5,
+    "account": "rossco99",
+    "value_hive_nai": 36957000,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 172
+  }
+]

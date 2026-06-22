@@ -66,6 +66,39 @@ AS $$
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Crash-safe authority lookup
+--
+-- hive.get_required_authorities() (a HAF C++ function) FC_ASSERTs on a handful of
+-- legacy ops — e.g. "Asset amount cannot be negative", observed ~block 23.5M on a
+-- 1.28.6 mainnet node. Called raw inside the per-batch LATERAL of
+-- process_account_cohorts / process_active_users, one such op aborts the whole
+-- statement → the batch → the processor, which then restart-loops forever on that
+-- poisoned batch. The integration-tests CI replays only 5,000,000 blocks, so it
+-- never reaches them; a full-history sync would.
+--
+-- This wrapper evaluates get_required_authorities under an exception guard: any op
+-- whose authority computation throws contributes ZERO rows, i.e. is treated as
+-- authorless — the exact same outcome as pow/pow2 mined ops, which the inner join
+-- already drops. The processors continue past the bad op instead of dying.
+--
+-- Trade-offs: WHEN OTHERS is deliberately broad (the lost signal is a few legacy
+-- ops; a dead processor is strictly worse). The exception block makes each call a
+-- subtransaction, but the wrapped call is read-only so no XID is assigned (no XID
+-- burn) — only modest per-row overhead, verified not to regress massive sync.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.get_required_authorities_safe(_body JSONB)
+RETURNS TABLE (account_name TEXT)
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN QUERY SELECT ra.account_name FROM hive.get_required_authorities(_body) ra;
+EXCEPTION WHEN OTHERS THEN
+    RETURN;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- HAF context registration (called once at install)
 -- ---------------------------------------------------------------------------
 
@@ -113,6 +146,17 @@ BEGIN
     PERFORM haf_stats_app.allow_processing();
     RAISE NOTICE 'haf_stats starting. Last processed block: %', hive.app_get_current_block_num(_context);
 
+    -- During the initial MASSIVE_PROCESSING sync we replay millions of blocks
+    -- as fast as possible; durability of each batch does not matter because a
+    -- crash just restarts the bounded replay (the source of truth is HAF, and
+    -- last_processed_block lets us resume). synchronous_commit = OFF removes the
+    -- per-batch fsync wait — the balance_tracker massive-sync optimisation. We
+    -- restore it to ON below once the context reaches the LIVE stage so live
+    -- updates stay durable.
+    IF hive.get_current_stage_name(_context) = 'MASSIVE_PROCESSING' THEN
+        SET synchronous_commit = OFF;
+    END IF;
+
     LOOP
         CALL hive.app_next_iteration(_context, _block_range, NULL, NULL);
 
@@ -124,6 +168,12 @@ BEGIN
 
         IF _block_range IS NULL THEN
             CONTINUE;
+        END IF;
+
+        -- Re-enable durable commits once we leave massive sync for LIVE.
+        IF current_setting('synchronous_commit') = 'off'
+           AND hive.get_current_stage_name(_context) <> 'MASSIVE_PROCESSING' THEN
+            SET synchronous_commit = ON;
         END IF;
 
         PERFORM haf_stats_app.process_block_range(_block_range.first_block, _block_range.last_block);

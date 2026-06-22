@@ -1,7 +1,7 @@
 version: "3.8"
 
 # Test stack — replays a bounded range from the pre-synced block_log in
-# docker/blockchain (REPLAY_STOP_AT_BLOCK, default 100000) so hafd has real HAF
+# docker/blockchain (REPLAY_STOP_AT_BLOCK, default 5000000) so hafd has real HAF
 # state, then runs the full haf_stats install/process/API pipeline and Tavern.
 #
 # Requires a pre-synced HAF block_log snapshot at docker/blockchain/.
@@ -14,7 +14,7 @@ version: "3.8"
 # Usage (from haf_stats/):
 #   ./scripts/run_tests.sh              # run tests, preserve data volume
 #   ./scripts/run_tests.sh --reset      # wipe data volume and start clean
-#   REPLAY_STOP_AT_BLOCK=10000 ./scripts/run_tests.sh --reset   # smaller/faster replay
+# The exact D90 cohort pattern requires the default 5M reference depth.
 #
 # Do NOT use --abort-on-container-exit — setup exits normally after install
 # and would abort the rest of the stack before Tavern runs.  The script uses
@@ -39,8 +39,8 @@ services:
     # state (events_queue, fork, blocks). The old "--skip-hived" against an empty
     # DB leaves events_queue empty, so hive.app_create_context() fails the
     # fk_hive_app_context (events_id -> hafd.events_queue) FK during install.
-    # Override the stop block with REPLAY_STOP_AT_BLOCK (default 100000).
-    command: ["--replay", "--stop-at-block=${REPLAY_STOP_AT_BLOCK:-100000}"]
+    # Override the stop block with REPLAY_STOP_AT_BLOCK (default 5000000).
+    command: ["--replay", "--stop-at-block=${REPLAY_STOP_AT_BLOCK:-5000000}"]
     environment:
       PGCTLTIMEOUT: 900
     ports:
@@ -55,11 +55,14 @@ services:
     healthcheck:
       # Healthy only once replay has populated blocks, guaranteeing HAF state
       # (events_queue/fork) exists before the app install (setup) runs.
-      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -tAc 'SELECT COALESCE(MAX(num),0) >= ${REPLAY_STOP_AT_BLOCK:-100000} FROM hafd.blocks' 2>/dev/null | grep -q t"]
+      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -tAc 'SELECT COALESCE(MAX(num),0) >= ${REPLAY_STOP_AT_BLOCK:-5000000} FROM hafd.blocks' 2>/dev/null | grep -q t"]
       interval: 10s
       timeout: 5s
-      retries: 90
-      start_period: 30m
+      # Window must cover a from-scratch replay up to REPLAY_STOP_AT_BLOCK. A full
+      # 5M replay can take well over an hour on the shared runners, so allow
+      # start_period (90m) + retries*interval (120*10s = 20m) ≈ 110m before failing.
+      retries: 120
+      start_period: 90m
 
   haf-stats-setup:
     image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
@@ -106,15 +109,57 @@ services:
 
   tavern:
     image: python:3.12-slim
+    # This stack replays a REAL bounded block_log, so it runs the endpoint-local
+    # Tavern suite with exact .pat.json assertions over the replayed chain (plus
+    # the unmarked get_health/get_version smoke tests). Synthetic fixture-only
+    # edge tests AND malformed-input negatives are excluded here — negatives are
+    # input-validation, not value verification, so they run on the fast stub
+    # stack (docker-compose-ci.yml) instead.
+    #
+    # CRITICAL: haf-stats-process runs main(), an INFINITE loop that never
+    # "completes", so depends_on cannot gate on it finishing. Block processing
+    # therefore runs concurrently with everything downstream. With value-agnostic
+    # assertions that did not matter (partial data is still non-empty), but EXACT
+    # assertions race the processor and see half-processed counts. So before
+    # pytest, poll get_health until last_processed_block reaches the replay head
+    # (REPLAY_STOP_AT_BLOCK) — i.e. all blocks are processed and committed.
+    #
     # Pin pytest<9: pytest 9 dropped _pytest._code.code.FormattedExcinfo, which
     # tavern 3.6.0 imports, so an unpinned install breaks collection at import time.
-    command: >
-      sh -c "pip install tavern 'pytest<9' -q &&
-             pytest /tests/tavern --tb=short -v"
+    command:
+      - sh
+      - -c
+      - |
+        pip install tavern 'pytest<9' -q
+        python - <<'PY'
+        import os, sys, time, json, urllib.request
+        target = int(os.environ.get('REPLAY_STOP_AT_BLOCK', '5000000'))
+        url = os.environ['API_URL'] + '/rpc/get_health'
+        deadline = time.time() + 5400  # generous: processing of up to 5M blocks
+        while time.time() < deadline:
+            try:
+                d = json.loads(urllib.request.urlopen(url, timeout=5).read())
+                rec = d[0] if isinstance(d, list) else d
+                lpb = rec.get('last_processed_block') or 0
+                print('wait-for-sync: last_processed_block=%s / target=%s' % (lpb, target), flush=True)
+                if lpb >= target:
+                    sys.exit(0)
+            except Exception as e:
+                print('wait-for-sync: poll error: %r' % e, flush=True)
+            time.sleep(5)
+        print('wait-for-sync: TIMEOUT, processing never reached %s' % target, flush=True)
+        sys.exit(1)
+        PY
+        pytest /tests/tavern -m "not negative and not synthetic" --tb=short -v
     volumes:
       - ../tests/tavern:/tests/tavern:ro
     environment:
       API_URL: "http://haf-stats-api:3000"
+      # Gate: wait until the processor has caught up to the replay head before
+      # asserting exact values. Must match the haf service's stop block.
+      REPLAY_STOP_AT_BLOCK: "${REPLAY_STOP_AT_BLOCK:-5000000}"
+      PYTHONPATH: "/tests/tavern"
+      TAVERN_DIR: "/tests/tavern"
     depends_on:
       - haf-stats-api
 

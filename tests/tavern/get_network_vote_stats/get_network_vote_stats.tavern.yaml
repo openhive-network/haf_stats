@@ -1,0 +1,24 @@
+---
+test_name: Network vote stats matches the 5M replay
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_network_vote_stats for 2016-04
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+        granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

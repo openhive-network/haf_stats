@@ -1,6 +1,6 @@
 SET ROLE haf_stats_owner;
 
--- Feature: content & engagement stats. One processor, three consumers that share
+-- Feature: content & engagement stats. One processor, four consumers that share
 -- the same comment-op and vote-op scans (so the two highest-volume op streams are
 -- read once per batch, not once per feature):
 --   * get_account_content_stats    — per-account posts/comments/votes/replies
@@ -10,6 +10,9 @@ SET ROLE haf_stats_owner;
 --                                    network_author_daily, state comment_registry)
 --   * get_network_vote_stats       — network-wide vote activity
 --                                    (tables network_vote_daily + network_voter_daily)
+--   * get_network_engagement       — per-post vote/reply counts for engagement quality
+--                                    metrics (avg votes/comments per post, zero-
+--                                    engagement percentages; table post_engagement)
 --
 -- Author rewards are NOT stored here: they already live in
 -- haf_stats_backend.account_financial_daily (process_financial.sql) and the
@@ -55,6 +58,51 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.comment_registry (
 );
 
 GRANT SELECT ON haf_stats_backend.comment_registry TO haf_stats_user;
+
+-- Per-post engagement state for get_network_engagement.
+-- One row per unique root post (parent_author = ''). post_day is the FIRST
+-- creation date: re-creation after a delete is ON CONFLICT DO NOTHING, so the
+-- post keeps its original day and PK row. This means total_posts here counts
+-- distinct posts dated by first creation, whereas network_content_daily.posts
+-- counts every create event by its own day — the two diverge by the number of
+-- re-creations (small; ~155 over the first 5M blocks).
+-- vote_count and reply_count accumulate across processor batches via bulk UPDATE.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.post_engagement (
+    author_id INT NOT NULL,
+    permlink TEXT NOT NULL,
+    post_day DATE NOT NULL,
+    vote_count INT NOT NULL DEFAULT 0,
+    reply_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (author_id, permlink)
+);
+
+-- CONCURRENTLY for the same reason as idx_acm_created_at in
+-- process_account_cohorts.sql: install_app.sh loads this file with a plain
+-- psql -f (no --single-transaction), so each statement autocommits and
+-- CONCURRENTLY is permitted, avoiding an ACCESS EXCLUSIVE lock if the table is
+-- already populated on an upgrade. (post_engagement is new, so this is
+-- belt-and-suspenders, but keeps the index DDL uniform.)
+--
+-- Heal an INVALID leftover from an interrupted CONCURRENTLY build first;
+-- otherwise CREATE ... IF NOT EXISTS would skip it forever (see the same guard
+-- in process_account_cohorts.sql).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'haf_stats_backend'
+          AND c.relname = 'idx_pe_post_day'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX haf_stats_backend.idx_pe_post_day;
+    END IF;
+END $$;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pe_post_day
+ON haf_stats_backend.post_engagement (post_day);
+
+GRANT SELECT ON haf_stats_backend.post_engagement TO haf_stats_user;
 
 -- Daily created-content counters (additive across batches). edits is stored too
 -- so the invariant posts + comments + edits = raw comment_operation count stays
@@ -122,13 +170,14 @@ GRANT SELECT ON haf_stats_backend.network_voter_daily TO haf_stats_user;
 --
 --  * Two heavy scans, not seven. Each op stream is scanned ONCE into a
 --    MATERIALIZED CTE and fans out to every consumer (PG would otherwise inline
---    the CTE and re-scan per consumer). The comment-op scan feeds FOUR outputs:
+--    the CTE and re-scan per consumer). The comment-op scan feeds FIVE outputs:
 --    the comment_registry state, the network_content_daily counters, the
---    network_author_daily author set, and account_content_daily (the author's
+--    network_author_daily author set, account_content_daily (the author's
 --    posts/comments AND the parent author's replies_received, unpivoted with
---    UNION ALL). The vote-op scan feeds THREE: account_content_daily
---    (votes_cast/received), the network_vote_daily counters and the
---    network_voter_daily voter set. A third scan exists for
+--    UNION ALL), and post_engagement (per-root-post reply counts). The vote-op
+--    scan feeds FOUR: account_content_daily (votes_cast/received), the
+--    network_vote_daily counters, the network_voter_daily voter set, and
+--    post_engagement (per-post vote counts). A third scan exists for
 --    delete_comment/ineffective_delete ops but their volume is negligible.
 --
 --  * Count CREATES, not ops. comment_operation doubles as the edit op: the chain
@@ -177,18 +226,21 @@ SET jit = OFF
 AS $$
 BEGIN
 
--- Comment ops: ONE scan, four outputs.
+-- Comment ops: ONE scan, five outputs.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
 --   network_content_daily — daily created posts/comments + edits counters
 --   network_author_daily  — distinct (day, author) set for exact unique authors
 --   account_content_daily — author's posts/comments + parent's replies_received
+--   post_engagement       — per-post vote/reply counts (insert new root posts +
+--                           update reply_count for direct replies)
 WITH comment_ops AS MATERIALIZED (
     SELECT
         ov.id,
-        ov.body_value ->> 'author'        AS author,
-        ov.body_value ->> 'permlink'      AS permlink,
-        ov.body_value ->> 'parent_author' AS parent_author,
-        b.created_at::DATE                AS day
+        ov.body_value ->> 'author'          AS author,
+        ov.body_value ->> 'permlink'        AS permlink,
+        ov.body_value ->> 'parent_author'   AS parent_author,
+        ov.body_value ->> 'parent_permlink' AS parent_permlink,
+        b.created_at::DATE                  AS day
     FROM hive.operations_view ov
     JOIN hafd.blocks b ON b.num = ov.block_num
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
@@ -233,15 +285,16 @@ seq AS (
         author,
         permlink,
         parent_author,
+        parent_permlink,
         day,
         is_comment,
         LAG(is_comment) OVER w  AS prev_is_comment,
         LEAD(id) OVER w IS NULL AS is_last
     FROM (
-        SELECT id, author, permlink, parent_author, day, TRUE AS is_comment
+        SELECT id, author, permlink, parent_author, parent_permlink, day, TRUE AS is_comment
         FROM comment_ops
         UNION ALL
-        SELECT id, author, permlink, NULL, NULL, FALSE
+        SELECT id, author, permlink, NULL, NULL, NULL, FALSE
         FROM effective_deletes
     ) e
     WINDOW w AS (PARTITION BY author, permlink ORDER BY id)
@@ -261,6 +314,7 @@ comment_keys AS (
 classified AS (
     SELECT
         s.parent_author,
+        s.parent_permlink,
         s.day,
         s.is_comment,
         s.is_last,
@@ -333,6 +387,52 @@ contrib AS (
         GROUP BY parent_author, day
     ) r
     JOIN hafd.accounts a ON a.name = r.parent_author
+),
+-- post_engagement: this batch's direct replies, pre-aggregated to one row per
+-- parent post (resolve parent author_id once per pair, not per reply op).
+-- parent_permlink rides through seq -> classified, so this counts straight off
+-- classified — one row per created reply. The earlier version re-joined classified
+-- to comment_ops on (author, permlink), which (a) referenced classified.author,
+-- a column it does not project, and (b) fanned a reply created and edited in the
+-- same batch into N rows, overcounting. Replies-to-replies fall out for free:
+-- only root posts (parent_author = '') ever enter post_engagement, so a comment
+-- parent matches nothing in insert_posts/update_replies below.
+batch_replies AS (
+    SELECT a.id AS author_id, agg.parent_permlink AS permlink, agg.cnt
+    FROM (
+        SELECT parent_author, parent_permlink, COUNT(*) AS cnt
+        FROM classified
+        WHERE is_create AND parent_author <> ''
+        GROUP BY parent_author, parent_permlink
+    ) agg
+    JOIN hafd.accounts a ON a.name = agg.parent_author
+),
+-- Insert new root posts, seeding reply_count with replies that arrived in THIS
+-- batch (LEFT JOIN batch_replies). Seeding here — rather than leaving it all to
+-- update_replies — is what makes a post and its early replies land correctly when
+-- they share one (large, backfill) batch: data-modifying CTEs all see the
+-- pre-statement snapshot, so update_replies below cannot see the rows insert_posts
+-- just added. ON CONFLICT DO NOTHING: is_create also fires on re-creation after a
+-- delete, but the PK row already exists, so the seed is dropped and update_replies
+-- (which DOES see that pre-existing row) adds the batch's replies — counted once.
+insert_posts AS (
+    INSERT INTO haf_stats_backend.post_engagement (author_id, permlink, post_day, reply_count)
+    SELECT c.author_id, c.permlink, c.day, COALESCE(br.cnt, 0)
+    FROM classified c
+    LEFT JOIN batch_replies br
+        ON br.author_id = c.author_id AND br.permlink = c.permlink
+    WHERE c.is_create AND c.parent_author = ''
+    ON CONFLICT (author_id, permlink) DO NOTHING
+),
+-- Add this batch's replies to posts that existed before the statement. Posts just
+-- inserted by insert_posts are invisible here (same snapshot), so they match no
+-- row and are not double-counted — their replies were already seeded above.
+update_replies AS (
+    UPDATE haf_stats_backend.post_engagement pe
+    SET reply_count = pe.reply_count + br.cnt
+    FROM batch_replies br
+    WHERE pe.author_id = br.author_id
+      AND pe.permlink  = br.permlink
 )
 INSERT INTO haf_stats_backend.account_content_daily
     (account_id, day, posts, comments, replies_received)
@@ -349,10 +449,11 @@ ON CONFLICT (account_id, day) DO UPDATE SET
     comments         = account_content_daily.comments         + EXCLUDED.comments,
     replies_received = account_content_daily.replies_received + EXCLUDED.replies_received;
 
--- Vote ops: ONE scan, three outputs.
+-- Vote ops: ONE scan, four outputs.
 --   account_content_daily — votes_cast (voter) + votes_received (author)
 --   network_vote_daily    — daily up/down/un/self counters
 --   network_voter_daily   — distinct (day, voter) set for exact unique voters
+--   post_engagement       — increment vote_count per voted post (weight != 0)
 -- The two INSERTs feeding account_content_daily and network_vote_daily are
 -- data-modifying CTEs; the network_voter_daily INSERT is the main statement. All
 -- read the single MATERIALIZED vote_ops, so the op stream is scanned once.
@@ -360,6 +461,7 @@ WITH vote_ops AS MATERIALIZED (
     SELECT
         ov.body_value ->> 'voter'                                  AS voter,
         ov.body_value ->> 'author'                                 AS author,
+        ov.body_value ->> 'permlink'                               AS permlink,
         (ov.body_value ->> 'weight')::INT                          AS weight,
         (ov.body_value ->> 'voter') = (ov.body_value ->> 'author') AS is_self,
         b.created_at::DATE                                         AS day
@@ -416,6 +518,26 @@ upsert_counts AS (
         downvotes  = nvd.downvotes  + EXCLUDED.downvotes,
         unvotes    = nvd.unvotes    + EXCLUDED.unvotes,
         self_votes = nvd.self_votes + EXCLUDED.self_votes
+),
+-- post_engagement: increment vote_count per voted post (upvotes + downvotes;
+-- unvotes (weight=0) are retractions not engagement).
+-- Pre-aggregate to distinct (author, permlink) pairs first, then resolve
+-- author_id once per pair — O(distinct voted posts) not O(raw vote ops).
+update_engagement_votes AS (
+    UPDATE haf_stats_backend.post_engagement pe
+    SET vote_count = vote_count + v.cnt
+    FROM (
+        SELECT a.id AS author_id, agg.permlink, agg.cnt
+        FROM (
+            SELECT vo.author, vo.permlink, COUNT(*) AS cnt
+            FROM vote_ops vo
+            WHERE vo.weight != 0
+            GROUP BY vo.author, vo.permlink
+        ) agg
+        JOIN hafd.accounts a ON a.name = agg.author
+    ) v
+    WHERE pe.author_id = v.author_id
+      AND pe.permlink  = v.permlink
 )
 -- Distinct (day, voter) presence set, resolved to account id once per pair. The
 -- counters above never touch hafd.accounts, so an (impossible) unknown voter can

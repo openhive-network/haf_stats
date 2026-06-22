@@ -7,6 +7,7 @@
 -- ---------------------------------------------------------------------------
 
 CREATE SCHEMA IF NOT EXISTS hafd;
+CREATE SCHEMA IF NOT EXISTS hive;
 
 -- hafd.accounts: referenced by get_account_financial_summary and
 -- get_account_rc_footprint (JOIN on account_id / filter on name).
@@ -19,7 +20,8 @@ CREATE TABLE IF NOT EXISTS hafd.accounts (
 -- get_network_rc_utilization (LEFT JOIN for op type name).
 CREATE TABLE IF NOT EXISTS hafd.operation_types (
     id INT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE,
+    is_virtual BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- hafd.blocks: referenced by get_network_hp_distribution for VESTS/HP ratio.
@@ -31,6 +33,49 @@ CREATE TABLE IF NOT EXISTS hafd.blocks (
     total_vesting_shares BIGINT NOT NULL DEFAULT 0,
     total_vesting_fund_hive BIGINT NOT NULL DEFAULT 0
 );
+
+-- Minimal HAF operation relations used by process_account_cohorts.sql.
+-- id: operations carry a monotonic op id (real HAF packs the block number into
+-- the high bits). process_account_cohorts range-scans it via hafd.operation_id.
+CREATE TABLE IF NOT EXISTS hive.operations_view (
+    id BIGINT,
+    block_num INT NOT NULL,
+    op_type_id INT NOT NULL,
+    body JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hive.account_operations_view (
+    account_id INT NOT NULL,
+    transacting_account_id INT NOT NULL,
+    block_num INT NOT NULL,
+    op_type_id INT NOT NULL
+);
+
+-- Stubs of the HAF helpers process_account_cohorts (Step 2) and
+-- process_active_users rely on. The real HAF schema provides these; the CI stub
+-- stack reproduces just enough for the synthetic cohort fixture to exercise the
+-- real processor path.
+
+-- hafd.operation_id(block, op_in_block): a monotonic op id whose ordering tracks
+-- block number, so the half-open [operation_id(first,0), operation_id(last+1,0))
+-- range selects exactly a block range (mirrors real HAF's block-packed ids).
+CREATE OR REPLACE FUNCTION hafd.operation_id(_block INT, _op INT)
+RETURNS BIGINT LANGUAGE sql IMMUTABLE AS $$
+    SELECT _block::BIGINT * 1000000 + _op
+$$;
+
+-- hive.accounts_view: name -> id resolution (real HAF view over hafd.accounts).
+CREATE OR REPLACE VIEW hive.accounts_view AS
+    SELECT id, name FROM hafd.accounts;
+
+-- hive.get_required_authorities(body): real HAF returns the accounts that had to
+-- sign an operation. The stub resolves the synthetic '_signer' field the cohort
+-- fixture sets on its operation bodies (authorless ops yield no row).
+CREATE OR REPLACE FUNCTION hive.get_required_authorities(_body JSONB)
+RETURNS TABLE(account_name TEXT) LANGUAGE sql IMMUTABLE AS $$
+    SELECT _body -> 'value' ->> '_signer'
+    WHERE _body -> 'value' ? '_signer'
+$$;
 
 -- Seed one known account so financial summary tests can JOIN without erroring.
 INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING;
@@ -60,6 +105,8 @@ GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_user;
 -- validation to call time; sql validates immediately and fails without access.
 GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
+GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
+GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_owner;
 
 -- ---------------------------------------------------------------------------
 -- Schemas
@@ -81,6 +128,21 @@ ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_endpoints
     GRANT EXECUTE ON FUNCTIONS TO haf_stats_user;
 
 SET ROLE haf_stats_owner;
+
+-- Crash-safe authority wrapper (mirrors db/haf_stats_app.sql). The stub stack does
+-- not load haf_stats_app.sql, but process_account_cohorts now calls this wrapper, so
+-- it must exist here too. The stub hive.get_required_authorities above never throws,
+-- so in CI this is a transparent pass-through.
+CREATE OR REPLACE FUNCTION haf_stats_app.get_required_authorities_safe(_body JSONB)
+RETURNS TABLE (account_name TEXT)
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN QUERY SELECT ra.account_name FROM hive.get_required_authorities(_body) ra;
+EXCEPTION WHEN OTHERS THEN
+    RETURN;
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- App control tables (from haf_stats_app.sql, minus HAF lifecycle calls)
@@ -247,5 +309,23 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
     voter_id INT  NOT NULL,
     PRIMARY KEY (day, voter_id)
 );
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.post_engagement (
+    author_id   INT  NOT NULL,
+    permlink    TEXT NOT NULL,
+    post_day    DATE NOT NULL,
+    vote_count  INT  NOT NULL DEFAULT 0,
+    reply_count INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (author_id, permlink)
+);
+
+-- Seed 3 posts for hiveio (id=1): mix of engaged and zero-engagement posts.
+INSERT INTO haf_stats_backend.post_engagement
+    (author_id, permlink, post_day, vote_count, reply_count)
+VALUES
+    (1, 'first-post',  '2016-03-15', 5, 2),
+    (1, 'second-post', '2016-03-16', 0, 0),
+    (1, 'third-post',  '2016-03-17', 3, 1)
+ON CONFLICT DO NOTHING;
 
 RESET ROLE;

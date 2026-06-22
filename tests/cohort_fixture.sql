@@ -1,0 +1,94 @@
+-- Deterministic account-cohort processor fixture.
+--
+-- Five accounts are created through the canonical account_created virtual op:
+-- one returns in each exact D7/D30/D90 window, one acts only on D2, and one is
+-- inactive. The expected closed-cohort result is therefore 5 / 1 / 1 / 1.
+
+INSERT INTO hafd.operation_types (id, name, is_virtual)
+VALUES
+    (1, 'hive::protocol::vote_operation', FALSE),
+    (100, 'hive::protocol::account_created_operation', TRUE)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO hafd.accounts (id, name)
+VALUES
+    (10, 'retained-d7'),
+    (11, 'retained-d30'),
+    (12, 'retained-d90'),
+    (13, 'early-only'),
+    (14, 'inactive')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO hafd.blocks (num, created_at)
+VALUES
+    (1000, '2020-01-01 12:00:00'),
+    (1001, '2020-01-03 12:00:00'),
+    (1002, '2020-01-08 18:00:00'),
+    (1003, '2020-01-31 18:00:00'),
+    (1004, '2020-03-31 18:00:00'),
+    (1005, '2020-04-02 13:00:00')
+ON CONFLICT (num) DO NOTHING;
+
+-- Step 1 source: the account_created virtual op (one per new account at block 1000).
+INSERT INTO hive.operations_view (id, block_num, op_type_id, body)
+SELECT
+    hafd.operation_id(1000, (ROW_NUMBER() OVER ())::INT),
+    1000,
+    100,
+    JSONB_BUILD_OBJECT(
+        'value',
+        JSONB_BUILD_OBJECT('new_account_name', account_name)
+    )
+FROM (
+    VALUES
+        ('retained-d7'),
+        ('retained-d30'),
+        ('retained-d90'),
+        ('early-only'),
+        ('inactive')
+) AS created(account_name);
+
+-- Step 2 source: retention activity is now AUTHORED ops in operations_view; the
+-- get_required_authorities stub resolves the synthetic '_signer' field. Each is a
+-- non-virtual vote_operation (op_type 1) the account signed in a given window.
+INSERT INTO hive.operations_view (id, block_num, op_type_id, body)
+VALUES
+    (hafd.operation_id(1001, 1), 1001, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'early-only'))),  -- D2: outside every [N,N+1) window
+    (hafd.operation_id(1002, 1), 1002, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d7'))), -- D7
+    (hafd.operation_id(1003, 1), 1003, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d30'))),-- D30
+    (hafd.operation_id(1004, 1), 1004, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d90')));-- D90
+
+SET ROLE haf_stats_owner;
+
+SELECT haf_stats_app.process_account_cohorts(1000, 1005);
+SELECT haf_stats_app.refresh_account_cohort_retention(
+    '2020-04-02 13:00:00',
+    NULL,
+    NULL
+);
+
+DO $$
+DECLARE
+    _actual RECORD;
+BEGIN
+    SELECT *
+    INTO _actual
+    FROM haf_stats_backend.account_cohort_retention
+    WHERE cohort_month = DATE '2020-01-01';
+
+    IF _actual.new_accounts IS DISTINCT FROM 5
+       OR _actual.active_at_7d IS DISTINCT FROM 1
+       OR _actual.active_at_30d IS DISTINCT FROM 1
+       OR _actual.active_at_90d IS DISTINCT FROM 1
+    THEN
+        RAISE EXCEPTION
+            'cohort fixture mismatch: expected (5,1,1,1), got (%,%,%,%)',
+            _actual.new_accounts,
+            _actual.active_at_7d,
+            _actual.active_at_30d,
+            _actual.active_at_90d;
+    END IF;
+END
+$$;
+
+RESET ROLE;
