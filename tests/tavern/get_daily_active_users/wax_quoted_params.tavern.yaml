@@ -1,0 +1,25 @@
+---
+# Regression for issue #22: Wax JSON-encodes custom-namespace string params.
+test_name: Daily active users tolerates Wax JSON-encoded string params
+
+marks:
+  - patterntest
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Accept quote-wrapped string params
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        granularity: '"day"'
+        operation_types: '"all"'
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

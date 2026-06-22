@@ -49,7 +49,9 @@ BEGIN
         FROM hive.operations_view hov
         JOIN hafd.blocks hb ON hb.num = hov.block_num
         WHERE hov.block_num BETWEEN _first_block AND _last_block
-          AND hov.op_type_id = hive.get_op_type_id('account_create_operation')
+          -- Canonical virtual event emitted for every creation path, including
+          -- delegated/claimed creation and legacy pow/pow2 mining.
+          AND hov.op_type_id = hive.get_op_type_id('account_created_operation')
         GROUP BY DATE(hb.created_at)
     )
     SELECT

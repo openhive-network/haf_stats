@@ -1,0 +1,23 @@
+---
+test_name: Network account funnel matches exact 24-hour retention windows
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_network_account_funnel for 2016-04
+    request:
+      url: "{api_url}/rpc/get_network_account_funnel"
+      method: GET
+      params:
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

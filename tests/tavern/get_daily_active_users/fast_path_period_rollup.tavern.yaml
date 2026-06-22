@@ -1,0 +1,31 @@
+---
+test_name: Daily active users fast path returns exact precomputed full-period values
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# ALL (op_class -1) reads the active_users_period_counts rollup directly. The fixture
+# (ci_setup.sql) has full-month values for Jan/Feb 2020; a to_date mid-February must
+# still return the FULL February, not a partial slice.
+stages:
+  - name: GET /rpc/get_daily_active_users monthly, ALL, to_date mid-period
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        from_date: "2020-01-01"
+        to_date: "2020-02-15"
+        granularity: "month"
+        operation_types: "all"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          active_accounts: 100
+          operations: 5000
+        - period: "2020-02-01"
+          active_accounts: 150
+          operations: 6000

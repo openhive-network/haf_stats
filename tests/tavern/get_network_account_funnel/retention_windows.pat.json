@@ -1,0 +1,12 @@
+[
+  {
+    "cohort_month": "2020-01",
+    "new_accounts": 5,
+    "active_at_7d": 1,
+    "pct_7d": 20.0,
+    "active_at_30d": 1,
+    "pct_30d": 20.0,
+    "active_at_90d": 1,
+    "pct_90d": 20.0
+  }
+]

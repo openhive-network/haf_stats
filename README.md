@@ -78,6 +78,8 @@ scripts/
   common.sh                 Shared variables and helpers
   install_app.sh            One-time schema installation
   process_blocks.sh         Starts the infinite block-processing loop
+  rebuild_account_cohorts.sh
+                            Rebuilds account cohorts after definition changes
 
 docker/
   docker-compose.yml        Production stack (4 services)
@@ -99,10 +101,23 @@ docker compose -f docker-compose-test.yml up --abort-on-container-exit
 ```
 
 **Production:**
+
 ```bash
 cd docker
 docker compose up -d
 ```
+
+### Rebuilding account cohorts
+
+Changes to account-creation or retention definitions require rebuilding the
+historical cohort tables. Stop the block processor, then run:
+
+```bash
+./scripts/rebuild_account_cohorts.sh
+```
+
+`FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may be supplied as environment
+variables. Restart the processor after the rebuild completes.
 
 ## API Endpoints
 

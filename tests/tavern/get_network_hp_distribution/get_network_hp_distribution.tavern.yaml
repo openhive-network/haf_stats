@@ -1,0 +1,20 @@
+---
+test_name: Network HP distribution is empty without balance tracker
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_network_hp_distribution
+    request:
+      url: "{api_url}/rpc/get_network_hp_distribution"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

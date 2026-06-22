@@ -5,6 +5,9 @@ max_line_length = 120
 indent_unit = space
 tab_space_size = 4
 exclude_rules = references.keywords, references.quoting
+# 0 disables the file-size skip so large processors (e.g. process_content_stats.sql,
+# ~24k) are actually linted. endpoint_schema.sql stays excluded via .sqlfluffignore.
+large_file_skip_byte_limit = 0
 
 [sqlfluff:rules:layout.indent]
 indent_unit = space

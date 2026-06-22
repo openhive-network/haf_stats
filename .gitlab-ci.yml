@@ -1,7 +1,26 @@
+# Pipeline stages mirror balance_tracker / haf_block_explorer's organization.
+# Active here: lint, build, test. detect / sync / cleanup / publish are kept in
+# the same order those repos use so the structure lines up as jobs are added
+# (find_haf_image -> detect, prepare_haf_data -> sync, cache cleanup -> cleanup,
+# image/swagger publish -> publish); GitLab skips stages that have no jobs yet.
 stages:
+  - detect
   - lint
-  - test
   - build
+  - sync
+  - test
+  - cleanup
+  - publish
+
+# Run the full pipeline on every commit (any branch push) and on merge requests,
+# but never both for the same commit: if a branch has an open MR, skip the
+# redundant branch pipeline so only the MR pipeline runs.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
 
 sql-lint:
   stage: lint
@@ -11,7 +30,7 @@ sql-lint:
     - sqlfluff lint db/ endpoints/ --dialect postgres
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
 shell-lint:
   stage: lint
@@ -20,7 +39,7 @@ shell-lint:
     - find scripts/ -name "*.sh" -exec shellcheck --severity=warning {} +
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
 hadolint:
   stage: lint
@@ -29,7 +48,7 @@ hadolint:
     - hadolint --ignore DL3006 --ignore DL3002 Dockerfile
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
 compose-validate:
   stage: lint
@@ -44,7 +63,7 @@ compose-validate:
     - docker compose -f docker/docker-compose.yml config --quiet
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
 endpoint-tests:
   stage: test
@@ -62,7 +81,7 @@ endpoint-tests:
     - docker compose -f docker/docker-compose-ci.yml down -v
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
 docker-build:
   stage: build
@@ -77,47 +96,76 @@ docker-build:
     - docker build --build-arg GIT_HASH=$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
 
-# Full integration tests against a real HAF node (install + process + PostgREST +
-# Tavern via docker-compose-test.yml). KEPT COMMENTED so the pipeline matches
-# develop and stays green.
+# =============================================================================
+# Real-data integration test — every processor + endpoint over an actual replay.
+# =============================================================================
+# Builds this commit's image, replays the 5M reference chain, runs the full
+# install -> process -> PostgREST pipeline, and asserts endpoint-local real-data
+# patterns. This is what makes the MR !25 class of bug — processor SQL that the
+# stub CI never executes — fail automatically.
 #
-# Why it can't be enabled yet: the job replays from a pre-synced block_log at
-# docker/blockchain/, which CI runners do not have (docker/blockchain is
-# gitignored / local-only). balance_tracker solves this by including the
-# common-ci-configuration HAF data-prep templates, which provide a block_log at
-# /blockchain/block_log_5m and a shared NFS replay cache on the Hive CI runners.
+# tests/tavern asserts exact 2016-04 values (489 posts, 3004 votes,
+# 116,298 active-user ops, real transfer leaderboards, and closed D90 cohort
+# retention). The 5M depth is required because the D90 window closes in July.
 #
-# FOLLOW-UP (separate MR): wire haf_stats into those templates
-#   include:
-#     - project: 'hive/common-ci-configuration'
-#       file: ['/templates/base.gitlab-ci.yml',
-#              '/templates/haf_data_preparation.gitlab-ci.yml',
-#              '/templates/haf_app_testing.gitlab-ci.yml']
-# then replace the job body below with a prepare_haf_data-based job.
-#
-# The job body below is verified to work LOCALLY (build this commit's image +
-# bounded replay); enable it once the block_log is available in CI.
-#
-# integration-tests:
-#   stage: test
-#   image: docker:24
-#   services:
-#     - docker:24-dind
-#   variables:
-#     DOCKER_TLS_CERTDIR: "/certs"
-#     HAF_STATS_VERSION: "$CI_COMMIT_SHORT_SHA"   # build/test this commit's image
-#     REPLAY_STOP_AT_BLOCK: "100000"              # bounded replay keeps it fast
-#   before_script:
-#     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#   script:
-#     - export HAF_STATS_REGISTRY="${CI_REGISTRY_IMAGE%/*}"
-#     - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}" .
-#     - chmod +x scripts/run_tests.sh
-#     - ./scripts/run_tests.sh --reset
-#   after_script:
-#     - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-setup
-#     - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs tavern
-#   rules:
-#     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+# Data path (validated green): the Hive builder runners expose the pre-synced
+# block_log at $BLOCK_LOG_SOURCE_DIR, but it is a READ-ONLY cache mount while
+# hived needs to write haf_wal/rocksdb into datadir/blockchain. So the script
+# stages the block_log into the writable job workspace (which the dind daemon can
+# see) and mounts that. The job gates the pipeline (allow_failure: false).
+integration-tests:
+  stage: test
+  image: docker:24
+  services:
+    - docker:24-dind
+  # A from-scratch 5M replay is long, so override GitLab's default 1h job timeout.
+  timeout: 3h
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    # Full 5,000,000-block replay — balance_tracker's mainnet reference depth.
+    # Endpoint-local tests/tavern .pat.json files assert exact values for the
+    # closed 2016-04 window.
+    REPLAY_STOP_AT_BLOCK: "5000000"
+    BLOCK_LOG_SOURCE_DIR: "/blockchain/block_log_5m"   # provided by Hive CI runners
+  before_script:
+    # docker:24 is Alpine — run_tests.sh needs bash ([[ ]]); run_verification.sh
+    # renders the hived fixture with python3.
+    - apk add --no-cache bash python3
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    # Build and run THIS commit's image (override the registry:latest defaults in
+    # docker/.env; shell env wins over --env-file in compose).
+    - export HAF_STATS_REGISTRY="${CI_REGISTRY_IMAGE%/*}"
+    - export HAF_STATS_VERSION="$CI_COMMIT_SHORT_SHA"
+    - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}" .
+    # The runner's /blockchain is a READ-ONLY cache mount, but hived writes
+    # haf_wal/rocksdb into datadir/blockchain — so a direct mount fails with
+    # "Read-only file system". Copy the block_log into the writable job workspace
+    # (which the dind daemon can also see) and mount THAT via docker/blockchain.
+    - mkdir -p docker/blockchain
+    - cp -a "${BLOCK_LOG_SOURCE_DIR}/." docker/blockchain/
+    - ls -la docker/blockchain
+    - chmod +x scripts/run_tests.sh
+    # --keep: skip teardown so after_script can capture the Tavern pytest summary
+    # AND so the correctness guards below can query the still-running stack.
+    - ./scripts/run_tests.sh --reset --keep
+    # Correctness guards (mirror balance_tracker parity + regression): prove the
+    # exact values the tavern suite asserts are independently reproducible from the
+    # raw op stream AND match an external hived-node snapshot — not just internally
+    # consistent. Fails the job on any divergence.
+    - chmod +x scripts/run_verification.sh
+    - ./scripts/run_verification.sh
+  after_script:
+    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf | tail -60
+    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-setup
+    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-process
+    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs tavern
+  tags:
+    - public-runner-docker
+    - data-cache-storage
+  allow_failure: false
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH

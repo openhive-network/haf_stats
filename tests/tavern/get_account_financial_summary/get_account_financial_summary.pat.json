@@ -1,0 +1,20 @@
+[
+  {
+    "period": "2016-04-01",
+    "category": "Transfer",
+    "direction": "expense",
+    "hive_nai": 169015773,
+    "hbd_nai": 0,
+    "vests_nai": 0,
+    "op_count": 322
+  },
+  {
+    "period": "2016-04-01",
+    "category": "Transfer",
+    "direction": "income",
+    "hive_nai": 320700219,
+    "hbd_nai": 0,
+    "vests_nai": 0,
+    "op_count": 971
+  }
+]

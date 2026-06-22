@@ -1,0 +1,25 @@
+---
+test_name: Account content stats matches the 5M replay
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_account_content_stats for tuck-fheman in 2016-04
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "tuck-fheman"
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+        granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

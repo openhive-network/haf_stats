@@ -1,0 +1,25 @@
+---
+test_name: Network engagement computes exact monthly aggregate values
+
+marks:
+  - patterntest
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Compare monthly engagement response with pattern
+    request:
+      url: "{api_url}/rpc/get_network_engagement"
+      method: GET
+      params:
+        from_date: "2016-03-01"
+        to_date: "2016-03-31"
+        granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

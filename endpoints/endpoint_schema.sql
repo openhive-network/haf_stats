@@ -608,7 +608,7 @@ DECLARE
           "Network"
         ],
         "summary": "New account cohort retention",
-        "description": "Cohort retention for new accounts - percentage still active at 7, 30, and 90 days after creation, grouped by month of account creation. active_at_Nd is null for cohorts whose Nd window has not yet elapsed.",
+        "description": "Day-7, day-30, and day-90 retention for all newly created accounts, including accounts created through legacy pow/pow2 mining. An account is retained at day N when it signs at least one non-virtual operation during the exact 24-hour window [N, N+1) days after creation. Results are grouped by creation month; active_at_Nd is null until every account in that cohort has completed the corresponding observation window.",
         "operationId": "haf_stats_endpoints.get_network_account_funnel",
         "parameters": [
           {
@@ -653,16 +653,20 @@ DECLARE
                         "type": "integer"
                       },
                       "active_at_7d": {
-                        "type": "integer"
+                        "type": "integer",
+                        "nullable": true
                       },
                       "pct_7d": {
-                        "type": "number"
+                        "type": "number",
+                        "nullable": true
                       },
                       "active_at_30d": {
-                        "type": "integer"
+                        "type": "integer",
+                        "nullable": true
                       },
                       "pct_30d": {
-                        "type": "number"
+                        "type": "number",
+                        "nullable": true
                       },
                       "active_at_90d": {
                         "type": "integer",
@@ -934,6 +938,93 @@ DECLARE
                       },
                       "unique_authors": {
                         "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/network/engagement": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Content engagement quality metrics",
+        "description": "Average votes and comments per post, and the share of posts with zero engagement, per period. Posts are grouped by their CREATION period and the counts are lifetime totals \u2014 a post created in period P contributes every vote and reply it has ever received to P, including ones that arrived in a later period. This is a cohort-by-creation view, not a count of activity that happened within the period. Because counts are lifetime, the most recent periods are right-censored: posts created near the end of the range have had little time to accrue votes/replies, so their zero_vote_post_pct / zero_comment_post_pct read artificially high \u2014 treat the latest buckets as provisional until they mature. zero_vote_post_pct and zero_comment_post_pct are ghost-posting health signals unique to Hive. vote_count includes upvotes and downvotes (weight != 0); unvotes (weight = 0) are excluded. reply_count counts only direct replies to root posts.",
+        "operationId": "haf_stats_endpoints.get_network_engagement",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NOW()::DATE",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "granularity",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "'day'",
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Bucketing granularity (day, week, or month)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Engagement metrics per period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, total_posts BIGINT, avg_votes_per_post NUMERIC, avg_comments_per_post NUMERIC, zero_vote_post_pct NUMERIC, zero_comment_post_pct NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      "total_posts": {
+                        "type": "integer"
+                      },
+                      "avg_votes_per_post": {
+                        "type": "number"
+                      },
+                      "avg_comments_per_post": {
+                        "type": "number"
+                      },
+                      "zero_vote_post_pct": {
+                        "type": "number"
+                      },
+                      "zero_comment_post_pct": {
+                        "type": "number"
                       }
                     }
                   }
@@ -1780,9 +1871,12 @@ $_$;
       - Network
     summary: New account cohort retention
     description: >-
-      Cohort retention for new accounts - percentage still active at 7, 30,
-      and 90 days after creation, grouped by month of account creation.
-      active_at_Nd is null for cohorts whose Nd window has not yet elapsed.
+      Day-7, day-30, and day-90 retention for all newly created accounts,
+      including accounts created through legacy pow/pow2 mining. An account is
+      retained at day N when it signs at least one non-virtual operation during
+      the exact 24-hour window [N, N+1) days after creation. Results are grouped
+      by creation month; active_at_Nd is null until every account in that
+      cohort has completed the corresponding observation window.
     operationId: haf_stats_endpoints.get_network_account_funnel
     parameters:
       - in: query
@@ -1819,12 +1913,16 @@ $_$;
                     type: integer
                   active_at_7d:
                     type: integer
+                    nullable: true
                   pct_7d:
                     type: number
+                    nullable: true
                   active_at_30d:
                     type: integer
+                    nullable: true
                   pct_30d:
                     type: number
+                    nullable: true
                   active_at_90d:
                     type: integer
                     nullable: true
@@ -1853,8 +1951,8 @@ AS $$
         ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
     FROM haf_stats_backend.account_cohort_retention acr
     WHERE acr.cohort_month
-        BETWEEN haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE)
-        AND haf_stats_app.to_filter_date("to_date", NOW()::DATE)
+        BETWEEN DATE_TRUNC('month', haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE))::DATE
+        AND DATE_TRUNC('month', haf_stats_app.to_filter_date("to_date", NOW()::DATE))::DATE
     ORDER BY acr.cohort_month;
 $$;
 
@@ -2340,6 +2438,124 @@ BEGIN
         COALESCE(a.unique_authors, 0)::BIGINT
     FROM counts c
     LEFT JOIN authors a ON a.period = c.period
+    ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide content engagement quality
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/engagement:
+  get:
+    tags:
+      - Network
+    summary: Content engagement quality metrics
+    description: >-
+      Average votes and comments per post, and the share of posts with zero
+      engagement, per period. Posts are grouped by their CREATION period and the
+      counts are lifetime totals — a post created in period P contributes every
+      vote and reply it has ever received to P, including ones that arrived in a
+      later period. This is a cohort-by-creation view, not a count of activity
+      that happened within the period. Because counts are lifetime, the most
+      recent periods are right-censored: posts created near the end of the range
+      have had little time to accrue votes/replies, so their
+      zero_vote_post_pct / zero_comment_post_pct read artificially high — treat
+      the latest buckets as provisional until they mature. zero_vote_post_pct and
+      zero_comment_post_pct are ghost-posting health signals unique to Hive.
+      vote_count includes upvotes and downvotes (weight != 0); unvotes
+      (weight = 0) are excluded. reply_count counts only direct replies to root
+      posts.
+    operationId: haf_stats_endpoints.get_network_engagement
+    parameters:
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: granularity
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "'day'"
+          type: string
+          enum: [day, week, month]
+        description: Bucketing granularity (day, week, or month)
+    responses:
+      '200':
+        description: Engagement metrics per period
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, total_posts BIGINT, avg_votes_per_post NUMERIC, avg_comments_per_post NUMERIC, zero_vote_post_pct NUMERIC, zero_comment_post_pct NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    format: date
+                  total_posts:
+                    type: integer
+                  avg_votes_per_post:
+                    type: number
+                  avg_comments_per_post:
+                    type: number
+                  zero_vote_post_pct:
+                    type: number
+                  zero_comment_post_pct:
+                    type: number
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_engagement;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_engagement(
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "granularity" TEXT = 'day'
+)
+RETURNS TABLE(period TEXT, total_posts BIGINT, avg_votes_per_post NUMERIC, avg_comments_per_post NUMERIC, zero_vote_post_pct NUMERIC, zero_comment_post_pct NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
+    "granularity" := TRIM('"' FROM "granularity");
+    IF "granularity" IS NULL OR "granularity" NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        TO_CHAR(DATE_TRUNC("granularity", pe.post_day), 'YYYY-MM-DD'),
+        COUNT(*)::BIGINT,
+        ROUND(AVG(pe.vote_count), 2),
+        ROUND(AVG(pe.reply_count), 2),
+        ROUND(COUNT(*) FILTER (WHERE pe.vote_count = 0) * 100.0 / NULLIF(COUNT(*), 0), 2),
+        ROUND(COUNT(*) FILTER (WHERE pe.reply_count = 0) * 100.0 / NULLIF(COUNT(*), 0), 2)
+    FROM haf_stats_backend.post_engagement pe
+    WHERE pe.post_day BETWEEN _from AND _to
+    GROUP BY DATE_TRUNC("granularity", pe.post_day)
     ORDER BY 1;
 END;
 $$;

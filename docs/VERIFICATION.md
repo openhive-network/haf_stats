@@ -131,9 +131,10 @@ install btracker as `btracker_app`, or parameterize the schema in
 `fk_hive_app_context (events_id → hafd.events_queue)` FK. The committed command
 also pointed at a non-existent `/home/hived/run_hived.sh` (the image entrypoint is
 `docker_entrypoint.sh`, driven by `--replay --stop-at-block=N`).
-**Fix:** the `haf` service now mounts the pre-synced block_log and replays a
-bounded range (`REPLAY_STOP_AT_BLOCK`, default 100000) so real HAF state exists;
-the healthcheck waits for `MAX(num) >= REPLAY_STOP_AT_BLOCK` before install runs.
+**Fix:** the `haf` service now mounts the pre-synced block_log and replays the
+5,000,000-block reference range by default so real HAF state exists and D90
+retention is closed. `REPLAY_STOP_AT_BLOCK` can override the depth; the
+healthcheck waits for `MAX(num) >= REPLAY_STOP_AT_BLOCK` before install runs.
 Related: README TODO #6 (HAF version/state must match app assumptions).
 
 ### D8 — Test-stack API host-port clash

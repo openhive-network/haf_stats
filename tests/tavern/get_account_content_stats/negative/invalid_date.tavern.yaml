@@ -1,0 +1,24 @@
+---
+test_name: Account content stats rejects invalid date format
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject malformed from_date
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "hiveio"
+        from_date: "not-a-date"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

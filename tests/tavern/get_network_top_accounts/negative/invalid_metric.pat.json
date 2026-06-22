@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be one of: author_rewards, curation_rewards, transfer_volume_in, transfer_volume_out, hp_balance, transaction_count",
+  "message": "invalid metric: wibble"
+}

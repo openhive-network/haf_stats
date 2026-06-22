@@ -1,0 +1,26 @@
+[
+  {
+    "period": "2016-03-15",
+    "total_posts": 1,
+    "avg_votes_per_post": 5.0,
+    "avg_comments_per_post": 2.0,
+    "zero_vote_post_pct": 0.0,
+    "zero_comment_post_pct": 0.0
+  },
+  {
+    "period": "2016-03-16",
+    "total_posts": 1,
+    "avg_votes_per_post": 0.0,
+    "avg_comments_per_post": 0.0,
+    "zero_vote_post_pct": 100.0,
+    "zero_comment_post_pct": 100.0
+  },
+  {
+    "period": "2016-03-17",
+    "total_posts": 1,
+    "avg_votes_per_post": 3.0,
+    "avg_comments_per_post": 1.0,
+    "zero_vote_post_pct": 0.0,
+    "zero_comment_post_pct": 0.0
+  }
+]

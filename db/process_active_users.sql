@@ -224,7 +224,10 @@ BEGIN
 WITH authored AS MATERIALIZED (
     -- One row per (op_id, signer). get_required_authorities fans multisig custom_json
     -- into one row per signer; authorless real ops (pow/pow2) are dropped by the
-    -- INNER LATERAL join.
+    -- INNER LATERAL join. The crash-safe wrapper (haf_stats_app.sql) is used in place
+    -- of the raw HAF function: a handful of legacy ops past the 5M CI cap FC_ASSERT
+    -- inside it ("Asset amount cannot be negative"), which would abort the batch and
+    -- restart-loop the processor; the wrapper yields no rows for such an op.
     SELECT
         ov.id              AS op_id,
         ra.account_name    AS actor_name,
@@ -241,7 +244,7 @@ WITH authored AS MATERIALIZED (
          END) AS op_class
     FROM hive.operations_view ov
     JOIN hafd.blocks b ON b.num = ov.block_num
-    CROSS JOIN LATERAL hive.get_required_authorities(ov.body) ra
+    CROSS JOIN LATERAL haf_stats_app.get_required_authorities_safe(ov.body) ra
     WHERE ov.block_num BETWEEN _first_block AND _last_block
       AND ov.id >= hafd.operation_id(_first_block, 0)
       AND ov.id <  hafd.operation_id(_last_block + 1, 0)
