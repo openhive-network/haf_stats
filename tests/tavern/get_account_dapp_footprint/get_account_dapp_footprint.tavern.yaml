@@ -1,0 +1,62 @@
+---
+test_name: Account DApp footprint classifies custom_json activity into categories
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Reads account_custom_json_daily (ci_setup) and resolves apps/categories from the
+# seeded custom_json_app_registry. dapptester in June 2020: sm_claim_daily 25 + sm_battle
+# 5 -> Splinterlands/Gaming (two ids roll up to one app), ssc-mainnet-hive 20 -> Hive
+# Engine (SSC)/DeFi, follow 10 -> Hivemind Follow/Social Graph, mystery_app 5 ->
+# Uncategorized = 65 ops. A 999-op July row is outside the range and excluded.
+stages:
+  - name: GET /rpc/get_account_dapp_footprint for dapptester, June 2020
+    request:
+      url: "{api_url}/rpc/get_account_dapp_footprint"
+      method: GET
+      params:
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+    response:
+      status_code: 200
+      json:
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        total_ops: 65
+        top_category: "Gaming"
+        top_dapp: "Splinterlands"
+        categories:
+          - category: "Gaming"
+            op_count: 30
+            pct: 46.15
+          - category: "DeFi"
+            op_count: 20
+            pct: 30.77
+          - category: "Social Graph"
+            op_count: 10
+            pct: 15.38
+          - category: "Uncategorized"
+            op_count: 5
+            pct: 7.69
+        dapps:
+          - category: "Gaming"
+            app_name: "Splinterlands"
+            op_count: 30
+            pct: 46.15
+          - category: "DeFi"
+            app_name: "Hive Engine (SSC)"
+            op_count: 20
+            pct: 30.77
+          - category: "Social Graph"
+            app_name: "Hivemind Follow"
+            op_count: 10
+            pct: 15.38
+          - category: "Uncategorized"
+            app_name: "mystery_app"
+            op_count: 5
+            pct: 7.69

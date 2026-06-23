@@ -79,6 +79,7 @@ $$;
 
 -- Seed one known account so financial summary tests can JOIN without erroring.
 INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
@@ -375,6 +376,34 @@ VALUES
     (1, 'first-post',  '2016-03-15', 5, 2),
     (1, 'second-post', '2016-03-16', 0, 0),
     (1, 'third-post',  '2016-03-17', 3, 1)
+ON CONFLICT DO NOTHING;
+
+-- DApp footprint stub: account_custom_json_daily (mirrors db/process_custom_json.sql,
+-- which the stub does not load). The endpoint resolves app names + categories from the
+-- existing custom_json_app_registry, created above and seeded by seed_data.sql.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    json_id TEXT NOT NULL,
+    op_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, day, json_id)
+);
+GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
+
+-- Fixtures for the get_account_dapp_footprint exact-value tavern test (account
+-- dapptester, id 2001), all resolved via the seeded registry: sm_claim_daily + sm_battle
+-- -> Splinterlands/Gaming (two ids rolling up to one app), ssc-mainnet-hive ->
+-- Hive Engine (SSC)/DeFi, follow -> Hivemind Follow/Social Graph, mystery_app ->
+-- Uncategorized. The '2020-07-01' row is outside the test range, proving the day filter
+-- excludes it. Totals: Gaming 30, DeFi 20, Social Graph 10, Uncategorized 5 = 65.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count)
+VALUES
+    (2001, '2020-06-01', 'sm_claim_daily', 25),
+    (2001, '2020-06-05', 'sm_battle', 5),
+    (2001, '2020-06-01', 'ssc-mainnet-hive', 20),
+    (2001, '2020-06-10', 'follow', 10),
+    (2001, '2020-06-10', 'mystery_app', 5),
+    (2001, '2020-07-01', 'sm_market', 999)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;
