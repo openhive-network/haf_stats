@@ -203,8 +203,8 @@ $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rollup_if_empty(
-    _rollup       REGCLASS,
-    _source       REGCLASS,
+    _rollup REGCLASS,
+    _source REGCLASS,
     _refresh_call TEXT
 )
 RETURNS VOID
