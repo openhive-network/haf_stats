@@ -1,0 +1,41 @@
+---
+test_name: Network vote stats fast path returns exact precomputed full-period values
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Reads the network_vote_period_counts rollup directly. The fixture (ci_setup.sql) has
+# full-month values for Jan/Feb 2020; a to_date mid-February must still return the FULL
+# February, not a partial slice. downvote_pct is derived in the endpoint:
+# downvotes / (upvotes + downvotes) * 100 = 200 / 1200 * 100 = 16.67.
+stages:
+  - name: GET /rpc/get_network_vote_stats monthly, to_date mid-period
+    request:
+      url: "{api_url}/rpc/get_network_vote_stats"
+      method: GET
+      params:
+        from_date: "2020-01-01"
+        to_date: "2020-02-15"
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          total_votes: 1250
+          upvotes: 1000
+          downvotes: 200
+          unvotes: 50
+          self_votes: 30
+          unique_voters: 400
+          downvote_pct: 16.67
+        - period: "2020-02-01"
+          total_votes: 1860
+          upvotes: 1500
+          downvotes: 300
+          unvotes: 60
+          self_votes: 45
+          unique_voters: 550
+          downvote_pct: 16.67
