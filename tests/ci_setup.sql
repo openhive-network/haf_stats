@@ -129,11 +129,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_endpoints
 
 -- Fixtures for the get_network_hp_distribution exact-value tavern test (#28). The
 -- endpoint auto-detects the first readable balance relation and converts VESTS to HP
--- via the latest hafd.blocks ratio: r = total_vesting_shares * 1000 / total_vesting_fund_hive.
+-- via the LATEST hafd.blocks ratio: r = total_vesting_shares * 1000 / total_vesting_fund_hive.
 -- With shares=1e9 and fund=1e9, r = 1000 (1 HP = 1000 VESTS). Created as superuser and
 -- granted to haf_stats_user so the endpoint (run via PostgREST as that role) resolves it.
+-- num must exceed cohort_fixture.sql's blocks (1000-1005, loaded into the stub AFTER this
+-- file with vesting columns defaulting to 0); otherwise the ratio CTE's
+-- "ORDER BY num DESC LIMIT 1" would pick a cohort block and the ratio would be NULL.
 INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
-VALUES (1, '2016-03-24 16:05:00', 1000000000, 1000000000)
+VALUES (2000, '2020-05-01 00:00:00', 1000000000, 1000000000)
 ON CONFLICT (num) DO NOTHING;
 
 CREATE SCHEMA IF NOT EXISTS btracker_app;
