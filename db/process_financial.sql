@@ -87,6 +87,16 @@ GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 -- Asset NAI: HIVE = @@000000021, HBD = @@000000013 (split where an `amount`
 -- field can be either). transfer and fill_order are multi-leg (sender/receiver,
 -- maker/taker).
+--
+-- SCAN SOURCE: each leg reads hafd.operations directly (not hive.operations_view),
+-- filtered by op_type_id + hafd.operation_id_to_block_num(id) BETWEEN the batch
+-- bounds, which the hive_operations_op_type_id_block_num index serves as a tight
+-- range scan. operations_view is a UNION ALL of operations + reversible_operations
+-- and adds large per-query overhead over wide ranges; its reversible half is moot
+-- here because the haf_stats context is non-forking (is_forking = false), so every
+-- block this function processes is already irreversible and present in
+-- hafd.operations. Same idiom as the haf_block_explorer / balance_tracker processors;
+-- a full-history financial rebuild drops from ~tens of hours to ~1-2h.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_financial(
@@ -133,15 +143,15 @@ FROM (
         bv.created_at::DATE AS day,
         'author_reward_operation' AS category,
         'incoming' AS direction,
-        COALESCE((ov.body -> 'value' -> 'hive_payout'    ->> 'amount')::BIGINT, 0) AS hive_nai,
-        COALESCE((ov.body -> 'value' -> 'hbd_payout'     ->> 'amount')::BIGINT, 0) AS hbd_nai,
-        COALESCE((ov.body -> 'value' -> 'vesting_payout' ->> 'amount')::BIGINT, 0) AS vests_nai,
+        COALESCE((ov.body_value -> 'hive_payout'    ->> 'amount')::BIGINT, 0) AS hive_nai,
+        COALESCE((ov.body_value -> 'hbd_payout'     ->> 'amount')::BIGINT, 0) AS hbd_nai,
+        COALESCE((ov.body_value -> 'vesting_payout' ->> 'amount')::BIGINT, 0) AS vests_nai,
         1 AS op_count
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'author')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'author')
     WHERE ov.op_type_id = _author_reward_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -151,15 +161,15 @@ FROM (
         bv.created_at::DATE,
         'comment_benefactor_reward_operation',
         'incoming',
-        COALESCE((ov.body -> 'value' -> 'hive_payout'    ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body -> 'value' -> 'hbd_payout'     ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body -> 'value' -> 'vesting_payout' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'hive_payout'    ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'hbd_payout'     ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'vesting_payout' ->> 'amount')::BIGINT, 0),
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'benefactor')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'benefactor')
     WHERE ov.op_type_id = _comment_benefactor_reward_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -171,13 +181,13 @@ FROM (
         'incoming',
         0::BIGINT,
         0::BIGINT,
-        COALESCE((ov.body -> 'value' -> 'reward' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'reward' ->> 'amount')::BIGINT, 0),
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'curator')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'curator')
     WHERE ov.op_type_id = _curation_reward_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -187,15 +197,15 @@ FROM (
         bv.created_at::DATE,
         'claim_reward_balance_operation',
         'incoming',
-        COALESCE((ov.body -> 'value' -> 'reward_hive'  ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body -> 'value' -> 'reward_hbd'   ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body -> 'value' -> 'reward_vests' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'reward_hive'  ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'reward_hbd'   ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'reward_vests' ->> 'amount')::BIGINT, 0),
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'account')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'account')
     WHERE ov.op_type_id = _claim_reward_balance_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -206,14 +216,14 @@ FROM (
         'interest_operation',
         'incoming',
         0::BIGINT,
-        COALESCE((ov.body -> 'value' -> 'interest' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'interest' ->> 'amount')::BIGINT, 0),
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'owner')
     WHERE ov.op_type_id = _interest_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -223,17 +233,17 @@ FROM (
         bv.created_at::DATE,
         'transfer_operation',
         'outgoing',
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
     WHERE ov.op_type_id = _transfer_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -243,17 +253,17 @@ FROM (
         bv.created_at::DATE,
         'transfer_operation',
         'incoming',
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to')
     WHERE ov.op_type_id = _transfer_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -263,17 +273,17 @@ FROM (
         bv.created_at::DATE,
         'transfer_to_savings_operation',
         'outgoing',
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
     WHERE ov.op_type_id = _transfer_to_savings_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -283,17 +293,17 @@ FROM (
         bv.created_at::DATE,
         'transfer_from_savings_operation',
         'outgoing',
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
     WHERE ov.op_type_id = _transfer_from_savings_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -303,17 +313,17 @@ FROM (
         bv.created_at::DATE,
         'fill_transfer_from_savings_operation',
         'incoming',
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to')
     WHERE ov.op_type_id = _fill_transfer_from_savings_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -323,15 +333,15 @@ FROM (
         bv.created_at::DATE,
         'transfer_to_vesting_operation',
         'outgoing',
-        COALESCE((ov.body -> 'value' -> 'amount' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0),
         0::BIGINT,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'from')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
     WHERE ov.op_type_id = _transfer_to_vesting_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -345,17 +355,17 @@ FROM (
         bv.created_at::DATE,
         'fill_vesting_withdraw_operation',
         'incoming',
-        CASE WHEN (ov.body -> 'value' -> 'deposited' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'deposited' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
-        CASE WHEN (ov.body -> 'value' -> 'deposited' ->> 'nai') = '@@000000037'
-             THEN COALESCE((ov.body -> 'value' -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'deposited' ->> 'nai') = '@@000000037'
+             THEN COALESCE((ov.body_value -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'to_account')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to_account')
     WHERE ov.op_type_id = _fill_vesting_withdraw_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -367,13 +377,13 @@ FROM (
         'incoming',
         0::BIGINT,
         0::BIGINT,
-        COALESCE((ov.body -> 'value' -> 'vesting_shares' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'vesting_shares' ->> 'amount')::BIGINT, 0),
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'producer')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'producer')
     WHERE ov.op_type_id = _producer_reward_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -383,15 +393,15 @@ FROM (
         bv.created_at::DATE,
         'liquidity_reward_operation',
         'incoming',
-        COALESCE((ov.body -> 'value' -> 'payout' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'payout' ->> 'amount')::BIGINT, 0),
         0::BIGINT,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'owner')
     WHERE ov.op_type_id = _liquidity_reward_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -402,14 +412,14 @@ FROM (
         'proposal_pay_operation',
         'incoming',
         0::BIGINT,
-        COALESCE((ov.body -> 'value' -> 'payment' ->> 'amount')::BIGINT, 0),
+        COALESCE((ov.body_value -> 'payment' ->> 'amount')::BIGINT, 0),
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'receiver')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'receiver')
     WHERE ov.op_type_id = _proposal_pay_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -419,17 +429,17 @@ FROM (
         bv.created_at::DATE,
         'fill_order_operation',
         'outgoing',
-        CASE WHEN (ov.body -> 'value' -> 'current_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'current_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'current_owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'current_owner')
     WHERE ov.op_type_id = _fill_order_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -439,17 +449,17 @@ FROM (
         bv.created_at::DATE,
         'fill_order_operation',
         'incoming',
-        CASE WHEN (ov.body -> 'value' -> 'open_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'open_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'current_owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'current_owner')
     WHERE ov.op_type_id = _fill_order_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -459,17 +469,17 @@ FROM (
         bv.created_at::DATE,
         'fill_order_operation',
         'outgoing',
-        CASE WHEN (ov.body -> 'value' -> 'open_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'open_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'open_owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'open_owner')
     WHERE ov.op_type_id = _fill_order_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
     UNION ALL
 
@@ -479,17 +489,17 @@ FROM (
         bv.created_at::DATE,
         'fill_order_operation',
         'incoming',
-        CASE WHEN (ov.body -> 'value' -> 'current_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body -> 'value' -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body -> 'value' -> 'current_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body -> 'value' -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000021'
+             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
+        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000013'
+             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
         0::BIGINT,
         1
-    FROM hive.operations_view ov
-    JOIN hafd.blocks bv ON bv.num = ov.block_num
-    JOIN hafd.accounts a ON a.name = (ov.body -> 'value' ->> 'open_owner')
+    FROM hafd.operations ov
+    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'open_owner')
     WHERE ov.op_type_id = _fill_order_id
-      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 
 ) impacts
 GROUP BY account_id, day, category, direction
