@@ -61,6 +61,32 @@ psql_cmd -c "
         GRANT EXECUTE ON FUNCTIONS TO haf_stats_user;
 "
 
+# 8. Self-heal the precomputed endpoint rollups. They ship empty and the endpoints read
+#    them directly; on an already-synced node the forward refresh hook only fills recent
+#    periods, so without this the historical rollup stays empty and the endpoint returns
+#    [] until a manual genesis backfill (easy to forget on a fresh environment). Each call
+#    backfills only when the rollup is empty AND its source has data, so it is a no-op on a
+#    fresh genesis replay (the hook fills it forward) and on a re-install of a populated
+#    node. Runs as haf_stats_owner to match table ownership; the refresh statements use
+#    doubled single quotes (no $-quoting) so bash leaves them intact.
+log "Backfilling precomputed period rollups if empty (one-time on an already-synced node)..."
+psql_cmd -c "
+    SET ROLE haf_stats_owner;
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.network_vote_period_counts',
+        'haf_stats_backend.network_vote_daily',
+        'SELECT haf_stats_app.refresh_network_vote_periods(''2016-03-24'')');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.active_users_period_counts',
+        'haf_stats_backend.active_users_daily',
+        'SELECT haf_stats_app.refresh_active_users_periods(''2016-03-24'')');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.account_cohort_retention',
+        'haf_stats_backend.account_cohort_members',
+        'SELECT haf_stats_app.refresh_account_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
+    RESET ROLE;
+"
+
 log "Installation complete."
 
 # PREREQUISITE (run by the balance_tracker schema owner, not this script):

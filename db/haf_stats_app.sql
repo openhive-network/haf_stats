@@ -182,4 +182,51 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- One-time self-heal for the precomputed endpoint rollups (called by install_app.sh)
+--
+-- The period rollups (account_cohort_retention, active_users_period_counts,
+-- network_vote_period_counts) ship empty and their endpoints read them directly. The
+-- forward refresh hook inside each processor only touches recent periods, so on an
+-- already-synced node - installing a new app version over existing data - the historical
+-- rollup would stay empty and the endpoint return [] until someone manually ran a genesis
+-- backfill: a silent regression that is easy to forget on a fresh environment. After the
+-- processors are loaded, install_app.sh calls this once per rollup: if the rollup is empty
+-- but its source table already has data, it runs the supplied full-history refresh.
+-- Idempotent (a populated rollup is left untouched, so re-installs are cheap) and a no-op
+-- on a node still replaying from genesis (source empty -> the hook builds the rollup
+-- forward as the replay advances). _refresh_call is a complete SQL statement so each
+-- rollup passes its own refresh signature (the period rollups take a genesis _lo DATE;
+-- cohort retention takes an _as_of TIMESTAMP = chain head). On a large already-synced node
+-- the refresh is a full re-aggregation and can take a while - it runs in the setup
+-- container, which the processor waits on, so the rollup is populated before serving.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rollup_if_empty(
+    _rollup       REGCLASS,
+    _source       REGCLASS,
+    _refresh_call TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _rollup_has_rows BOOLEAN;
+    _source_has_rows BOOLEAN;
+BEGIN
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', _rollup) INTO _rollup_has_rows;
+    IF _rollup_has_rows THEN
+        RETURN;  -- already populated; nothing to do
+    END IF;
+
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', _source) INTO _source_has_rows;
+    IF NOT _source_has_rows THEN
+        RETURN;  -- fresh node still replaying from genesis; the hook will fill it forward
+    END IF;
+
+    RAISE NOTICE 'haf_stats: % is empty but % has data - running one-time full backfill', _rollup, _source;
+    EXECUTE _refresh_call;
+END;
+$$;
+
 RESET ROLE;
