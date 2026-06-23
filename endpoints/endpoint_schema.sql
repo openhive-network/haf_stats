@@ -190,7 +190,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account financial summary",
-        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (in/out).",
+        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (incoming/outgoing).",
         "operationId": "haf_stats_endpoints.get_account_financial_summary",
         "parameters": [
           {
@@ -256,13 +256,14 @@ DECLARE
                         "description": "ISO-8601 date string for the aggregation bucket"
                       },
                       "category": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "Canonical Hive operation type name, e.g. author_reward_operation"
                       },
                       "direction": {
                         "type": "string",
                         "enum": [
-                          "in",
-                          "out"
+                          "incoming",
+                          "outgoing"
                         ]
                       },
                       "hive_nai": {
@@ -1236,7 +1237,7 @@ $$;
     summary: Account financial summary
     description: >-
       Aggregated HBD/HIVE/VESTS flows for an account over a time range,
-      grouped by financial category and direction (in/out).
+      grouped by financial category and direction (incoming/outgoing).
     operationId: haf_stats_endpoints.get_account_financial_summary
     parameters:
       - in: path
@@ -1285,9 +1286,10 @@ $$;
                     description: ISO-8601 date string for the aggregation bucket
                   category:
                     type: string
+                    description: Canonical Hive operation type name, e.g. author_reward_operation
                   direction:
                     type: string
-                    enum: [in, out]
+                    enum: [incoming, outgoing]
                   hive_nai:
                     type: integer
                   hbd_nai:
@@ -1489,8 +1491,8 @@ BEGIN
         FROM haf_stats_backend.account_financial_daily afd
         WHERE afd.account_id = _account_id
           AND afd.day BETWEEN _from AND _to
-          AND afd.category = 'Author Reward'
-          AND afd.direction = 'income'
+          AND afd.category = 'author_reward_operation'
+          AND afd.direction = 'incoming'
         GROUP BY 1
     )
     SELECT
@@ -2712,8 +2714,8 @@ BEGIN
     -- Accounts are resolved AFTER aggregation + LIMIT (top N names only).
     IF "metric" IN ('author_rewards', 'curation_rewards') THEN
         _category := CASE "metric"
-            WHEN 'author_rewards' THEN 'Author Reward'
-            ELSE 'Curation Reward'
+            WHEN 'author_rewards' THEN 'author_reward_operation'
+            ELSE 'curation_reward_operation'
         END;
 
         RETURN QUERY
@@ -2728,7 +2730,7 @@ BEGIN
                 SUM(f.op_count)  AS ops
             FROM haf_stats_backend.account_financial_daily f
             WHERE f.category = _category
-              AND f.direction = 'income'
+              AND f.direction = 'incoming'
               AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id
             ORDER BY SUM(f.vests_nai) DESC, SUM(f.hbd_nai) DESC,
@@ -2749,8 +2751,8 @@ BEGIN
 
     ELSIF "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN
         _direction := CASE "metric"
-            WHEN 'transfer_volume_in' THEN 'income'
-            ELSE 'expense'
+            WHEN 'transfer_volume_in' THEN 'incoming'
+            ELSE 'outgoing'
         END;
 
         RETURN QUERY
@@ -2763,7 +2765,7 @@ BEGIN
                 SUM(f.hbd_nai)  AS hbd,
                 SUM(f.op_count) AS ops
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = 'Transfer'
+            WHERE f.category = 'transfer_operation'
               AND f.direction = _direction
               AND f.day BETWEEN _from AND _to
             GROUP BY f.account_id

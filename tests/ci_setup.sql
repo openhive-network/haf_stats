@@ -198,18 +198,11 @@ INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('ci-test');
 -- process_account_cohorts.sql, process_content_stats.sql)
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS haf_stats_backend.op_financial_categories (
-    op_type_name TEXT NOT NULL PRIMARY KEY,
-    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense', 'neutral')),
-    category TEXT NOT NULL,
-    asset TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
     category TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('income', 'expense')),
+    direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
     hive_nai BIGINT NOT NULL DEFAULT 0,
     hbd_nai BIGINT NOT NULL DEFAULT 0,
     vests_nai BIGINT NOT NULL DEFAULT 0,
