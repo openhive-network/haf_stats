@@ -127,6 +127,37 @@ ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_backend
 ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_endpoints
     GRANT EXECUTE ON FUNCTIONS TO haf_stats_user;
 
+-- Fixtures for the get_network_hp_distribution exact-value tavern test (#28). The
+-- endpoint auto-detects the first readable balance relation and converts VESTS to HP
+-- via the latest hafd.blocks ratio: r = total_vesting_shares * 1000 / total_vesting_fund_hive.
+-- With shares=1e9 and fund=1e9, r = 1000 (1 HP = 1000 VESTS). Created as superuser and
+-- granted to haf_stats_user so the endpoint (run via PostgREST as that role) resolves it.
+INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
+VALUES (1, '2016-03-24 16:05:00', 1000000000, 1000000000)
+ON CONFLICT (num) DO NOTHING;
+
+CREATE SCHEMA IF NOT EXISTS btracker_app;
+CREATE TABLE IF NOT EXISTS btracker_app.current_account_balances (
+    account TEXT     NOT NULL,
+    nai     SMALLINT NOT NULL,
+    balance BIGINT   NOT NULL,
+    PRIMARY KEY (account, nai)
+);
+GRANT USAGE ON SCHEMA btracker_app TO haf_stats_user;
+GRANT SELECT ON btracker_app.current_account_balances TO haf_stats_user;
+
+-- VESTS balances (nai 37). r=1000 so HP = balance / 1000. Two accounts land in the
+-- unbounded 1M+ bucket with DIFFERENT sizes, so its total_hp (5,000,000 = 2M + 3M) can
+-- only be the exact sum, proving no midpoint estimate (#28).
+INSERT INTO btracker_app.current_account_balances (account, nai, balance)
+VALUES
+    ('small1',  37,         50000),  -- 50 HP        -> 10-100 HP
+    ('mid1',    37,       4950000),  -- 4,950 HP     -> 1K-10K HP
+    ('whale1',  37,    2000000000),  -- 2,000,000 HP -> 1M+ HP
+    ('whale2',  37,    3000000000),  -- 3,000,000 HP -> 1M+ HP
+    ('hbd1',    13,    9999999999)   -- non-VESTS (nai 13) -> ignored by the WHERE nai = 37
+ON CONFLICT DO NOTHING;
+
 SET ROLE haf_stats_owner;
 
 -- Crash-safe authority wrapper (mirrors db/haf_stats_app.sql). The stub stack does

@@ -569,7 +569,7 @@ DECLARE
           "Network"
         ],
         "summary": "HP stake distribution",
-        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts. Reads current VESTS balances from balance_tracker; its schema is deployment-dependent so the function auto-detects the first readable relation (btracker_app / btracker_backend / hafbe_bal) - grant SELECT to haf_stats_user on whichever applies. Returns an empty array (HTTP 200, not an error) when the data source is unavailable - no readable balance relation, or hafd.blocks has no rows yet (fresh node, no VESTS/HP ratio). Consumers should treat an empty array as \"distribution not available yet\", not \"zero accounts\". (#20.5)",
+        "description": "Bucketed distribution of Hive Power (HP) stake across all accounts, with both the account counts and the total HP held per bucket (enabling a \"% of accounts\" vs \"% of HP held\" view of wealth concentration). Reads current VESTS balances from balance_tracker; its schema is deployment-dependent so the function auto-detects the first readable relation (btracker_app / btracker_backend / hafbe_bal) - grant SELECT to haf_stats_user on whichever applies. total_hp is the sum of actual VESTS-converted balances in the bucket - for the unbounded 1M+ bucket this is the real total, not a midpoint estimate. Returns an empty array (HTTP 200, not an error) when the data source is unavailable - no readable balance relation, or hafd.blocks has no rows yet (fresh node, no VESTS/HP ratio). Consumers should treat an empty array as \"distribution not available yet\", not \"zero accounts\". (#20.5)",
         "operationId": "haf_stats_endpoints.get_network_hp_distribution",
         "responses": {
           "200": {
@@ -577,7 +577,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)",
+                  "x-sql-datatype": "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC, total_hp NUMERIC, pct_hp NUMERIC)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -592,6 +592,14 @@ DECLARE
                       "pct_accounts": {
                         "type": "number",
                         "description": "Percentage of all accounts in this bucket"
+                      },
+                      "total_hp": {
+                        "type": "number",
+                        "description": "Total HP held by all accounts in this bucket (sum of actual VESTS-converted balances)"
+                      },
+                      "pct_hp": {
+                        "type": "number",
+                        "description": "This bucket's total_hp as a percentage of the sum of all buckets' total_hp"
                       }
                     }
                   }
@@ -1745,11 +1753,15 @@ $$;
       - Network
     summary: HP stake distribution
     description: >-
-      Bucketed distribution of Hive Power (HP) stake across all accounts.
+      Bucketed distribution of Hive Power (HP) stake across all accounts, with
+      both the account counts and the total HP held per bucket (enabling a
+      "% of accounts" vs "% of HP held" view of wealth concentration).
       Reads current VESTS balances from balance_tracker; its schema is
       deployment-dependent so the function auto-detects the first readable
       relation (btracker_app / btracker_backend / hafbe_bal) - grant SELECT to
       haf_stats_user on whichever applies.
+      total_hp is the sum of actual VESTS-converted balances in the bucket - for
+      the unbounded 1M+ bucket this is the real total, not a midpoint estimate.
       Returns an empty array (HTTP 200, not an error) when the data source is
       unavailable - no readable balance relation, or hafd.blocks has no
       rows yet (fresh node, no VESTS/HP ratio). Consumers should treat an empty
@@ -1761,7 +1773,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)"
+              x-sql-datatype: "TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC, total_hp NUMERIC, pct_hp NUMERIC)"
               type: array
               items:
                 type: object
@@ -1774,11 +1786,17 @@ $$;
                   pct_accounts:
                     type: number
                     description: Percentage of all accounts in this bucket
+                  total_hp:
+                    type: number
+                    description: Total HP held by all accounts in this bucket (sum of actual VESTS-converted balances)
+                  pct_hp:
+                    type: number
+                    description: This bucket's total_hp as a percentage of the sum of all buckets' total_hp
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_hp_distribution;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
-RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC)
+RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC, total_hp NUMERIC, pct_hp NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $_$
@@ -1833,18 +1851,26 @@ BEGIN
                     WHEN b.balance < 1000000 * r.r THEN '100K-1M HP'
                     ELSE                               '1M+ HP'
                 END   AS bucket,
-                COUNT(*) AS cnt
+                COUNT(*)       AS cnt,
+                -- Sum of actual VESTS balances in the bucket. For the unbounded 1M+
+                -- bucket this is the real total, not a midpoint estimate (#28).
+                SUM(b.balance) AS vests
             FROM %s b, ratio r
             WHERE b.nai = 37   -- VESTS (btracker nai smallint code: 13=HBD, 21=HIVE, 37=VESTS)
               AND b.balance > 0
             GROUP BY 1
         ),
-        total AS (SELECT SUM(cnt) AS n FROM balances)
+        total AS (SELECT SUM(cnt) AS n, SUM(vests) AS v FROM balances)
         SELECT
             balances.bucket,
             cnt::BIGINT                              AS account_count,
-            ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts
-        FROM balances, total
+            ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts,
+            -- HP = VESTS / ratio (same conversion the bucket boundaries use).
+            ROUND(balances.vests / NULLIF(ratio.r, 0), 2)         AS total_hp,
+            -- Bucket's share of total HP; the ratio cancels, so this is the
+            -- bucket's share of total VESTS.
+            ROUND(balances.vests * 100.0 / NULLIF(total.v, 0), 2) AS pct_hp
+        FROM balances, total, ratio
         ORDER BY
             CASE balances.bucket
                 WHEN '0-1 HP'      THEN 1

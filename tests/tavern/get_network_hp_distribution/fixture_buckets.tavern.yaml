@@ -1,0 +1,37 @@
+---
+test_name: Network HP distribution returns exact per-bucket HP totals and shares
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Reads the mock btracker_app.current_account_balances + hafd.blocks ratio from
+# ci_setup.sql (r = 1000, so HP = balance / 1000). Four VESTS accounts (the nai=13
+# row is ignored): 50 HP, 4,950 HP, and two in the unbounded 1M+ bucket (2,000,000 +
+# 3,000,000 HP). The 1M+ total_hp (5,000,000) is the exact sum of its two accounts,
+# proving it is not a midpoint estimate (#28). total vests = 5,005,000,000.
+stages:
+  - name: GET /rpc/get_network_hp_distribution
+    request:
+      url: "{api_url}/rpc/get_network_hp_distribution"
+      method: GET
+    response:
+      status_code: 200
+      json:
+        - bucket: "10-100 HP"
+          account_count: 1
+          pct_accounts: 25.00
+          total_hp: 50.00
+          pct_hp: 0.00
+        - bucket: "1K-10K HP"
+          account_count: 1
+          pct_accounts: 25.00
+          total_hp: 4950.00
+          pct_hp: 0.10
+        - bucket: "1M+ HP"
+          account_count: 2
+          pct_accounts: 50.00
+          total_hp: 5000000.00
+          pct_hp: 99.90
