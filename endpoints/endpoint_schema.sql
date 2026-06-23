@@ -1641,8 +1641,9 @@ $$;
       - Account
     summary: Account DApp footprint
     description: >-
-      Per-account custom_json activity over a time range, classified into nine DApp
-      categories. Returns a single object with KPI fields (total ops, top category,
+      Per-account custom_json activity over a time range, grouped by DApp and the
+      registry-defined category each app belongs to (custom_json_app_registry).
+      Returns a single object with KPI fields (total ops, top category,
       top DApp), the per-category breakdown (for a donut chart), and the per-DApp
       breakdown tagged with its category (for a drill-down bar chart) - so the client
       renders the whole dashboard from one response. This is an op-COUNT model: it counts
