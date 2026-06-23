@@ -790,10 +790,10 @@ DECLARE
             "required": false,
             "schema": {
               "x-sql-datatype": "TEXT",
-              "x-sql-default-value": "(NOW() - INTERVAL '30 days')::DATE",
+              "x-sql-default-value": "'2016-03-24'::DATE",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
           },
           {
             "in": "query",
@@ -2196,9 +2196,9 @@ $$;
         required: false
         schema:
           x-sql-datatype: TEXT
-          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          x-sql-default-value: "'2016-03-24'::DATE"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
       - in: query
         name: to_date
         required: false
@@ -2263,7 +2263,12 @@ DECLARE
     _from DATE;
     _to DATE;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    -- No date filter ⇒ full history. Omitting from_date previously defaulted to the
+    -- last 30 days, so the client's "No Filter" silently returned only a month; default
+    -- to the chain genesis day (2016-03-24, block 1) instead so an unfiltered request
+    -- returns every available period. The rollup holds no rows before the first data, so
+    -- a genesis floor is exact regardless of how much history the node has replayed.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
@@ -2276,40 +2281,31 @@ BEGIN
             HINT = 'Must be one of: day, week, month';
     END IF;
 
+    -- Read the per-period rollup (network_vote_period_counts, maintained by
+    -- process_content_stats) directly. Previously this SUM-ed network_vote_daily and
+    -- COUNT(DISTINCT voter_id)-scanned the whole network_voter_daily membership on every
+    -- request - fine at the 90-day daily grain but several seconds for 52-week / all-time
+    -- ranges, past the Wax 2s client timeout. unique_voters is non-additive across days,
+    -- so it is materialised per period in the rollup; a wide range is now a single indexed
+    -- range scan. Every period overlapping [_from, _to] is returned at its FULL-period
+    -- value (a from/to landing mid-period yields that period's full count), matching
+    -- get_daily_active_users and what a time-series chart expects. downvote_pct is derived
+    -- here (not stored): downvotes / (upvotes + downvotes) * 100, null when a period has no
+    -- up- or down-votes.
     RETURN QUERY
-    -- Counters and unique voters live in separate tables (unique_voters is not
-    -- additive across batches, so it is counted from the (day, voter) presence set
-    -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
-    WITH counts AS (
-        SELECT
-            DATE_TRUNC("granularity", nvd.day) AS period,
-            SUM(nvd.upvotes)    AS upvotes,
-            SUM(nvd.downvotes)  AS downvotes,
-            SUM(nvd.unvotes)    AS unvotes,
-            SUM(nvd.self_votes) AS self_votes
-        FROM haf_stats_backend.network_vote_daily nvd
-        WHERE nvd.day BETWEEN _from AND _to
-        GROUP BY 1
-    ),
-    voters AS (
-        SELECT
-            DATE_TRUNC("granularity", nvd.day) AS period,
-            COUNT(DISTINCT nvd.voter_id)        AS unique_voters
-        FROM haf_stats_backend.network_voter_daily nvd
-        WHERE nvd.day BETWEEN _from AND _to
-        GROUP BY 1
-    )
     SELECT
-        TO_CHAR(c.period, 'YYYY-MM-DD'),
-        (c.upvotes + c.downvotes + c.unvotes)::BIGINT,
-        c.upvotes::BIGINT,
-        c.downvotes::BIGINT,
-        c.unvotes::BIGINT,
-        c.self_votes::BIGINT,
-        COALESCE(v.unique_voters, 0)::BIGINT,
-        ROUND(c.downvotes * 100.0 / NULLIF(c.upvotes + c.downvotes, 0), 2)
-    FROM counts c
-    LEFT JOIN voters v ON v.period = c.period
+        TO_CHAR(pc.period, 'YYYY-MM-DD'),
+        (pc.upvotes + pc.downvotes + pc.unvotes)::BIGINT,
+        pc.upvotes::BIGINT,
+        pc.downvotes::BIGINT,
+        pc.unvotes::BIGINT,
+        pc.self_votes::BIGINT,
+        pc.unique_voters::BIGINT,
+        ROUND(pc.downvotes * 100.0 / NULLIF(pc.upvotes + pc.downvotes, 0), 2)
+    FROM haf_stats_backend.network_vote_period_counts pc
+    WHERE pc.period_type = "granularity"
+      AND pc.period >= DATE_TRUNC("granularity", _from)::DATE
+      AND pc.period <= _to
     ORDER BY 1;
 END;
 $$;

@@ -162,6 +162,123 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
 
 GRANT SELECT ON haf_stats_backend.network_voter_daily TO haf_stats_user;
 
+-- Pre-aggregated endpoint rollup for get_network_vote_stats. unique_voters is
+-- non-additive (a voter active on several days in a week/month counts once), so the
+-- endpoint cannot sum daily counts and previously COUNT(DISTINCT voter_id)-scanned the
+-- whole network_voter_daily membership on every request - fine at 90-day daily grain
+-- but several seconds for 52-week / all-time ranges (past the Wax 2s client timeout).
+-- Mirroring active_users_period_counts (process_active_users), we precompute one row per
+-- (period_type, period): the additive vote counters summed and the distinct voter count
+-- materialised. period is DATE_TRUNC(period_type, day); period_type is 'day' | 'week' |
+-- 'month'. downvote_pct is derived in the endpoint, not stored. The refresh is exact - a
+-- full re-aggregation of affected periods, no approximation. PK (period_type, period)
+-- makes the endpoint's period-range read a single index range scan.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_period_counts (
+    period_type TEXT NOT NULL,
+    period DATE NOT NULL,
+    upvotes BIGINT NOT NULL DEFAULT 0,
+    downvotes BIGINT NOT NULL DEFAULT 0,
+    unvotes BIGINT NOT NULL DEFAULT 0,
+    self_votes BIGINT NOT NULL DEFAULT 0,
+    unique_voters BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
+GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
+
+-- ---------------------------------------------------------------------------
+-- Rollup refresh (feeds get_network_vote_stats)
+--
+-- Recomputes network_vote_period_counts for every day/week/month period that includes a
+-- day >= _lo, exactly (re-aggregates network_vote_daily counters + network_voter_daily
+-- voter set). The ON CONFLICT upsert is idempotent, so callers pass a recent _lo for the
+-- cheap incremental refresh (current period + slack) and the genesis day for a one-time
+-- full rebuild on an already-synced node. Daily unique_voters needs no DISTINCT (the
+-- (day, voter) PK already gives one row per voter per day, so COUNT(*)); week/month need
+-- COUNT(DISTINCT voter_id). Counters come from the additive table, voters from the
+-- membership table, FULL JOIN per period so a period present in only one table is still
+-- written.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_network_vote_periods(_lo DATE)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- day: distinct-per-day unique_voters == row count of the (day, voter) PK
+    INSERT INTO haf_stats_backend.network_vote_period_counts
+        (period_type, period, upvotes, downvotes, unvotes, self_votes, unique_voters)
+    SELECT 'day', COALESCE(c.period, v.period),
+           COALESCE(c.upvotes, 0), COALESCE(c.downvotes, 0), COALESCE(c.unvotes, 0),
+           COALESCE(c.self_votes, 0), COALESCE(v.voters, 0)
+    FROM (
+        SELECT day AS period, upvotes, downvotes, unvotes, self_votes
+        FROM haf_stats_backend.network_vote_daily
+        WHERE day >= _lo
+    ) c
+    FULL JOIN (
+        SELECT day AS period, COUNT(*) AS voters
+        FROM haf_stats_backend.network_voter_daily
+        WHERE day >= _lo
+        GROUP BY day
+    ) v ON v.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        upvotes = EXCLUDED.upvotes, downvotes = EXCLUDED.downvotes,
+        unvotes = EXCLUDED.unvotes, self_votes = EXCLUDED.self_votes,
+        unique_voters = EXCLUDED.unique_voters;
+
+    -- week
+    INSERT INTO haf_stats_backend.network_vote_period_counts
+        (period_type, period, upvotes, downvotes, unvotes, self_votes, unique_voters)
+    SELECT 'week', COALESCE(c.period, v.period),
+           COALESCE(c.upvotes, 0), COALESCE(c.downvotes, 0), COALESCE(c.unvotes, 0),
+           COALESCE(c.self_votes, 0), COALESCE(v.voters, 0)
+    FROM (
+        SELECT DATE_TRUNC('week', day)::DATE AS period,
+               SUM(upvotes) AS upvotes, SUM(downvotes) AS downvotes,
+               SUM(unvotes) AS unvotes, SUM(self_votes) AS self_votes
+        FROM haf_stats_backend.network_vote_daily
+        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        GROUP BY 1
+    ) c
+    FULL JOIN (
+        SELECT DATE_TRUNC('week', day)::DATE AS period, COUNT(DISTINCT voter_id) AS voters
+        FROM haf_stats_backend.network_voter_daily
+        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        GROUP BY 1
+    ) v ON v.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        upvotes = EXCLUDED.upvotes, downvotes = EXCLUDED.downvotes,
+        unvotes = EXCLUDED.unvotes, self_votes = EXCLUDED.self_votes,
+        unique_voters = EXCLUDED.unique_voters;
+
+    -- month
+    INSERT INTO haf_stats_backend.network_vote_period_counts
+        (period_type, period, upvotes, downvotes, unvotes, self_votes, unique_voters)
+    SELECT 'month', COALESCE(c.period, v.period),
+           COALESCE(c.upvotes, 0), COALESCE(c.downvotes, 0), COALESCE(c.unvotes, 0),
+           COALESCE(c.self_votes, 0), COALESCE(v.voters, 0)
+    FROM (
+        SELECT DATE_TRUNC('month', day)::DATE AS period,
+               SUM(upvotes) AS upvotes, SUM(downvotes) AS downvotes,
+               SUM(unvotes) AS unvotes, SUM(self_votes) AS self_votes
+        FROM haf_stats_backend.network_vote_daily
+        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        GROUP BY 1
+    ) c
+    FULL JOIN (
+        SELECT DATE_TRUNC('month', day)::DATE AS period, COUNT(DISTINCT voter_id) AS voters
+        FROM haf_stats_backend.network_voter_daily
+        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        GROUP BY 1
+    ) v ON v.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        upvotes = EXCLUDED.upvotes, downvotes = EXCLUDED.downvotes,
+        unvotes = EXCLUDED.unvotes, self_votes = EXCLUDED.self_votes,
+        unique_voters = EXCLUDED.unique_voters;
+END;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- Processor
 --
@@ -224,6 +341,8 @@ RETURNS VOID
 LANGUAGE plpgsql
 SET jit = OFF
 AS $$
+DECLARE
+    _block_day DATE;
 BEGIN
 
 -- Comment ops: ONE scan, five outputs.
@@ -547,6 +666,18 @@ SELECT DISTINCT vo.day, a.id
 FROM vote_ops vo
 JOIN hafd.accounts a ON a.name = vo.voter
 ON CONFLICT (day, voter_id) DO NOTHING;
+
+-- Refresh the get_network_vote_stats rollup on a ~1200-block (~1h) boundary, covering
+-- every period this batch touched (lower bound = the batch's FIRST block's month minus
+-- one month of slack, so a large catch-up batch spanning several months stays gap-free).
+-- See process_active_users for the full rationale; an already-synced node needs a
+-- one-time full refresh (SELECT haf_stats_app.refresh_network_vote_periods(<genesis day>)).
+IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
+    SELECT created_at::DATE INTO _block_day FROM hafd.blocks WHERE num = _first_block;
+    PERFORM haf_stats_app.refresh_network_vote_periods(
+        (DATE_TRUNC('month', _block_day) - INTERVAL '1 month')::DATE
+    );
+END IF;
 
 END;
 $$;

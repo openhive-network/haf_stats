@@ -310,6 +310,28 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_voter_daily (
     PRIMARY KEY (day, voter_id)
 );
 
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_period_counts (
+    period_type   TEXT   NOT NULL,
+    period        DATE   NOT NULL,
+    upvotes       BIGINT NOT NULL DEFAULT 0,
+    downvotes     BIGINT NOT NULL DEFAULT 0,
+    unvotes       BIGINT NOT NULL DEFAULT 0,
+    self_votes    BIGINT NOT NULL DEFAULT 0,
+    unique_voters BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
+-- Fixtures for the get_network_vote_stats exact-value tavern test. The endpoint reads
+-- network_vote_period_counts directly; full-month values for Jan/Feb 2020 let a to_date
+-- mid-February still return the FULL February (full-period bucketing). downvote_pct is
+-- derived: 200 / (1000 + 200) * 100 = 16.67.
+INSERT INTO haf_stats_backend.network_vote_period_counts
+    (period_type, period, upvotes, downvotes, unvotes, self_votes, unique_voters)
+VALUES
+    ('month', '2020-01-01', 1000, 200, 50, 30, 400),
+    ('month', '2020-02-01', 1500, 300, 60, 45, 550)
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.post_engagement (
     author_id   INT  NOT NULL,
     permlink    TEXT NOT NULL,
