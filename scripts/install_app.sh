@@ -41,6 +41,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 
 # 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"

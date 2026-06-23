@@ -1631,6 +1631,190 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Feature: account DApp footprint (per-account custom_json activity by category)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/account/{account}/dapp-footprint:
+  get:
+    tags:
+      - Account
+    summary: Account DApp footprint
+    description: >-
+      Per-account custom_json activity over a time range, classified into nine DApp
+      categories. Returns a single object with KPI fields (total ops, top category,
+      top DApp), the per-category breakdown (for a donut chart), and the per-DApp
+      breakdown tagged with its category (for a drill-down bar chart) - so the client
+      renders the whole dashboard from one response. This is an op-COUNT model: it counts
+      custom_json operations signed by the account, not RC cost (real per-op RC cost is
+      unavailable on this node). Defaults to the last 30 days.
+    operationId: haf_stats_endpoints.get_account_dapp_footprint
+    parameters:
+      - in: path
+        name: account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NOW()::DATE"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+    responses:
+      '200':
+        description: DApp footprint aggregate for the account
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: jsonb
+              type: object
+              properties:
+                account:
+                  type: string
+                from_date:
+                  type: string
+                to_date:
+                  type: string
+                total_ops:
+                  type: integer
+                top_category:
+                  type: string
+                  nullable: true
+                top_dapp:
+                  type: string
+                  nullable: true
+                categories:
+                  type: array
+                  description: Per-category totals (donut chart)
+                  items:
+                    type: object
+                    properties:
+                      category:
+                        type: string
+                      op_count:
+                        type: integer
+                      pct:
+                        type: number
+                dapps:
+                  type: array
+                  description: Per-app totals (registered app name), each tagged with its category (drill-down bars)
+                  items:
+                    type: object
+                    properties:
+                      category:
+                        type: string
+                      app_name:
+                        type: string
+                      op_count:
+                        type: integer
+                      pct:
+                        type: number
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_dapp_footprint;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_dapp_footprint(
+    "account" TEXT,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL
+)
+RETURNS jsonb
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _account_id INT;
+    _result jsonb;
+BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = "account";
+
+    -- Unknown account (or no activity) returns a well-formed empty footprint, not an
+    -- error - the client always gets the same object shape.
+    IF _account_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'account', "account", 'from_date', _from, 'to_date', _to,
+            'total_ops', 0, 'top_category', NULL, 'top_dapp', NULL,
+            'categories', '[]'::jsonb, 'dapps', '[]'::jsonb);
+    END IF;
+
+    -- Per-json_id totals, each resolved to its registered app + category via a
+    -- longest-prefix starts_with match against custom_json_app_registry (an unmatched id
+    -- falls to 'Uncategorized' with the raw id as the app name). Rolled up to apps (the
+    -- drill-down bars) and categories (the donut); all breakdowns + KPIs in one object.
+    WITH per_json AS (
+        SELECT acj.json_id, SUM(acj.op_count)::BIGINT AS op_count
+        FROM haf_stats_backend.account_custom_json_daily acj
+        WHERE acj.account_id = _account_id
+          AND acj.day BETWEEN _from AND _to
+        GROUP BY acj.json_id
+    ),
+    resolved AS (
+        SELECT
+            COALESCE(r.category, 'Uncategorized') AS category,
+            COALESCE(r.app_name, pj.json_id)      AS app_name,
+            pj.op_count
+        FROM per_json pj
+        LEFT JOIN LATERAL (
+            SELECT reg.category, reg.app_name
+            FROM haf_stats_backend.custom_json_app_registry reg
+            WHERE starts_with(pj.json_id, reg.app_id_pattern)
+            ORDER BY LENGTH(reg.app_id_pattern) DESC
+            LIMIT 1
+        ) r ON TRUE
+    ),
+    per_app AS (
+        SELECT category, app_name, SUM(op_count) AS op_count
+        FROM resolved GROUP BY category, app_name
+    ),
+    per_cat AS (
+        SELECT category, SUM(op_count) AS op_count FROM resolved GROUP BY category
+    ),
+    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total FROM resolved)
+    SELECT jsonb_build_object(
+        'account', "account",
+        'from_date', _from,
+        'to_date', _to,
+        'total_ops', (SELECT total FROM tot),
+        'top_category', (SELECT category FROM per_cat ORDER BY op_count DESC, category LIMIT 1),
+        'top_dapp', (SELECT app_name FROM per_app ORDER BY op_count DESC, app_name LIMIT 1),
+        'categories', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                       'category', category,
+                       'op_count', op_count,
+                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2))
+                       ORDER BY op_count DESC, category)
+            FROM per_cat), '[]'::jsonb),
+        'dapps', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                       'category', category,
+                       'app_name', app_name,
+                       'op_count', op_count,
+                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2))
+                       ORDER BY op_count DESC, app_name)
+            FROM per_app), '[]'::jsonb)
+    ) INTO _result;
+
+    RETURN _result;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Feature: network-wide RC utilization by op type / DApp
 -- ---------------------------------------------------------------------------
 
