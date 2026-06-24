@@ -81,6 +81,13 @@ $$;
 INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO NOTHING;
 
+-- Op type names for the get_network_rc_utilization synthetic test (seeded here, before
+-- SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned by that role).
+INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
+(0, 'hive::protocol::vote_operation', FALSE),
+(18, 'hive::protocol::custom_json_operation', FALSE)
+ON CONFLICT DO NOTHING;
+
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
 -- ---------------------------------------------------------------------------
@@ -444,14 +451,10 @@ VALUES
     (2001, '2020-07-01', 'sm_market', 999, 9990)
 ON CONFLICT DO NOTHING;
 
--- Network RC utilization stub: network_op_daily (mirrors db/process_network_ops.sql) + op
--- type names + per-op rates. The endpoint prices each (op_type, day) at the rate effective
--- on/before that day and rolls up per period (issue #33).
-INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
-(0, 'hive::protocol::vote_operation', FALSE),
-(18, 'hive::protocol::custom_json_operation', FALSE)
-ON CONFLICT DO NOTHING;
-
+-- Network RC utilization stub: network_op_daily (mirrors db/process_network_ops.sql) + per-op
+-- rates. Op type names are seeded into the hafd.operation_types stub earlier (before SET ROLE,
+-- as that stub is not owned by haf_stats_owner). The endpoint prices each (op_type, day) at the
+-- rate effective on/before that day and rolls up per period (issue #33).
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_op_daily (
     day DATE NOT NULL,
     op_type_id SMALLINT NOT NULL,
