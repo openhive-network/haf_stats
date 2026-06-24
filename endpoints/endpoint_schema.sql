@@ -1766,38 +1766,47 @@ BEGIN
             'categories', '[]'::jsonb, 'dapps', '[]'::jsonb);
     END IF;
 
-    -- Per-day estimated RC (issue #33): each (json_id, day) is priced at the custom_json
+    -- Per-day estimated RC (issue #33): each activity day is priced at the custom_json
     -- (op_type 18) rate effective on/before that day, so historical activity keeps its era's
     -- rate as the rc_op_stats_daily series grows. Activity predating every sampled rate falls
     -- back to the earliest sample, and an empty rate table to the seeded constants, so the
-    -- estimate is never zeroed. RC = op_count * base_rc + op_bytes * byte_rc.
-    WITH per_json_day AS (
+    -- estimate is never zeroed. The rate is resolved ONCE per distinct activity day (not per
+    -- (json_id, day) row) so cost stays bounded as the rate history grows.
+    WITH day_rate AS (
         SELECT
-            acj.json_id,
-            acj.op_count,
-            (acj.op_count * COALESCE(rate.base_rc, 23428456)
-                + acj.op_bytes * COALESCE(rate.byte_rc, 475000))::BIGINT AS rc_cost
-        FROM haf_stats_backend.account_custom_json_daily acj
+            d.day,
+            COALESCE(rate.base_rc, 23428456) AS base_rc,
+            COALESCE(rate.byte_rc, 475000)   AS byte_rc
+        FROM (
+            SELECT DISTINCT acj.day
+            FROM haf_stats_backend.account_custom_json_daily acj
+            WHERE acj.account_id = _account_id
+              AND acj.day BETWEEN _from AND _to
+        ) d
         LEFT JOIN LATERAL (
             SELECT r.base_rc, r.byte_rc
             FROM haf_stats_backend.rc_op_stats_daily r
             WHERE r.op_type_id = 18
-            ORDER BY (r.day <= acj.day) DESC,
-                     CASE WHEN r.day <= acj.day THEN r.day END DESC,
+            ORDER BY (r.day <= d.day) DESC,
+                     CASE WHEN r.day <= d.day THEN r.day END DESC,
                      r.day ASC
             LIMIT 1
         ) rate ON TRUE
+    ),
+    -- Price each (json_id, day) row at its day's rate and roll up to json_id, then resolve
+    -- each to its registered app + category via a longest-prefix starts_with match against
+    -- custom_json_app_registry (an unmatched id falls to 'Uncategorized' with the raw id as
+    -- the app name). Rolled up to apps (drill-down bars) and categories (donut); all in one object.
+    per_json AS (
+        SELECT
+            acj.json_id,
+            SUM(acj.op_count)::BIGINT AS op_count,
+            SUM(acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)::BIGINT AS rc_consumed
+        FROM haf_stats_backend.account_custom_json_daily acj
+        JOIN day_rate dr ON dr.day = acj.day
         WHERE acj.account_id = _account_id
           AND acj.day BETWEEN _from AND _to
-    ),
-    -- Roll the daily-priced rows up to json_id, then resolve each to its registered app +
-    -- category via a longest-prefix starts_with match against custom_json_app_registry (an
-    -- unmatched id falls to 'Uncategorized' with the raw id as the app name). Rolled up to
-    -- apps (drill-down bars) and categories (donut); all breakdowns + KPIs in one object.
-    per_json AS (
-        SELECT json_id, SUM(op_count)::BIGINT AS op_count, SUM(rc_cost)::BIGINT AS rc_consumed
-        FROM per_json_day
-        GROUP BY json_id
+        GROUP BY acj.json_id
     ),
     resolved AS (
         SELECT

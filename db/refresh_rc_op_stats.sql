@@ -31,14 +31,17 @@ BEGIN
     END;
 
     EXECUTE $ddl$
-        CREATE OR REPLACE FUNCTION haf_stats_app.refresh_rc_op_stats(
-            _rc_api_url TEXT DEFAULT 'http://127.0.0.1:8091'
-        )
+        CREATE OR REPLACE FUNCTION haf_stats_app.refresh_rc_op_stats()
         RETURNS INTEGER
         LANGUAGE plpython3u
         AS $py$
 import json
 import urllib.request
+
+# Hardcoded local hived rc_api endpoint - deliberately NOT a caller-supplied parameter, so
+# an owner-role caller cannot point the DB-server fetch at an arbitrary URL (SSRF). Edit here
+# if a node exposes rc_api elsewhere.
+RC_API_URL = "http://127.0.0.1:8091"
 
 # One non-virtual op type per row; rc_api operation names = operation_types.name minus the
 # 'hive::protocol::' prefix (e.g. custom_json_operation).
@@ -60,7 +63,7 @@ for r in rows:
     body = json.dumps({"jsonrpc": "2.0", "method": "rc_api.get_rc_operation_stats",
                        "params": {"operation": r["opname"]}, "id": 1}).encode()
     try:
-        req = urllib.request.Request(_rc_api_url, data=body,
+        req = urllib.request.Request(RC_API_URL, data=body,
                                      headers={"Content-Type": "application/json"})
         res = json.loads(urllib.request.urlopen(req, timeout=20).read()).get("result") or {}
     except Exception as ex:
@@ -82,7 +85,7 @@ return written
         $py$;
     $ddl$;
 
-    EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats(TEXT) TO haf_stats_owner';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats() TO haf_stats_owner';
     RAISE NOTICE 'rc_op_stats auto-refresh sampler installed';
 END
 $sampler$;
