@@ -1996,9 +1996,10 @@ BEGIN
         WHERE nod.day BETWEEN _from AND _to
     ),
     per_label AS (
-        SELECT period, label, SUM(rc)::BIGINT AS rc_label_total
+        -- Qualify period/label: bare "period" collides with the RETURNS TABLE OUT variable.
+        SELECT priced.period, priced.label, SUM(priced.rc)::BIGINT AS rc_label_total
         FROM priced
-        GROUP BY period, label
+        GROUP BY priced.period, priced.label
     )
     SELECT
         TO_CHAR(per_label.period, 'YYYY-MM-DD')                     AS period,
