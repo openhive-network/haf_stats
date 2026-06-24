@@ -1690,6 +1690,9 @@ $$;
                   type: string
                 total_ops:
                   type: integer
+                total_rc_estimated:
+                  type: integer
+                  description: Estimated total RC consumed (haf_stats_app.estimate_rc_cost; an estimate, not real RC spend)
                 top_category:
                   type: string
                   nullable: true
@@ -1708,6 +1711,10 @@ $$;
                         type: integer
                       pct:
                         type: number
+                      rc_estimated:
+                        type: integer
+                      rc_pct:
+                        type: number
                 dapps:
                   type: array
                   description: Per-app totals (registered app name), each tagged with its category (drill-down bars)
@@ -1721,6 +1728,10 @@ $$;
                       op_count:
                         type: integer
                       pct:
+                        type: number
+                      rc_estimated:
+                        type: integer
+                      rc_pct:
                         type: number
  */
 -- openapi-generated-code-begin
@@ -1750,7 +1761,7 @@ BEGIN
     IF _account_id IS NULL THEN
         RETURN jsonb_build_object(
             'account', "account", 'from_date', _from, 'to_date', _to,
-            'total_ops', 0, 'top_category', NULL, 'top_dapp', NULL,
+            'total_ops', 0, 'total_rc_estimated', 0, 'top_category', NULL, 'top_dapp', NULL,
             'categories', '[]'::jsonb, 'dapps', '[]'::jsonb);
     END IF;
 
@@ -1759,7 +1770,10 @@ BEGIN
     -- falls to 'Uncategorized' with the raw id as the app name). Rolled up to apps (the
     -- drill-down bars) and categories (the donut); all breakdowns + KPIs in one object.
     WITH per_json AS (
-        SELECT acj.json_id, SUM(acj.op_count)::BIGINT AS op_count
+        SELECT
+            acj.json_id,
+            SUM(acj.op_count)::BIGINT     AS op_count,
+            SUM(acj.rc_estimated)::BIGINT AS rc_consumed
         FROM haf_stats_backend.account_custom_json_daily acj
         WHERE acj.account_id = _account_id
           AND acj.day BETWEEN _from AND _to
@@ -1769,7 +1783,8 @@ BEGIN
         SELECT
             COALESCE(r.category, 'Uncategorized') AS category,
             COALESCE(r.app_name, pj.json_id)      AS app_name,
-            pj.op_count
+            pj.op_count,
+            pj.rc_consumed
         FROM per_json pj
         LEFT JOIN LATERAL (
             SELECT reg.category, reg.app_name
@@ -1780,25 +1795,30 @@ BEGIN
         ) r ON TRUE
     ),
     per_app AS (
-        SELECT category, app_name, SUM(op_count) AS op_count
+        SELECT category, app_name, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
         FROM resolved GROUP BY category, app_name
     ),
     per_cat AS (
-        SELECT category, SUM(op_count) AS op_count FROM resolved GROUP BY category
+        SELECT category, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
+        FROM resolved GROUP BY category
     ),
-    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total FROM resolved)
+    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total, COALESCE(SUM(rc_consumed), 0) AS total_rc FROM resolved)
     SELECT jsonb_build_object(
         'account', "account",
         'from_date', _from,
         'to_date', _to,
         'total_ops', (SELECT total FROM tot),
+        -- rc_consumed is an ESTIMATE (haf_stats_app.estimate_rc_cost), not real RC spend.
+        'total_rc_estimated', (SELECT total_rc FROM tot),
         'top_category', (SELECT category FROM per_cat ORDER BY op_count DESC, category LIMIT 1),
         'top_dapp', (SELECT app_name FROM per_app ORDER BY op_count DESC, app_name LIMIT 1),
         'categories', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
                        'category', category,
                        'op_count', op_count,
-                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2))
+                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2),
+                       'rc_estimated', rc_consumed,
+                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2))
                        ORDER BY op_count DESC, category)
             FROM per_cat), '[]'::jsonb),
         'dapps', COALESCE((
@@ -1806,7 +1826,9 @@ BEGIN
                        'category', category,
                        'app_name', app_name,
                        'op_count', op_count,
-                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2))
+                       'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2),
+                       'rc_estimated', rc_consumed,
+                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2))
                        ORDER BY op_count DESC, app_name)
             FROM per_app), '[]'::jsonb)
     ) INTO _result;
