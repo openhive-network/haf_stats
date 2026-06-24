@@ -386,6 +386,7 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     day DATE NOT NULL,
     json_id TEXT NOT NULL,
     op_count INT NOT NULL DEFAULT 0,
+    rc_estimated BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day, json_id)
 );
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
@@ -395,15 +396,17 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- -> Splinterlands/Gaming (two ids rolling up to one app), ssc-mainnet-hive ->
 -- Hive Engine (SSC)/DeFi, follow -> Hivemind Follow/Social Graph, mystery_app ->
 -- Uncategorized. The '2020-07-01' row is outside the test range, proving the day filter
--- excludes it. Totals: Gaming 30, DeFi 20, Social Graph 10, Uncategorized 5 = 65.
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count)
+-- excludes it. Op totals: Gaming 30, DeFi 20, Social Graph 10, Uncategorized 5 = 65.
+-- rc_estimated is set so RC shares differ from op shares (mystery_app is op-light but
+-- RC-heavy): Gaming 30000, DeFi 20000, Social Graph 10000, Uncategorized 40000 = 100000.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, rc_estimated)
 VALUES
-    (2001, '2020-06-01', 'sm_claim_daily', 25),
-    (2001, '2020-06-05', 'sm_battle', 5),
-    (2001, '2020-06-01', 'ssc-mainnet-hive', 20),
-    (2001, '2020-06-10', 'follow', 10),
-    (2001, '2020-06-10', 'mystery_app', 5),
-    (2001, '2020-07-01', 'sm_market', 999)
+    (2001, '2020-06-01', 'sm_claim_daily', 25, 25000),
+    (2001, '2020-06-05', 'sm_battle', 5, 5000),
+    (2001, '2020-06-01', 'ssc-mainnet-hive', 20, 20000),
+    (2001, '2020-06-10', 'follow', 10, 10000),
+    (2001, '2020-06-10', 'mystery_app', 5, 40000),
+    (2001, '2020-07-01', 'sm_market', 999, 999000)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;

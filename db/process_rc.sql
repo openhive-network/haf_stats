@@ -130,4 +130,36 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Estimated RC cost model
+--
+-- The real per-op RC consumption (rc_account_statuses_operation) lives in the
+-- hive::plugins::rc namespace, which HAF's sql_serializer does not capture, so it is
+-- unavailable on a standard HAF node (see docs/VERIFICATION.md). This is a deliberate
+-- ESTIMATE used where the real figure is absent: a fixed per-op-type base plus a size
+-- term (bigger payloads cost more RC). Rates are first-order constants - good enough for
+-- the relative shape (which ops/apps cost more) but not calibrated to live rc_api rates;
+-- a follow-up can swap the constants for an rc_api-sourced daily-rate table without
+-- touching callers. IMMUTABLE so it can be used in the per-batch processors.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.estimate_rc_cost(_op_type_id SMALLINT, _body JSONB)
+RETURNS BIGINT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT (
+        CASE _op_type_id
+            WHEN 0 THEN 20000000     -- vote
+            WHEN 1 THEN 600000000    -- comment (creates/updates state)
+            WHEN 2 THEN 150000000    -- transfer
+            WHEN 18 THEN 80000000    -- custom_json
+            ELSE 120000000           -- everything else
+        END
+        + 1500000::BIGINT * octet_length(COALESCE(_body::text, ''))
+    )::BIGINT
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.estimate_rc_cost(SMALLINT, JSONB) TO haf_stats_user;
+
 RESET ROLE;
