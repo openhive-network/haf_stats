@@ -8,13 +8,14 @@ includes:
   - !include ../common.yaml
 
 # Reads account_custom_json_daily (op_count + op_bytes) and applies the rc_op_stats_daily
-# rate at read time (rc = op_count*1000 + op_bytes*100), resolving apps/categories from the
-# seeded custom_json_app_registry. dapptester in June 2020: sm_claim_daily 25 + sm_battle
-# 5 -> Splinterlands/Gaming, ssc-mainnet-hive 20 -> Hive Engine (SSC)/DeFi, follow 10 ->
-# Hivemind Follow/Social Graph, mystery_app 5 -> Uncategorized = 65 ops. A 999-op July row
-# is outside the range and excluded. op_bytes is set so estimated-RC shares differ from op
-# shares (mystery_app: 7.69% of ops but 36.96% of estimated RC) - proving the RC lens is
-# read-time and size-driven. Categories/dapps are ordered by op_count desc.
+# rate effective on/before each activity day (per-day read path, #33), resolving
+# apps/categories from the seeded custom_json_app_registry. dapptester in June 2020:
+# sm_claim_daily 25 + sm_battle 5 -> Splinterlands/Gaming, ssc-mainnet-hive 20 -> Hive Engine
+# (SSC)/DeFi, follow 10 -> Hivemind Follow/Social Graph, mystery_app 5 -> Uncategorized = 65
+# ops. A 999-op July row is outside the range and excluded. Two dated rates (cheap from
+# 2020-06-01, pricey from 2020-06-08) mean 06-01/06-05 ops cost less than 06-10 ops, so RC
+# shares diverge from op shares by size AND era (Uncategorized: 7.69% of ops but 75.22% of
+# estimated RC). Categories/dapps are ordered by op_count desc.
 stages:
   - name: GET /rpc/get_account_dapp_footprint for dapptester, June 2020
     request:
@@ -31,52 +32,52 @@ stages:
         from_date: "2020-06-01"
         to_date: "2020-06-30"
         total_ops: 65
-        total_rc_estimated: 230000
+        total_rc_estimated: 113000
         top_category: "Gaming"
         top_dapp: "Splinterlands"
         categories:
           - category: "Gaming"
             op_count: 30
             pct: 46.15
-            rc_estimated: 60000
-            rc_pct: 26.09
+            rc_estimated: 6000
+            rc_pct: 5.31
           - category: "DeFi"
             op_count: 20
             pct: 30.77
-            rc_estimated: 70000
-            rc_pct: 30.43
+            rc_estimated: 7000
+            rc_pct: 6.19
           - category: "Social Graph"
             op_count: 10
             pct: 15.38
             rc_estimated: 15000
-            rc_pct: 6.52
+            rc_pct: 13.27
           - category: "Uncategorized"
             op_count: 5
             pct: 7.69
             rc_estimated: 85000
-            rc_pct: 36.96
+            rc_pct: 75.22
         dapps:
           - category: "Gaming"
             app_name: "Splinterlands"
             op_count: 30
             pct: 46.15
-            rc_estimated: 60000
-            rc_pct: 26.09
+            rc_estimated: 6000
+            rc_pct: 5.31
           - category: "DeFi"
             app_name: "Hive Engine (SSC)"
             op_count: 20
             pct: 30.77
-            rc_estimated: 70000
-            rc_pct: 30.43
+            rc_estimated: 7000
+            rc_pct: 6.19
           - category: "Social Graph"
             app_name: "Hivemind Follow"
             op_count: 10
             pct: 15.38
             rc_estimated: 15000
-            rc_pct: 6.52
+            rc_pct: 13.27
           - category: "Uncategorized"
             app_name: "mystery_app"
             op_count: 5
             pct: 7.69
             rc_estimated: 85000
-            rc_pct: 36.96
+            rc_pct: 75.22
