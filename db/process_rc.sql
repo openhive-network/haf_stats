@@ -162,4 +162,49 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.estimate_rc_cost(SMALLINT, JSONB) TO haf_stats_user;
 
+-- ---------------------------------------------------------------------------
+-- Calibrated RC rate table (read-time model)
+--
+-- The estimated-RC endpoints store the *inputs* of the RC estimate (op_count and
+-- summed payload bytes), not a pre-weighted RC figure, and multiply by the rates in
+-- this table at read time. Recalibration is therefore a rate refresh with no historical
+-- backfill, and every estimated-RC endpoint recalibrates together (see issue #32).
+--
+-- Per (day, op_type) the model is:  rc ~= op_count * base_rc + op_bytes * byte_rc
+--   base_rc  size-independent RC per op = avg_cost_rc - history_rc (rc_api)
+--   byte_rc  RC per payload byte        = history_rc / history_bytes (rc_api)
+-- The stored op_bytes proxy is octet_length(body_value::text), which on real custom_json
+-- traffic averages the same as rc_api's history_bytes (~304), so byte_rc applies directly.
+-- Rates are sampled from hived rc_api.get_rc_operation_stats; seed_data.sql seeds the
+-- custom_json row from a live sample and an rc_api-sourced daily refresh keeps it current.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_op_stats_daily (
+    day DATE NOT NULL,
+    op_type_id SMALLINT NOT NULL,
+    base_rc BIGINT NOT NULL,        -- size-independent RC per op (avg_cost_rc - history_rc)
+    byte_rc NUMERIC NOT NULL,       -- RC per payload byte (history_rc / history_bytes)
+    avg_cost_rc BIGINT,             -- rc_api reference: avg total RC cost of one op
+    avg_bytes INTEGER,              -- rc_api reference: history_bytes the byte_rc was derived from
+    sample_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, op_type_id)
+);
+
+GRANT SELECT ON haf_stats_backend.rc_op_stats_daily TO haf_stats_user;
+
+-- Most recent sampled rate per op type. Endpoints apply the latest rate to all history
+-- (RC unit prices drift slowly; a recalibration just inserts a newer day's row).
+CREATE OR REPLACE VIEW haf_stats_backend.rc_op_rate_latest AS
+SELECT DISTINCT ON (op_type_id)
+    op_type_id,
+    base_rc,
+    byte_rc,
+    avg_cost_rc,
+    avg_bytes,
+    day
+FROM haf_stats_backend.rc_op_stats_daily
+ORDER BY op_type_id ASC, day DESC;
+
+GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
+
 RESET ROLE;
