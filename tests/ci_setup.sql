@@ -378,18 +378,45 @@ VALUES
     (1, 'third-post',  '2016-03-17', 3, 1)
 ON CONFLICT DO NOTHING;
 
--- DApp footprint stub: account_custom_json_daily (mirrors db/process_custom_json.sql,
--- which the stub does not load). The endpoint resolves app names + categories from the
--- existing custom_json_app_registry, created above and seeded by seed_data.sql.
+-- DApp footprint stub: account_custom_json_daily + rc_op_stats_daily (mirror
+-- db/process_custom_json.sql + db/process_rc.sql, which the stub does not load). The
+-- endpoint stores RC inputs (op_count + op_bytes) and applies the rc_op_stats_daily rate at
+-- read time (issue #32); app names + categories resolve from custom_json_app_registry.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
     json_id TEXT NOT NULL,
     op_count INT NOT NULL DEFAULT 0,
-    rc_estimated BIGINT NOT NULL DEFAULT 0,
+    op_bytes BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day, json_id)
 );
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_op_stats_daily (
+    day DATE NOT NULL,
+    op_type_id SMALLINT NOT NULL,
+    base_rc BIGINT NOT NULL,
+    byte_rc NUMERIC NOT NULL,
+    avg_cost_rc BIGINT,
+    avg_bytes INTEGER,
+    sample_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, op_type_id)
+);
+GRANT SELECT ON haf_stats_backend.rc_op_stats_daily TO haf_stats_user;
+
+CREATE OR REPLACE VIEW haf_stats_backend.rc_op_rate_latest AS
+SELECT DISTINCT ON (op_type_id)
+    op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, day
+FROM haf_stats_backend.rc_op_stats_daily
+ORDER BY op_type_id, day DESC;
+GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
+
+-- Round test rate (custom_json, op_type 18): rc = op_count*1000 + op_bytes*100. Distinct
+-- from the production calibration so the expected arithmetic is self-contained.
+INSERT INTO haf_stats_backend.rc_op_stats_daily
+(day, op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, sample_count)
+VALUES (CURRENT_DATE, 18, 1000, 100, 167828015, 304, 1)
+ON CONFLICT DO NOTHING;
 
 -- Fixtures for the get_account_dapp_footprint exact-value tavern test (account
 -- dapptester, id 2001), all resolved via the seeded registry: sm_claim_daily + sm_battle
@@ -397,16 +424,18 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- Hive Engine (SSC)/DeFi, follow -> Hivemind Follow/Social Graph, mystery_app ->
 -- Uncategorized. The '2020-07-01' row is outside the test range, proving the day filter
 -- excludes it. Op totals: Gaming 30, DeFi 20, Social Graph 10, Uncategorized 5 = 65.
--- rc_estimated is set so RC shares differ from op shares (mystery_app is op-light but
--- RC-heavy): Gaming 30000, DeFi 20000, Social Graph 10000, Uncategorized 40000 = 100000.
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, rc_estimated)
+-- op_bytes is set so estimated-RC shares differ from op shares (mystery_app is op-light but
+-- byte-heavy): with rc = op_count*1000 + op_bytes*100, category RC is Gaming 60000, DeFi
+-- 70000, Social Graph 15000, Uncategorized 85000 = 230000 - so Uncategorized is 7.69% of
+-- ops but 36.96% of estimated RC, proving the RC lens is read-time and size-driven.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
 VALUES
-    (2001, '2020-06-01', 'sm_claim_daily', 25, 25000),
-    (2001, '2020-06-05', 'sm_battle', 5, 5000),
-    (2001, '2020-06-01', 'ssc-mainnet-hive', 20, 20000),
-    (2001, '2020-06-10', 'follow', 10, 10000),
-    (2001, '2020-06-10', 'mystery_app', 5, 40000),
-    (2001, '2020-07-01', 'sm_market', 999, 999000)
+    (2001, '2020-06-01', 'sm_claim_daily', 25, 200),
+    (2001, '2020-06-05', 'sm_battle', 5, 100),
+    (2001, '2020-06-01', 'ssc-mainnet-hive', 20, 500),
+    (2001, '2020-06-10', 'follow', 10, 50),
+    (2001, '2020-06-10', 'mystery_app', 5, 800),
+    (2001, '2020-07-01', 'sm_market', 999, 9990)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;

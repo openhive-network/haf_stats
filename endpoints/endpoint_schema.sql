@@ -1646,9 +1646,10 @@ $$;
       Returns a single object with KPI fields (total ops, top category,
       top DApp), the per-category breakdown (for a donut chart), and the per-DApp
       breakdown tagged with its category (for a drill-down bar chart) - so the client
-      renders the whole dashboard from one response. This is an op-COUNT model: it counts
-      custom_json operations signed by the account, not RC cost (real per-op RC cost is
-      unavailable on this node). Defaults to the last 30 days.
+      renders the whole dashboard from one response. The primary metric is op COUNT
+      (custom_json operations signed by the account); RC figures are a calibrated ESTIMATE
+      (rc_op_stats_daily rates sampled from rc_api), as real per-op RC cost is unavailable on
+      this node. Defaults to the last 30 days.
     operationId: haf_stats_endpoints.get_account_dapp_footprint
     parameters:
       - in: path
@@ -1692,7 +1693,7 @@ $$;
                   type: integer
                 total_rc_estimated:
                   type: integer
-                  description: Estimated total RC consumed (haf_stats_app.estimate_rc_cost; an estimate, not real RC spend)
+                  description: Estimated total RC consumed (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily; a calibrated estimate, not real RC spend)
                 top_category:
                   type: string
                   nullable: true
@@ -1749,10 +1750,20 @@ DECLARE
     _from DATE;
     _to DATE;
     _account_id INT;
+    _base_rc BIGINT;
+    _byte_rc NUMERIC;
     _result jsonb;
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- Calibrated read-time RC rate for custom_json (op_type 18): estimated RC is
+    -- op_count * base_rc + op_bytes * byte_rc (issue #32). Falls back to the seeded sample
+    -- rate if rc_op_stats_daily is empty, so the estimate is never zeroed out.
+    SELECT base_rc, byte_rc INTO _base_rc, _byte_rc
+    FROM haf_stats_backend.rc_op_rate_latest WHERE op_type_id = 18;
+    _base_rc := COALESCE(_base_rc, 23428456);
+    _byte_rc := COALESCE(_byte_rc, 475000);
 
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = "account";
 
@@ -1765,15 +1776,16 @@ BEGIN
             'categories', '[]'::jsonb, 'dapps', '[]'::jsonb);
     END IF;
 
-    -- Per-json_id totals, each resolved to its registered app + category via a
-    -- longest-prefix starts_with match against custom_json_app_registry (an unmatched id
-    -- falls to 'Uncategorized' with the raw id as the app name). Rolled up to apps (the
-    -- drill-down bars) and categories (the donut); all breakdowns + KPIs in one object.
+    -- Per-json_id totals (op_count + summed op_bytes), each resolved to its registered app +
+    -- category via a longest-prefix starts_with match against custom_json_app_registry (an
+    -- unmatched id falls to 'Uncategorized' with the raw id as the app name). Rolled up to
+    -- apps (the drill-down bars) and categories (the donut), with estimated RC computed from
+    -- the inputs at read time; all breakdowns + KPIs in one object.
     WITH per_json AS (
         SELECT
             acj.json_id,
-            SUM(acj.op_count)::BIGINT     AS op_count,
-            SUM(acj.rc_estimated)::BIGINT AS rc_consumed
+            SUM(acj.op_count)::BIGINT AS op_count,
+            SUM(acj.op_bytes)::BIGINT AS op_bytes
         FROM haf_stats_backend.account_custom_json_daily acj
         WHERE acj.account_id = _account_id
           AND acj.day BETWEEN _from AND _to
@@ -1784,7 +1796,7 @@ BEGIN
             COALESCE(r.category, 'Uncategorized') AS category,
             COALESCE(r.app_name, pj.json_id)      AS app_name,
             pj.op_count,
-            pj.rc_consumed
+            pj.op_bytes
         FROM per_json pj
         LEFT JOIN LATERAL (
             SELECT reg.category, reg.app_name
@@ -1795,20 +1807,28 @@ BEGIN
         ) r ON TRUE
     ),
     per_app AS (
-        SELECT category, app_name, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
+        SELECT category, app_name,
+               SUM(op_count) AS op_count,
+               (SUM(op_count) * _base_rc + SUM(op_bytes) * _byte_rc)::BIGINT AS rc_consumed
         FROM resolved GROUP BY category, app_name
     ),
     per_cat AS (
-        SELECT category, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
+        SELECT category,
+               SUM(op_count) AS op_count,
+               (SUM(op_count) * _base_rc + SUM(op_bytes) * _byte_rc)::BIGINT AS rc_consumed
         FROM resolved GROUP BY category
     ),
-    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total, COALESCE(SUM(rc_consumed), 0) AS total_rc FROM resolved)
+    tot AS (
+        SELECT COALESCE(SUM(op_count), 0) AS total,
+               COALESCE((SUM(op_count) * _base_rc + SUM(op_bytes) * _byte_rc)::BIGINT, 0) AS total_rc
+        FROM resolved
+    )
     SELECT jsonb_build_object(
         'account', "account",
         'from_date', _from,
         'to_date', _to,
         'total_ops', (SELECT total FROM tot),
-        -- rc_consumed is an ESTIMATE (haf_stats_app.estimate_rc_cost), not real RC spend.
+        -- total_rc is a calibrated ESTIMATE (rc_op_stats_daily rates), not real RC spend.
         'total_rc_estimated', (SELECT total_rc FROM tot),
         'top_category', (SELECT category FROM per_cat ORDER BY op_count DESC, category LIMIT 1),
         'top_dapp', (SELECT app_name FROM per_app ORDER BY op_count DESC, app_name LIMIT 1),
