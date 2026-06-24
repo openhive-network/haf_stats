@@ -1,73 +1,115 @@
-version: "3.8"
+name: 'haf_stats'
 
-# Full production stack:
-#   haf            — HAF PostgreSQL node (hived + sql_serializer)
-#   haf-stats-setup     — One-time schema installation
-#   haf-stats-process   — Infinite block-processing loop
-#   haf-stats-api       — PostgREST REST API
+# =============================================================================
+# haf_stats full stack — HAF + schema install + block processing + PostgREST.
+# =============================================================================
+# This is the production stack: `cd docker && docker compose up -d` brings up the
+# pinned HAF image from docker/.env and runs a normal hived replay/sync.
+#
+# It is also template-shaped to plug into the shared common-ci-configuration
+# pipeline (see .gitlab-ci.yml). CI does NOT use these production defaults — it
+# overlays overrides/ci.yml (sync) / uses docker-compose-ci-test.yml (tests),
+# which inject the find_haf_image instance image (HAF_IMAGE_NAME) and run
+# --skip-hived against the datadir prepare_haf_data caches once per HAF commit, and
+# redirect the datadir/shm named volumes to bind mounts (HAF_DATA_DIRECTORY /
+# HAF_SHM_DIRECTORY) so the synced state can be tar'd into the NFS cache.
 
 services:
   haf:
-    image: ${HAF_REGISTRY}/haf:${HAF_VERSION}
-    restart: unless-stopped
-    ports:
-      - "5432:5432"
+    # CI passes HAF_IMAGE_NAME (the find_haf_image instance image); production
+    # falls back to the pinned image from docker/.env (HAF_REGISTRY + HAF_VERSION).
+    image: ${HAF_IMAGE_NAME:-${HAF_REGISTRY:-registry.gitlab.syncad.com/hive}/haf:${HAF_VERSION:-1.28.6}}
+    entrypoint: /home/hived/docker_entrypoint.sh
+    # Production runs HAF_COMMAND from docker/.env (a real replay incl.
+    # --shared-file-size); see the note there. CI's sync/test stacks override this
+    # with --skip-hived. Do NOT hardcode --skip-hived here, or a fresh
+    # `docker compose up -d` would start against an empty, non-replayed datadir.
+    command: ${HAF_COMMAND:-}
     environment:
-      HIVED_CHAIN_STATE_SIZE_LIMIT: "1073741824"
+      DATADIR: /home/hived/datadir
+      SHM_DIR: /home/hived/shm_dir
+      PG_ACCESS: "
+        host    haf_block_log    haf_stats_user     all    trust\n
+        host    haf_block_log    haf_stats_owner    all    trust\n
+        host    haf_block_log    haf_admin          all    trust\n
+        "
+    ports:
+      - "${HAF_PORT:-5432}:5432"
     volumes:
       - haf_datadir:/home/hived/datadir
+      - haf_shmdir:/home/hived/shm_dir
+      - ./blockchain:/home/hived/datadir/blockchain
+      - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
+    networks:
+      haf-network:
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -U haf_admin -d haf_block_log"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 72h   # replay can take days on first run
+      test: ["CMD-SHELL", "/home/hived/healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 48h   # time for replay to finish on a fresh sync
 
   haf-stats-setup:
-    image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
+    image: ${HAF_STATS_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats:${HAF_STATS_VERSION:-latest}}
     command: ["/app/scripts/install_app.sh"]
     environment:
       POSTGRES_HOST: haf
-      POSTGRES_USER: haf_admin   # install runs as haf_admin to create roles
+      POSTGRES_USER: haf_admin   # install runs as haf_admin to create roles/context
       POSTGRES_DB:   haf_block_log
+    networks:
+      haf-network:
     depends_on:
       haf:
         condition: service_healthy
-    restart: on-failure
 
   haf-stats-process:
-    image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
+    image: ${HAF_STATS_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats:${HAF_STATS_VERSION:-latest}}
     command: ["/app/scripts/process_blocks.sh"]
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_stats_owner
       POSTGRES_DB:   haf_block_log
+    networks:
+      haf-network:
+    healthcheck:
+      test: ["CMD-SHELL", "psql -h haf -U haf_stats_user -d haf_block_log -c 'SELECT 1' -q"]
+      interval: 60s
+      timeout: 10s
+      retries: 20
+      start_period: 72h   # time for processing to catch up on a fresh sync
     depends_on:
       haf-stats-setup:
         condition: service_completed_successfully
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "psql -h haf -U haf_stats_user -d haf_block_log -c 'SELECT 1' -q"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 72h
 
   haf-stats-api:
-    image: postgrest/postgrest:${POSTGREST_VERSION}
-    restart: unless-stopped
+    image: ${POSTGREST_IMAGE:-${POSTGREST_REGISTRY:-postgrest/postgrest}:${POSTGREST_VERSION:-v12.2.3}}
     ports:
-      - "${API_PORT:-3001}:3000"
+      - "${API_PORT:-3000}:3000"
     environment:
-      PGRST_DB_URI:            "postgres://haf_stats_user@haf/haf_block_log"
-      PGRST_DB_SCHEMA:         "haf_stats_endpoints"
-      PGRST_DB_ANON_ROLE:      "haf_stats_user"
-      PGRST_DB_POOL:           "20"
-      PGRST_DB_POOL_TIMEOUT:   "10"
-      PGRST_SERVER_TIMING_ENABLED: "true"
+      # Auto-configured by the common-ci templates from HAF_APP_ROLE_PREFIX=haf_stats
+      # (owner role connects for schema introspection, anon role serves requests);
+      # the defaults keep a plain `docker compose up` working outside CI.
+      PGRST_DB_URI:                      ${PGRST_DB_URI:-postgresql://haf_stats_owner@haf:5432/haf_block_log}
+      PGRST_DB_SCHEMA:                   ${PGRST_DB_SCHEMA:-haf_stats_endpoints}
+      PGRST_DB_ANON_ROLE:                ${PGRST_DB_ANON_ROLE:-haf_stats_user}
+      PGRST_DB_EXTRA_SEARCH_PATH:        ${PGRST_DB_EXTRA_SEARCH_PATH:-haf_stats_app}
+      PGRST_DB_POOL:                     ${PGRST_DB_POOL:-20}
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: ${PGRST_DB_POOL_ACQUISITION_TIMEOUT:-10}
+      PGRST_SERVER_TIMING_ENABLED:       "true"
+    networks:
+      haf-network:
     depends_on:
+      haf:
+        condition: service_healthy
       haf-stats-process:
         condition: service_healthy
 
+networks:
+  haf-network:
+    name: haf-network
+
 volumes:
   haf_datadir:
+    driver: local
+  haf_shmdir:
+    driver: local
