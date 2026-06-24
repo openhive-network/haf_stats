@@ -43,6 +43,10 @@ run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 
+# 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
+#     unavailable (e.g. CI), so it never fails the install. Scheduling is a deploy step.
+run_sql_file "${SCRIPT_DIR}/../db/refresh_rc_op_stats.sql"
+
 # 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
 

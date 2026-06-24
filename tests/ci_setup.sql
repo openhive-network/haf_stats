@@ -411,11 +411,16 @@ FROM haf_stats_backend.rc_op_stats_daily
 ORDER BY op_type_id, day DESC;
 GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
 
--- Round test rate (custom_json, op_type 18): rc = op_count*1000 + op_bytes*100. Distinct
--- from the production calibration so the expected arithmetic is self-contained.
+-- Two dated test rates (custom_json, op_type 18) so the per-day read path is exercised:
+-- a cheap early rate from 2020-06-01 (rc = op_count*100 + op_bytes*10) and a pricier one
+-- from 2020-06-08 (rc = op_count*1000 + op_bytes*100). The endpoint prices each activity day
+-- at the rate effective on/before it, so 06-01/06-05 ops use the early rate and 06-10 ops the
+-- later one. Round numbers, distinct from production, so the expected arithmetic is explicit.
 INSERT INTO haf_stats_backend.rc_op_stats_daily
 (day, op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, sample_count)
-VALUES (CURRENT_DATE, 18, 1000, 100, 167828015, 304, 1)
+VALUES
+('2020-06-01', 18, 100, 10, 167828015, 304, 1),
+('2020-06-08', 18, 1000, 100, 167828015, 304, 1)
 ON CONFLICT DO NOTHING;
 
 -- Fixtures for the get_account_dapp_footprint exact-value tavern test (account
@@ -424,10 +429,11 @@ ON CONFLICT DO NOTHING;
 -- Hive Engine (SSC)/DeFi, follow -> Hivemind Follow/Social Graph, mystery_app ->
 -- Uncategorized. The '2020-07-01' row is outside the test range, proving the day filter
 -- excludes it. Op totals: Gaming 30, DeFi 20, Social Graph 10, Uncategorized 5 = 65.
--- op_bytes is set so estimated-RC shares differ from op shares (mystery_app is op-light but
--- byte-heavy): with rc = op_count*1000 + op_bytes*100, category RC is Gaming 60000, DeFi
--- 70000, Social Graph 15000, Uncategorized 85000 = 230000 - so Uncategorized is 7.69% of
--- ops but 36.96% of estimated RC, proving the RC lens is read-time and size-driven.
+-- With the two dated rates above, RC shares diverge from op shares by BOTH payload size and
+-- activity era: Gaming (06-01/06-05, cheap rate) = 25*100+200*10 + 5*100+100*10 = 6000; DeFi
+-- (06-01, cheap) = 20*100+500*10 = 7000; Social Graph (06-10, pricey) = 10*1000+50*100 =
+-- 15000; Uncategorized (06-10, pricey + big payload) = 5*1000+800*100 = 85000. Total 113000,
+-- so Uncategorized is 7.69% of ops but 75.22% of estimated RC - proving per-day pricing.
 INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
 VALUES
     (2001, '2020-06-01', 'sm_claim_daily', 25, 200),
