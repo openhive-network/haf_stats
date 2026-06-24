@@ -1,8 +1,25 @@
-# Pipeline stages mirror balance_tracker / haf_block_explorer's organization.
-# Active here: lint, build, test. detect / sync / cleanup / publish are kept in
-# the same order those repos use so the structure lines up as jobs are added
-# (find_haf_image -> detect, prepare_haf_data -> sync, cache cleanup -> cleanup,
-# image/swagger publish -> publish); GitLab skips stages that have no jobs yet.
+# =============================================================================
+# haf_stats CI — cached-replay pipeline (adopted from balance_tracker).
+# =============================================================================
+# The heavy 5M-block replay is paid ONCE per HAF commit and cached on NFS, then
+# the app sync runs only the schema install + block processing on top of that
+# pre-replayed datadir and caches the result. Test jobs extract the cache and
+# start a HAF (--skip-hived) + PostgREST stack in seconds instead of re-replaying.
+#
+# Flow (mirrors balance_tracker):
+#   detect : find_haf_image  -> HAF image/commit
+#            detect_changes   -> AUTO_SKIP_SYNC when only docs/tests changed
+#   build  : prepare_haf_data -> replay 5M once, cache as `haf` (per HAF commit)
+#            docker-build      -> build+push this commit's haf_stats image
+#   sync   : sync             -> install + process to head, cache `haf_haf_stats_sync`
+#   test   : pattern-test      -> tavern .pat.json exact-value suite (cached stack)
+#            regression-test    -> parity + external hived regression guards
+#   cleanup: cache_cleanup     -> manual NFS cache pruning
+#
+# The fast stub gate (endpoint-tests, docker-compose-ci.yml) still runs on every
+# push and needs no replay.
+# =============================================================================
+
 stages:
   - detect
   - lint
@@ -10,64 +27,423 @@ stages:
   - sync
   - test
   - cleanup
-  - publish
 
-# Run the full pipeline on every commit (any branch push) and on merge requests,
-# but never both for the same commit: if a branch has an open MR, skip the
-# redundant branch pipeline so only the MR pipeline runs.
-workflow:
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
-      when: never
-    - if: $CI_COMMIT_BRANCH
+variables:
+  # ---------------------------------------------------------------------------
+  # App identity — drives the common-ci .haf_app_* templates:
+  #   APP_SYNC_CACHE_TYPE = haf_${HAF_APP_NAME}_sync = haf_haf_stats_sync
+  #   roles/schema derived from HAF_APP_ROLE_PREFIX: haf_stats_owner /
+  #   haf_stats_user / haf_stats_endpoints / haf_stats_app.
+  # ---------------------------------------------------------------------------
+  HAF_APP_NAME: "haf_stats"
+  HAF_APP_ROLE_PREFIX: "haf_stats"
+  HAF_APP_SCHEMA: "haf_stats_app"
 
+  # Cache configuration. APP_CACHE_KEY pins both the HAF commit (HAF_COMMIT, from
+  # find_haf_image) and this app commit, so any change to either invalidates it.
+  APP_SYNC_CACHE_TYPE: "haf_haf_stats_sync"
+  APP_CACHE_KEY: "${HAF_COMMIT}_${CI_COMMIT_SHORT_SHA}"
+  DATA_CACHE_HAF_PREFIX: "/cache/replay_data_haf"
+  DATA_CACHE_NFS_PREFIX: "/nfs/ci-cache"
+  BLOCK_LOG_SOURCE_DIR_5M: "/blockchain/block_log_5m"
+  REPLAY_STOP_AT_BLOCK: "5000000"
+
+  # Skip the heavy sync when only docs/tests/CI-yaml changed (detect_changes).
+  HAF_APP_SKIP_PATTERNS: '^tests/|^docs/|\.md$|^README|^CHANGELOG|^LICENSE|^CLAUDE|^\.gitlab-ci\.yml$'
+
+  # QUICK_TEST=true + QUICK_TEST_HAF_COMMIT=<sha> reuses an existing cache and
+  # skips the replay/sync entirely (manual iteration).
+  QUICK_TEST: "false"
+  QUICK_TEST_HAF_COMMIT: ""
+  AUTO_SKIP_SYNC: "false"
+
+  # Pin common-ci-configuration so template/script drift can't silently break CI.
+  COMMON_CI_REF: "96889a650b3f45244cecc4bb3f250af439a71900"
+  COMMON_CI_URL: "https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}"
+  CACHE_MANAGER: "/tmp/cache-manager.sh"
+  CACHE_MANAGER_REF: "96889a650b3f45244cecc4bb3f250af439a71900"
+
+  # Centralized runner image with Docker + psql. NOTE: pytest/tavern are NOT
+  # preinstalled — the common-ci .tavern_install_deps script pip-installs them
+  # into docker/venv (see pattern-test below).
+  HAF_APP_TEST_RUNNER_IMAGE: "registry.gitlab.syncad.com/hive/common-ci-configuration/haf-app-test-runner:2.2"
+  # Per-build network so DinD job containers can reach the compose services.
+  FF_NETWORK_PER_BUILD: "true"
+  GIT_SUBMODULE_STRATEGY: "none"
+
+include:
+  - template: Workflows/Branch-Pipelines.gitlab-ci.yml
+  # Pinned to a SHA (not develop) for reproducibility — bump deliberately.
+  - project: 'hive/common-ci-configuration'
+    ref: 96889a650b3f45244cecc4bb3f250af439a71900
+    file:
+      - '/templates/base.gitlab-ci.yml'
+      - '/templates/docker_image_jobs.gitlab-ci.yml'
+      - '/templates/haf_data_preparation.gitlab-ci.yml'
+      - '/templates/cache_cleanup.gitlab-ci.yml'
+      - '/templates/test_jobs.gitlab-ci.yml'
+      - '/templates/haf_app_testing.gitlab-ci.yml'
+      - '/templates/source_change_detection.gitlab-ci.yml'
+
+# =============================================================================
+# DETECT
+# =============================================================================
+find_haf_image:
+  extends: .find_haf_image
+  stage: detect
+  variables:
+    UPSTREAM_BRANCH: "develop"
+    HAF_PATTERNS_REF: "develop"
+
+# Inherits HAF_APP_SKIP_PATTERNS from the top-level variables: SQL/scripts/docker/
+# Dockerfile changes DO require a re-sync; only docs/tests/CI-yaml are safe to skip.
+detect_changes:
+  extends: .haf_app_detect_changes
+  stage: detect
+
+# =============================================================================
+# LINT
+# =============================================================================
 sql-lint:
   stage: lint
   image: python:3.12-slim
+  needs: []
   script:
     - pip install sqlfluff==3.3.0 -q
     - sqlfluff lint db/ endpoints/ --dialect postgres
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
 shell-lint:
   stage: lint
   image: koalaman/shellcheck-alpine:latest
+  needs: []
   script:
-    - find scripts/ -name "*.sh" -exec shellcheck --severity=warning {} +
+    - find scripts/ docker/ -name "*.sh" -exec shellcheck --severity=warning {} +
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
 hadolint:
   stage: lint
   image: hadolint/hadolint:latest-alpine
+  needs: []
   script:
     - hadolint --ignore DL3006 --ignore DL3002 Dockerfile
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
 compose-validate:
   stage: lint
   image: docker:24
+  needs: []
   variables:
+    # Dummy values so variable interpolation resolves during `config`.
+    HAF_IMAGE_NAME: "registry.example.com/haf/instance:latest"
+    HAF_STATS_IMAGE: "registry.example.com/haf_stats:latest"
+    POSTGREST_IMAGE: "registry.example.com/postgrest:latest"
     HAF_REGISTRY: "registry.example.com"
     HAF_VERSION: "latest"
     HAF_STATS_REGISTRY: "registry.example.com"
     HAF_STATS_VERSION: "latest"
     POSTGREST_VERSION: "latest"
+    HAF_DATA_DIRECTORY: "/tmp/haf_data"
+    HAF_SHM_DIRECTORY: "/tmp/haf_shm"
   script:
-    - docker compose -f docker/docker-compose.yml config --quiet
+    - cd docker
+    - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
+    - docker compose -f docker-compose-ci-test.yml config --quiet
+    - docker compose -f docker-compose-ci.yml config --quiet
+    - docker compose --env-file .env -f docker-compose-test.yml config --quiet
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
+# =============================================================================
+# BUILD
+# =============================================================================
+# Build + push this commit's haf_stats image so the sync job can pull it.
+docker-build:
+  stage: build
+  image: docker:24
+  needs: []
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  rules:
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
+    - if: $CI_COMMIT_BRANCH
+
+# Replay the 5M reference chain ONCE and cache the HAF datadir (cache type `haf`,
+# keyed by HAF_COMMIT). Shared across all app commits — cache-hit runs are instant.
+prepare_haf_data:
+  extends: .haf_app_prepare_data_with_find
+  stage: build
+  timeout: 2h
+  variables:
+    BLOCK_LOG_SOURCE_DIR: "$BLOCK_LOG_SOURCE_DIR_5M"
+    CONFIG_INI_SOURCE: "/tmp/config_5M.ini"
+  before_script:
+    - curl -fsSL "${COMMON_CI_URL}/haf-app-tools/config/config_5M.ini" -o /tmp/config_5M.ini
+    - echo "Using HAF image:${HAF_IMAGE_NAME} (commit:${HAF_COMMIT})"
+  # Warm the shared HAF replay cache on NFS when it's missing, so a `sync` that
+  # lands on a different builder gets a hit instead of dying on an NFS miss.
+  #
+  # Why this is needed (two stacked gaps in the shared tooling):
+  #   1. .prepare_haf_data_5m only pushes to NFS on a fresh replay; when
+  #      cache-manager serves the tar from a builder's LOCAL /cache it treats that
+  #      as an "NFS hit" and skips the push.
+  #   2. `cache-manager put` itself short-circuits on an NFS *client*: if the
+  #      local tar (/cache/<type>_<key>.tar) already exists it returns success
+  #      WITHOUT copying to NFS (cmd_put "Local cache already exists" early-return).
+  # So a HAF commit whose tar is stranded in client-local caches (NFS copy never
+  # written, or evicted while local copies survive) never reaches the NFS host's
+  # storage, and cross-builder sync fails. haf_stats runs too rarely to rely on
+  # the ambient NFS warmth that keeps higher-volume HAF apps green.
+  #
+  # cmd_get only needs the .tar present for an NFS hit, and its own push is just an
+  # atomic `cp local -> NFS`, so we replicate exactly that, bypassing put's
+  # short-circuit. Copies the already-built local tar (no re-tar), is a no-op once
+  # NFS is warm, and is a safe no-op on the NFS host (no /cache/<type>_<key>.tar).
+  script:
+    - !reference [.prepare_haf_data_5m, script]
+    - |
+      NFS_TAR="${CACHE_NFS_PATH:-/nfs/ci-cache}/${HAF_CACHE_TYPE:-haf}/${HAF_COMMIT}.tar"
+      LOCAL_TAR="${CACHE_LOCAL_PATH:-/cache}/${HAF_CACHE_TYPE:-haf}_${HAF_COMMIT}.tar"
+      if [[ -n "${FILTERED_CACHE_KEY:-}" ]]; then
+        echo "NFS warm guard: skipped (custom cache key)"
+      elif head -c1 "$NFS_TAR" >/dev/null 2>&1; then
+        # head (open syscall) not [[ -f ]] (stat): dodges the NFS negative-dentry
+        # cache that can make a present file look missing for seconds.
+        echo "NFS warm guard: HAF cache already on NFS ($NFS_TAR)"
+      elif [[ ! -f "$LOCAL_TAR" ]]; then
+        echo "NFS warm guard: no client-local tar at $LOCAL_TAR; nothing to copy (NFS host, or template already pushed)"
+      else
+        echo "NFS warm guard: NFS HAF cache MISSING - copying client-local tar -> NFS so cross-builder sync hits"
+        TMP="${NFS_TAR}.tmp.$(hostname 2>/dev/null || echo h).${CI_JOB_ID:-$$}"
+        mkdir -p "$(dirname "$NFS_TAR")"
+        if cp "$LOCAL_TAR" "$TMP" && mv "$TMP" "$NFS_TAR"; then
+          echo "NFS warm guard: pushed $(stat -c %s "$NFS_TAR" 2>/dev/null || echo '?') bytes to $NFS_TAR"
+        else
+          rm -f "$TMP" 2>/dev/null || true
+          echo "WARNING: NFS warm guard copy failed (non-fatal); cross-builder sync may still miss"
+        fi
+      fi
+  tags:
+    - public-runner-docker
+    - data-cache-storage
+    - fast
+
+# =============================================================================
+# SYNC — install schema + process to head against the pre-replayed datadir,
+# then save the combined state as the haf_haf_stats_sync cache.
+# =============================================================================
+sync:
+  extends:
+    - .docker_image_builder_job_template
+    - .haf_app_sync_variables
+  stage: sync
+  image: "${HAF_APP_TEST_RUNNER_IMAGE}"
+  timeout: 2h   # NFS cache push can take a while on busy days
+  needs:
+    - job: detect_changes
+      artifacts: true
+      optional: true
+    - job: find_haf_image
+      artifacts: true
+    - job: prepare_haf_data
+      artifacts: true
+    - job: docker-build
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
+    HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
+    POSTGRES_ACCESS: "postgresql://haf_admin@docker:5432/haf_block_log"
+    COMPOSE_OPTIONS_STRING: "--env-file ci.env --file docker-compose.yml --file overrides/ci.yml --ansi never"
+    # process is an infinite loop, so the fast-healthcheck override targets it too.
+    CI_FAST_HEALTHCHECK_SERVICES: "haf haf-stats-process"
+  before_script:
+    # Matches balance_tracker's sync: login + git safe.dir + CI healthcheck override
+    # come from .haf_app_sync_setup; the dind daemon (services + DOCKER_HOST) is all
+    # `docker compose up` needs — no buildkit/builder setup required here.
+    - !reference [.haf_app_sync_setup, script]
+    - !reference [.haf_app_smart_cache_lookup, script]
+  script:
+    - |
+      CACHE_HIT=$(cat /tmp/cache_hit 2>/dev/null || echo "false")
+      if [[ "$CACHE_HIT" == "true" ]]; then
+        echo "App sync cache hit (${APP_SYNC_CACHE_TYPE}) - nothing to sync."
+        exit 0
+      fi
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting sync stack..."
+      # The smart cache lookup extracted the `haf` (pre-replayed) datadir to
+      # ${DATADIR}. HAF runs --skip-hived, but the compose bind-mounts
+      # ./blockchain, so seed it from the cache (deref symlinks) if present.
+      mkdir -p "${CI_PROJECT_DIR}/docker/blockchain"
+      if [[ -d "${DATADIR}/blockchain" ]] && [[ -n "$(ls -A "${DATADIR}/blockchain" 2>/dev/null)" ]]; then
+        cp -aL "${DATADIR}/blockchain"/* "${CI_PROJECT_DIR}/docker/blockchain/" 2>/dev/null || true
+        sudo rm -rf "${DATADIR}/blockchain"
+      fi
+
+      cd "${CI_PROJECT_DIR}/docker"
+      cat > ci.env <<EOF
+      HAF_IMAGE_NAME=${HAF_IMAGE_NAME}
+      HAF_STATS_IMAGE=${HAF_STATS_IMAGE}
+      POSTGREST_IMAGE=${POSTGREST_IMAGE}
+      HAF_DATA_DIRECTORY=${HAF_DATA_DIRECTORY}
+      HAF_SHM_DIRECTORY=${HAF_SHM_DIRECTORY}
+      PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log
+      PGRST_DB_SCHEMA=haf_stats_endpoints
+      PGRST_DB_ANON_ROLE=haf_stats_user
+      PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app
+      EOF
+      cat ci.env
+
+      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+      docker compose "${COMPOSE_OPTIONS[@]}" config
+      docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull
+      echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
+      "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
+      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
+      cd "${CI_PROJECT_DIR}/docker"
+      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+
+      # A clean pg_ctl stop flushes WAL and writes a shutdown checkpoint so the
+      # cached datadir restarts cleanly. CHECKPOINT first (informational); the
+      # PG binary path varies by image version, so locate pg_ctl dynamically.
+      docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf psql -U haf_admin -d haf_block_log -c "CHECKPOINT;" 2>&1 || \
+        echo "WARNING: checkpoint failed - pg_ctl stop will still attempt a clean shutdown"
+
+      PG_CTL=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+          bash -c 'find /usr/lib/postgresql -name pg_ctl -type f 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n')
+      echo "Found pg_ctl at: ${PG_CTL:-not found}"
+      if [[ -n "$PG_CTL" ]]; then
+        docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+          "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m fast -t 60 2>&1 || \
+        docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+          "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m immediate -t 30 2>&1 || true
+      else
+        echo "WARNING: pg_ctl not found, relying on docker compose down"
+      fi
+
+      docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-setup > haf-stats-setup.log || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-process > haf-stats-process.log || true
+      timeout 120 docker compose "${COMPOSE_OPTIONS[@]}" down --timeout "${COMPOSE_DOWN_TIMEOUT:-60}"
+      # cwd is ${CI_PROJECT_DIR}/docker, so this lands at docker/container-logs.tar.gz
+      # (the path .haf_app_sync_artifacts publishes).
+      tar -czvf container-logs.tar.gz ./*.log || true
+      echo -e "\e[0Ksection_end:$(date +%s):shutdown\r\e[0K"
+    - !reference [.haf_app_sync_save_cache_conditional, script]
+  after_script: !reference [.haf_app_sync_cleanup, after_script]
+  artifacts: !reference [.haf_app_sync_artifacts, artifacts]
+  tags:
+    - public-runner-docker
+    - data-cache-storage
+    - fast
+
+# =============================================================================
+# TEST — extract the haf_haf_stats_sync cache, start HAF (--skip-hived) +
+# PostgREST, and run the suites. No replay, no processing: minutes, not hours.
+# =============================================================================
+.haf_stats_dind_test:
+  extends: .haf_app_dind_complete_test
+  image: "${HAF_APP_TEST_RUNNER_IMAGE}"
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
+    COMPOSE_FILE: "docker-compose-ci-test.yml"
+    COMPOSE_OPTIONS_STRING: "--file docker-compose-ci-test.yml --ansi never"
+    POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
+  needs:
+    - job: detect_changes
+      artifacts: true
+      optional: true
+    - job: find_haf_image
+      artifacts: true
+    - job: sync
+      artifacts: true
+  tags:
+    - public-runner-docker
+    - data-cache-storage
+    - fast
+
+# tavern .pat.json suite — exact 2016-04 values over the replayed chain
+# (negatives/synthetic edge cases run on the fast stub stack instead).
+pattern-test:
+  extends: .haf_stats_dind_test
+  # The runner image has no pytest/tavern; .tavern_install_deps creates a venv at
+  # ${CI_PROJECT_DIR}/docker/venv (compose_startup cd's into docker/) and installs
+  # them. Re-reference the base before_script so it isn't clobbered by this override.
+  before_script:
+    - !reference [.haf_app_dind_complete_test, before_script]
+    - !reference [.tavern_install_deps, script]
+    - |
+      # .tavern_install_deps installs pytest>=8 with no upper bound. pytest 9 dropped
+      # _pytest._code.code.FormattedExcinfo, which tavern imports, breaking collection
+      # at import time — the same reason the stub stack pins it (docker-compose-ci.yml).
+      # Cap it here too so a future pytest 9 resolve can't break this job.
+      . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
+      pip install --quiet 'pytest<9'
+  script:
+    - |
+      . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
+      DOCKER_IP=$(getent hosts docker 2>/dev/null | awk '/^[0-9]+\./{print $1; exit}')
+      DOCKER_IP="${DOCKER_IP:-docker}"
+      echo "Running tavern pattern suite against http://${DOCKER_IP}:3000"
+      API_URL="http://${DOCKER_IP}:3000" \
+      PYTHONPATH="${CI_PROJECT_DIR}/tests/tavern" \
+      TAVERN_DIR="${CI_PROJECT_DIR}/tests/tavern" \
+        pytest "${CI_PROJECT_DIR}/tests/tavern" -m "not negative and not synthetic" --tb=short -v
+
+# parity (independent in-DB re-derivation) + regression (vs external hived snapshot)
+regression-test:
+  extends: .haf_stats_dind_test
+  script:
+    - |
+      echo "Running correctness guards against the cached stack (docker:5432)"
+      cd "${CI_PROJECT_DIR}"
+      ./scripts/run_verification.sh --host=docker --port=5432 --user=haf_admin
+  artifacts:
+    when: always
+    paths:
+      - docker/container-logs.tar.gz
+    expire_in: 1 week
+
+# =============================================================================
+# Fast stub gate — validation + synthetic/negative edge cases, no replay.
+# Runs on every push regardless of the cached-replay pipeline above.
+# =============================================================================
 endpoint-tests:
   stage: test
   image: docker:24
+  needs: []
   services:
     - docker:24-dind
   variables:
@@ -80,92 +456,20 @@ endpoint-tests:
     - docker compose -f docker/docker-compose-ci.yml logs tavern
     - docker compose -f docker/docker-compose-ci.yml down -v
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH
-
-docker-build:
-  stage: build
-  image: docker:24
-  services:
-    - docker:24-dind
-  variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-  before_script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-  script:
-    - docker build --build-arg GIT_HASH=$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
+    # create merge_request_event pipelines); GitLab shows the branch pipeline in
+    # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
 # =============================================================================
-# Real-data integration test — every processor + endpoint over an actual replay.
+# CLEANUP — manual NFS cache pruning.
 # =============================================================================
-# Builds this commit's image, replays the 5M reference chain, runs the full
-# install -> process -> PostgREST pipeline, and asserts endpoint-local real-data
-# patterns. This is what makes the MR !25 class of bug — processor SQL that the
-# stub CI never executes — fail automatically.
-#
-# tests/tavern asserts exact 2016-04 values (489 posts, 3004 votes,
-# 116,298 active-user ops, real transfer leaderboards, and closed D90 cohort
-# retention). The 5M depth is required because the D90 window closes in July.
-#
-# Data path (validated green): the Hive builder runners expose the pre-synced
-# block_log at $BLOCK_LOG_SOURCE_DIR, but it is a READ-ONLY cache mount while
-# hived needs to write haf_wal/rocksdb into datadir/blockchain. So the script
-# stages the block_log into the writable job workspace (which the dind daemon can
-# see) and mounts that. The job gates the pipeline (allow_failure: false).
-integration-tests:
-  stage: test
-  image: docker:24
-  services:
-    - docker:24-dind
-  # A from-scratch 5M replay is long, so override GitLab's default 1h job timeout.
-  timeout: 3h
+cache_cleanup:
+  extends: .cleanup_cache_manual_template
+  stage: cleanup
   variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-    # Full 5,000,000-block replay — balance_tracker's mainnet reference depth.
-    # Endpoint-local tests/tavern .pat.json files assert exact values for the
-    # closed 2016-04 window.
-    REPLAY_STOP_AT_BLOCK: "5000000"
-    BLOCK_LOG_SOURCE_DIR: "/blockchain/block_log_5m"   # provided by Hive CI runners
-  before_script:
-    # docker:24 is Alpine — run_tests.sh needs bash ([[ ]]); run_verification.sh
-    # renders the hived fixture with python3.
-    - apk add --no-cache bash python3
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-  script:
-    # Build and run THIS commit's image (override the registry:latest defaults in
-    # docker/.env; shell env wins over --env-file in compose).
-    - export HAF_STATS_REGISTRY="${CI_REGISTRY_IMAGE%/*}"
-    - export HAF_STATS_VERSION="$CI_COMMIT_SHORT_SHA"
-    - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}" .
-    # The runner's /blockchain is a READ-ONLY cache mount, but hived writes
-    # haf_wal/rocksdb into datadir/blockchain — so a direct mount fails with
-    # "Read-only file system". Copy the block_log into the writable job workspace
-    # (which the dind daemon can also see) and mount THAT via docker/blockchain.
-    - mkdir -p docker/blockchain
-    - cp -a "${BLOCK_LOG_SOURCE_DIR}/." docker/blockchain/
-    - ls -la docker/blockchain
-    - chmod +x scripts/run_tests.sh
-    # --keep: skip teardown so after_script can capture the Tavern pytest summary
-    # AND so the correctness guards below can query the still-running stack.
-    - ./scripts/run_tests.sh --reset --keep
-    # Correctness guards (mirror balance_tracker parity + regression): prove the
-    # exact values the tavern suite asserts are independently reproducible from the
-    # raw op stream AND match an external hived-node snapshot — not just internally
-    # consistent. Fails the job on any divergence.
-    - chmod +x scripts/run_verification.sh
-    - ./scripts/run_verification.sh
-  after_script:
-    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf | tail -60
-    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-setup
-    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs haf-stats-process
-    - docker compose --env-file docker/.env -f docker/docker-compose-test.yml logs tavern
+    CLEANUP_PATH_PATTERN: "/cache/*haf_haf_stats_sync_*"
   tags:
     - public-runner-docker
     - data-cache-storage
-  allow_failure: false
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH
+    - fast

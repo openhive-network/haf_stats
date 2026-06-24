@@ -1,44 +1,89 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_verification.sh — correctness guards for the real-data values, run against
-# the already-up integration test stack (docker-compose-test.yml, left running by
-# run_tests.sh --keep). Mirrors balance_tracker's parity + regression tests.
+# run_verification.sh — correctness guards for the real-data values. Mirrors
+# balance_tracker's parity + regression tests.
 #
 #   1. tests/parity/mainnet_metrics_parity.sql
 #        Independent in-DB re-derivation from the raw operation stream vs the
 #        haf_stats endpoint output. RAISEs (psql exits non-zero) on any mismatch.
-#   2. tests/regression/ (vs external hived snapshot)
+#   2. tests/regression/run_test.sh (vs external hived snapshot)
 #        Loads account_metrics_dump.json.gz (captured from a canonical hived node)
 #        and compares the account-scoped endpoints against it.
 #
-# Both run inside the `haf` container (it has psql + the DB on a local socket as
-# haf_admin), so no TCP/pg_hba or extra DB driver is needed.
+# Two connection modes:
+#   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
+#                  by the regression-test CI job against the cached test stack
+#                  (PostgreSQL reachable at docker:5432, PG_ACCESS=trust).
+#   * compose (default, local): no --host given -> run psql inside the running
+#                  `haf` container of docker-compose-test.yml (left up by
+#                  run_tests.sh --keep), over its local socket as haf_admin.
+#
 # Run from the repo root. Exits non-zero if either guard fails.
 # =============================================================================
 set -euo pipefail
 
-COMPOSE=(docker compose --env-file docker/.env -f docker/docker-compose-test.yml)
-PSQL_IN_HAF() { "${COMPOSE[@]}" exec -T haf psql -U haf_admin -d haf_block_log -v ON_ERROR_STOP=on "$@"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+MODE="compose"
+PG_HOST=""
+PG_PORT="5432"
+PG_USER="haf_admin"
+
+for arg in "$@"; do
+  case "$arg" in
+    --host=*) PG_HOST="${arg#*=}"; MODE="tcp" ;;
+    --port=*) PG_PORT="${arg#*=}" ;;
+    --user=*) PG_USER="${arg#*=}" ;;
+    --help|-h)
+      echo "Usage: $0 [--host=H [--port=P] [--user=U]]"
+      echo "  no args        run against docker-compose-test.yml's haf container (local)"
+      echo "  --host=H ...    run over TCP against H:P as user U (CI)"
+      exit 0 ;;
+    *) echo "ERROR: unknown option: $arg"; exit 1 ;;
+  esac
+done
+
+if [[ "$MODE" == "tcp" ]]; then
+  DB="postgresql://${PG_USER}@${PG_HOST}:${PG_PORT}/haf_block_log"
+  echo "Verification mode: TCP (${PG_HOST}:${PG_PORT} user=${PG_USER})"
+  run_sql_file() { psql "$DB" -v ON_ERROR_STOP=on -f "$1"; }
+else
+  COMPOSE=(docker compose --env-file "${REPO_ROOT}/docker/.env" -f "${REPO_ROOT}/docker/docker-compose-test.yml")
+  echo "Verification mode: docker compose exec (haf container)"
+  run_sql_file() {
+    "${COMPOSE[@]}" cp "$1" haf:/tmp/verification.sql
+    "${COMPOSE[@]}" exec -T haf psql -U haf_admin -d haf_block_log -v ON_ERROR_STOP=on -f /tmp/verification.sql
+  }
+fi
+
+cd "${REPO_ROOT}"
 
 echo "===== Guard 1/2: parity (independent in-DB re-derivation) ====="
-"${COMPOSE[@]}" cp tests/parity/mainnet_metrics_parity.sql haf:/tmp/parity.sql
-PSQL_IN_HAF -f /tmp/parity.sql
+run_sql_file tests/parity/mainnet_metrics_parity.sql
 
 echo "===== Guard 2/2: regression (vs external hived snapshot) ====="
-"${COMPOSE[@]}" cp tests/regression/sql/00_schema.sql haf:/tmp/reg_00.sql
-"${COMPOSE[@]}" cp tests/regression/sql/02_compare.sql haf:/tmp/reg_02.sql
-# Render the committed hived fixture into INSERT statements (needs python3 on the job host).
-python3 tests/regression/load_expected_metrics.py tests/regression/account_metrics_dump.json.gz > /tmp/reg_load.sql
-"${COMPOSE[@]}" cp /tmp/reg_load.sql haf:/tmp/reg_load.sql
-PSQL_IN_HAF -f /tmp/reg_00.sql
-PSQL_IN_HAF -f /tmp/reg_load.sql
-PSQL_IN_HAF -f /tmp/reg_02.sql
-PSQL_IN_HAF -c "SELECT haf_stats_test.compare_account_metrics();"
-PSQL_IN_HAF -c "SELECT account, field, expected, actual FROM haf_stats_test.differing_metrics ORDER BY 1,2;"
-DIFF=$(PSQL_IN_HAF -tAc "SELECT COUNT(*) FROM haf_stats_test.differing_metrics;" | tr -d '[:space:]')
-if [ "${DIFF}" != "0" ]; then
+if [[ "$MODE" == "tcp" ]]; then
+  # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
+  bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
+else
+  # No host-side TCP into the local haf image — drive psql inside the container.
+  "${COMPOSE[@]}" cp tests/regression/sql/00_schema.sql haf:/tmp/reg_00.sql
+  "${COMPOSE[@]}" cp tests/regression/sql/02_compare.sql haf:/tmp/reg_02.sql
+  # Render the committed hived fixture into INSERT statements (needs python3 on the host).
+  python3 tests/regression/load_expected_metrics.py tests/regression/account_metrics_dump.json.gz > /tmp/reg_load.sql
+  "${COMPOSE[@]}" cp /tmp/reg_load.sql haf:/tmp/reg_load.sql
+  PSQL_IN_HAF() { "${COMPOSE[@]}" exec -T haf psql -U haf_admin -d haf_block_log -v ON_ERROR_STOP=on "$@"; }
+  PSQL_IN_HAF -f /tmp/reg_00.sql
+  PSQL_IN_HAF -f /tmp/reg_load.sql
+  PSQL_IN_HAF -f /tmp/reg_02.sql
+  PSQL_IN_HAF -c "SELECT haf_stats_test.compare_account_metrics();"
+  PSQL_IN_HAF -c "SELECT account, field, expected, actual FROM haf_stats_test.differing_metrics ORDER BY 1,2;"
+  DIFF=$(PSQL_IN_HAF -tAc "SELECT COUNT(*) FROM haf_stats_test.differing_metrics;" | tr -d '[:space:]')
+  if [ "${DIFF}" != "0" ]; then
     echo "REGRESSION FAILED: ${DIFF} field(s) differ from the hived snapshot"
     exit 1
+  fi
 fi
 
 echo "===== Correctness guards PASSED (parity + external regression) ====="

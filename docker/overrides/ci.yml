@@ -1,0 +1,42 @@
+# CI override for docker-compose.yml — used by the `sync` job.
+#
+# Redirects the haf_datadir / haf_shmdir named volumes to bind mounts under the
+# job-isolated ${HAF_DATA_DIRECTORY} / ${HAF_SHM_DIRECTORY} (set in ci.env), so
+# the synced PostgreSQL state lives on the data-cache-storage runner and can be
+# tar'd into the NFS cache after a clean shutdown. Mirrors
+# balance_tracker/docker/overrides/ci.yml.
+services:
+  haf:
+    # CI-only: serve the datadir prepare_haf_data pre-replayed (--skip-hived)
+    # instead of the production base's HAF_COMMAND replay. The base already sets
+    # the entrypoint and resolves the image to HAF_IMAGE_NAME (from ci.env).
+    command: ["--skip-hived"]
+    environment:
+      PGCTLTIMEOUT: 600
+      # CI runs everything on a throwaway, network-isolated DinD daemon, so blanket
+      # trust is safe and avoids per-role pg_hba drift.
+      PG_ACCESS: "
+        host    all    all    all    trust\n
+        "
+    ports:
+      - "5432:5432"
+    # Re-declare the volume list so the bind-mounted datadir/shm below take effect.
+    volumes:
+      - haf_datadir:/home/hived/datadir
+      - haf_shmdir:/home/hived/shm_dir
+      - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
+      - ./blockchain:/home/hived/datadir/blockchain
+
+volumes:
+  haf_datadir:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ${HAF_DATA_DIRECTORY}/
+  haf_shmdir:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ${HAF_SHM_DIRECTORY}/
