@@ -1,24 +1,53 @@
 ---
-test_name: Network RC utilization is empty before RC exists
+test_name: Network RC utilization prices ops by per-day rate and rolls up per period
 
 marks:
-  - patterntest
+  - synthetic
 
 includes:
   - !include ../common.yaml
 
+# Reads network_op_daily (op_count + op_bytes per day per op type) and prices each (op_type,
+# day) at the rc_op_stats_daily rate effective on/before that day (#33), broken down by op
+# type. Fixtures (ci_setup): vote (op 0) + custom_json (op 18) on 2020-06-05 (cheap rates from
+# 2020-06-01) and 2020-06-10 (pricey rates from 2020-06-08), so the same op type costs more on
+# the later day and rc_total diverges from raw op counts.
 stages:
-  - name: GET /rpc/get_network_rc_utilization for 2016-04
+  - name: granularity=day returns one row per day, each priced at that day's rate
     request:
       url: "{api_url}/rpc/get_network_rc_utilization"
       method: GET
       params:
-        from_date: "2016-04-01"
-        to_date: "2016-04-30"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        granularity: "day"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-05"
+          rc_total: 14000
+          by_label:
+            vote_operation: 10000
+            custom_json_operation: 4000
+        - period: "2020-06-10"
+          rc_total: 70000
+          by_label:
+            vote_operation: 50000
+            custom_json_operation: 20000
+
+  - name: granularity=month aggregates both days into one period
+    request:
+      url: "{api_url}/rpc/get_network_rc_utilization"
+      method: GET
+      params:
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
         granularity: "month"
     response:
       status_code: 200
-      headers:
-        content-type: "application/json; charset=utf-8"
-      verify_response_with:
-        function: validate_response:compare_rest_response_with_pattern
+      json:
+        - period: "2020-06-01"
+          rc_total: 84000
+          by_label:
+            vote_operation: 60000
+            custom_json_operation: 24000

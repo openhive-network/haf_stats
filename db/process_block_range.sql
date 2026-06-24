@@ -17,6 +17,7 @@ BEGIN
     PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
     PERFORM haf_stats_app.process_content_stats(_first_block, _last_block);
     PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
+    PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
 END;
 $$;
 

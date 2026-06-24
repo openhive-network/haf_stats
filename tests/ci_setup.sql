@@ -444,4 +444,42 @@ VALUES
     (2001, '2020-07-01', 'sm_market', 999, 9990)
 ON CONFLICT DO NOTHING;
 
+-- Network RC utilization stub: network_op_daily (mirrors db/process_network_ops.sql) + op
+-- type names + per-op rates. The endpoint prices each (op_type, day) at the rate effective
+-- on/before that day and rolls up per period (issue #33).
+INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
+(0, 'hive::protocol::vote_operation', FALSE),
+(18, 'hive::protocol::custom_json_operation', FALSE)
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_op_daily (
+    day DATE NOT NULL,
+    op_type_id SMALLINT NOT NULL,
+    op_count BIGINT NOT NULL DEFAULT 0,
+    op_bytes BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, op_type_id)
+);
+GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
+
+-- Vote (op 0) rates, two dated rows like the custom_json (op 18) rates above:
+-- cheap from 2020-06-01 (rc = op_count*50 + op_bytes*5), pricey from 2020-06-08 (500 / 50).
+INSERT INTO haf_stats_backend.rc_op_stats_daily
+(day, op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, sample_count)
+VALUES
+('2020-06-01', 0, 50, 5, 97278897, 100, 1),
+('2020-06-08', 0, 500, 50, 97278897, 100, 1)
+ON CONFLICT DO NOTHING;
+
+-- Network activity on two days spanning the rate boundary: 06-05 ops use the cheap rate,
+-- 06-10 the pricey one. Per day, vote rc = count*base + bytes*byte, custom_json likewise.
+--   06-05: vote 100*50+1000*5=10000, custom_json 20*100+200*10=4000 -> total 14000
+--   06-10: vote  50*500+500*50=50000, custom_json 10*1000+100*100=20000 -> total 70000
+INSERT INTO haf_stats_backend.network_op_daily (day, op_type_id, op_count, op_bytes)
+VALUES
+('2020-06-05', 0, 100, 1000),
+('2020-06-05', 18, 20, 200),
+('2020-06-10', 0, 50, 500),
+('2020-06-10', 18, 10, 100)
+ON CONFLICT DO NOTHING;
+
 RESET ROLE;

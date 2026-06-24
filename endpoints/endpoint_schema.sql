@@ -1877,8 +1877,10 @@ $$;
       - Network
     summary: Network RC utilization
     description: >-
-      Time-series of total RC consumption across the network, broken down
-      by operation type or DApp, aggregated by the chosen granularity.
+      Time-series of estimated total RC consumption across the network, broken down by
+      operation type, aggregated by the chosen granularity. RC is a calibrated ESTIMATE
+      (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before
+      each day), as real per-op RC cost is unavailable on this node.
     operationId: haf_stats_endpoints.get_network_rc_utilization
     parameters:
       - in: query
@@ -1957,15 +1959,46 @@ BEGIN
             HINT = 'Must be one of: day, week, month';
     END IF;
     RETURN QUERY
-    WITH per_label AS (
+    -- Resolve the effective rate per (op_type, day) ONCE for the distinct pairs in range (the
+    -- rate on/before that day; else the earliest sample; else generic constants), then price
+    -- each network_op_daily row and roll up per period. RC = op_count*base_rc + op_bytes*byte_rc.
+    WITH op_days AS (
+        SELECT DISTINCT nod.op_type_id, nod.day
+        FROM haf_stats_backend.network_op_daily nod
+        WHERE nod.day BETWEEN _from AND _to
+    ),
+    day_rate AS (
         SELECT
-            DATE_TRUNC(granularity, rol."timestamp")            AS period,
-            COALESCE(rol.custom_json_id, ot.name, 'unknown')    AS label,
-            SUM(rol.rc_cost)::BIGINT                             AS rc_label_total
-        FROM haf_stats_backend.rc_operation_log rol
-        LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
-        WHERE rol."timestamp"::DATE BETWEEN _from AND _to
-        GROUP BY 1, 2
+            od.op_type_id,
+            od.day,
+            COALESCE(rate.base_rc, 120000000) AS base_rc,
+            COALESCE(rate.byte_rc, 475000)    AS byte_rc
+        FROM op_days od
+        LEFT JOIN LATERAL (
+            SELECT r.base_rc, r.byte_rc
+            FROM haf_stats_backend.rc_op_stats_daily r
+            WHERE r.op_type_id = od.op_type_id
+            ORDER BY (r.day <= od.day) DESC,
+                     CASE WHEN r.day <= od.day THEN r.day END DESC,
+                     r.day ASC
+            LIMIT 1
+        ) rate ON TRUE
+    ),
+    priced AS (
+        SELECT
+            DATE_TRUNC(granularity, nod.day)                                AS period,
+            COALESCE(replace(ot.name, 'hive::protocol::', ''),
+                     'op_type_' || nod.op_type_id)                          AS label,
+            (nod.op_count * dr.base_rc + nod.op_bytes * dr.byte_rc)::BIGINT  AS rc
+        FROM haf_stats_backend.network_op_daily nod
+        JOIN day_rate dr ON dr.op_type_id = nod.op_type_id AND dr.day = nod.day
+        LEFT JOIN hafd.operation_types ot ON ot.id = nod.op_type_id
+        WHERE nod.day BETWEEN _from AND _to
+    ),
+    per_label AS (
+        SELECT period, label, SUM(rc)::BIGINT AS rc_label_total
+        FROM priced
+        GROUP BY period, label
     )
     SELECT
         TO_CHAR(per_label.period, 'YYYY-MM-DD')                     AS period,
