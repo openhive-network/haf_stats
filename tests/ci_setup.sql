@@ -83,10 +83,12 @@ INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO 
 
 -- Op type names for the get_network_rc_utilization synthetic test (seeded here, before
 -- SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned by that role).
+-- vote_operation uses id 1 to match cohort_fixture.sql (which also seeds it); ON CONFLICT
+-- (id) keeps both inserts idempotent regardless of load order.
 INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
-(0, 'hive::protocol::vote_operation', FALSE),
+(1, 'hive::protocol::vote_operation', FALSE),
 (18, 'hive::protocol::custom_json_operation', FALSE)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
@@ -464,13 +466,13 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_op_daily (
 );
 GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 
--- Vote (op 0) rates, two dated rows like the custom_json (op 18) rates above:
+-- Vote (op 1) rates, two dated rows like the custom_json (op 18) rates above:
 -- cheap from 2020-06-01 (rc = op_count*50 + op_bytes*5), pricey from 2020-06-08 (500 / 50).
 INSERT INTO haf_stats_backend.rc_op_stats_daily
 (day, op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, sample_count)
 VALUES
-('2020-06-01', 0, 50, 5, 97278897, 100, 1),
-('2020-06-08', 0, 500, 50, 97278897, 100, 1)
+('2020-06-01', 1, 50, 5, 97278897, 100, 1),
+('2020-06-08', 1, 500, 50, 97278897, 100, 1)
 ON CONFLICT DO NOTHING;
 
 -- Network activity on two days spanning the rate boundary: 06-05 ops use the cheap rate,
@@ -479,9 +481,9 @@ ON CONFLICT DO NOTHING;
 --   06-10: vote  50*500+500*50=50000, custom_json 10*1000+100*100=20000 -> total 70000
 INSERT INTO haf_stats_backend.network_op_daily (day, op_type_id, op_count, op_bytes)
 VALUES
-('2020-06-05', 0, 100, 1000),
+('2020-06-05', 1, 100, 1000),
 ('2020-06-05', 18, 20, 200),
-('2020-06-10', 0, 50, 500),
+('2020-06-10', 1, 50, 500),
 ('2020-06-10', 18, 10, 100)
 ON CONFLICT DO NOTHING;
 
