@@ -1627,8 +1627,14 @@ BEGIN
     -- account_op_seq_no range (binary search), because account_operations.block_num is computed
     -- and unindexed - only account_op_seq_no bounds the indexed (account_id, seq) scan, so a
     -- narrow window actually reads only its slice instead of the account's whole history.
-    SELECT MIN(num) INTO _from_block FROM hafd.blocks WHERE created_at >= _from::timestamp;
-    SELECT MAX(num) INTO _to_block FROM hafd.blocks WHERE created_at < (_to + 1)::timestamp;
+    -- ORDER BY ... LIMIT 1, NOT MIN/MAX(num): a combined aggregate with a created_at filter
+    -- cannot use the created_at index and seq-scans hafd.blocks (~71s on a full node). The
+    -- earliest block at/after _from (and latest before _to+1) is a single indexed lookup; num
+    -- is monotonic with created_at, so that row's num is the range bound. (#33 perf)
+    SELECT num INTO _from_block FROM hafd.blocks
+        WHERE created_at >= _from::timestamp ORDER BY created_at ASC LIMIT 1;
+    SELECT num INTO _to_block FROM hafd.blocks
+        WHERE created_at < (_to + 1)::timestamp ORDER BY created_at DESC LIMIT 1;
     IF _from_block IS NULL OR _to_block IS NULL THEN
         RETURN;
     END IF;
