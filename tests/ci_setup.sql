@@ -80,15 +80,27 @@ $$;
 -- Seed one known account so financial summary tests can JOIN without erroring.
 INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (3001, 'rctester') ON CONFLICT DO NOTHING;
 
--- Op type names for the get_network_rc_utilization synthetic test (seeded here, before
--- SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned by that role).
--- vote_operation uses id 1 to match cohort_fixture.sql (which also seeds it); ON CONFLICT
--- (id) keeps both inserts idempotent regardless of load order.
+-- Op type names for the get_network_rc_utilization + get_account_rc_footprint synthetic tests
+-- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
+-- by that role). vote_operation uses id 1 to match cohort_fixture.sql (which also seeds it);
+-- ON CONFLICT (id) keeps both inserts idempotent regardless of load order. Op 64 is a virtual
+-- op, present so the rc-footprint test proves virtual ops are excluded.
 INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
 (1, 'hive::protocol::vote_operation', FALSE),
-(18, 'hive::protocol::custom_json_operation', FALSE)
+(18, 'hive::protocol::custom_json_operation', FALSE),
+(64, 'hive::protocol::producer_reward_operation', TRUE)
 ON CONFLICT (id) DO NOTHING;
+
+-- Blocks for the get_account_rc_footprint synthetic test (March 2021; nums chosen above the
+-- other fixtures' blocks). The endpoint maps the requested date range to a block range, then
+-- maps each op's block back to its day.
+INSERT INTO hafd.blocks (num, created_at) VALUES
+(5000, '2021-03-01 00:00:00'),
+(5001, '2021-03-01 00:01:00'),
+(6000, '2021-03-10 00:00:00')
+ON CONFLICT (num) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
@@ -485,6 +497,45 @@ VALUES
 ('2020-06-05', 18, 20, 200),
 ('2020-06-10', 1, 50, 500),
 ('2020-06-10', 18, 10, 100)
+ON CONFLICT DO NOTHING;
+
+-- Account RC footprint stub: haf_stats_app.account_operations_view (mirrors the HAF view the
+-- endpoint reads on-demand) + fixtures for account rctester (id 3001) in March 2021. The
+-- endpoint counts ops the account SIGNED (account_id = transacting_account_id) and prices them
+-- by avg_cost_rc (op_type) / base+byte (app). vote (op 1) avg_cost = 97,278,897, custom_json
+-- (op 18) avg_cost = 167,828,015 (the latest rate on/before 2021-03 is the 2020-06-08 row).
+CREATE TABLE IF NOT EXISTS haf_stats_app.account_operations_view (
+    block_num INT NOT NULL,
+    account_id INT NOT NULL,
+    transacting_account_id INT NOT NULL,
+    account_op_seq_no INT NOT NULL,
+    operation_id BIGINT NOT NULL,
+    op_type_id SMALLINT NOT NULL,
+    PRIMARY KEY (account_id, account_op_seq_no)
+);
+GRANT SELECT ON haf_stats_app.account_operations_view TO haf_stats_user;
+
+INSERT INTO haf_stats_app.account_operations_view
+(block_num, account_id, transacting_account_id, account_op_seq_no, operation_id, op_type_id)
+VALUES
+-- signed votes (op 1): 3 on 2021-03-01, 1 on 2021-03-10 = 4 -> 4 * 97278897 = 389115588
+(5000, 3001, 3001, 1, 50001, 1),
+(5000, 3001, 3001, 2, 50002, 1),
+(5001, 3001, 3001, 3, 50003, 1),
+(6000, 3001, 3001, 4, 60001, 1),
+-- signed custom_json (op 18): 2 on 2021-03-01 -> 2 * 167828015 = 335656030
+(5000, 3001, 3001, 5, 50010, 18),
+(5000, 3001, 3001, 6, 50011, 18),
+-- received vote (transacting_account_id <> account_id) -> EXCLUDED (rctester is not the payer)
+(5000, 3001, 9999, 7, 50020, 1),
+-- virtual producer_reward (op 64) -> EXCLUDED (is_virtual, consumes no RC)
+(5000, 3001, 3001, 8, 50030, 64)
+ON CONFLICT (account_id, account_op_seq_no) DO NOTHING;
+
+-- rctester custom_json for the group_by=app test: 2 sm_claim_daily ops on 2021-03-01,
+-- priced by the op-18 base+byte rate effective then (2020-06-08: 1000/100) = 2*1000+200*100 = 22000.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
+VALUES (3001, '2021-03-01', 'sm_claim_daily', 2, 200)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;

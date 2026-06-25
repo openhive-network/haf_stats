@@ -1522,8 +1522,11 @@ $$;
       - Account
     summary: Account RC footprint
     description: >-
-      Breakdown of Resource Credit consumption for an account over a time range,
-      grouped by operation type or DApp.
+      Breakdown of estimated Resource Credit consumption for an account over a time range,
+      grouped by operation type or DApp. Counts the ops the account itself signed (the RC
+      payer) and prices them from the calibrated rc_op_stats_daily rates; RC is an ESTIMATE
+      (op_type uses op_count * average rc_api cost), as real per-op RC cost is unavailable on
+      this node.
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
@@ -1593,6 +1596,9 @@ AS $$
 DECLARE
     _from DATE;
     _to DATE;
+    _account_id INT;
+    _from_block INT;
+    _to_block INT;
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -1604,29 +1610,100 @@ BEGIN
             MESSAGE = 'invalid group_by: ' || COALESCE(group_by, '(null)'),
             HINT = 'Must be one of: op_type, app';
     END IF;
-    RETURN QUERY
-    WITH base AS (
-        SELECT
-            CASE group_by
-                WHEN 'app' THEN COALESCE(rol.custom_json_id, 'non-custom_json')
-                ELSE            COALESCE(ot.name, 'unknown')
-            END      AS label,
-            rol.rc_cost
-        FROM haf_stats_backend.rc_operation_log rol
-        JOIN hafd.accounts a ON a.id = rol.account_id
-        LEFT JOIN hafd.operation_types ot ON ot.id = rol.op_type_id
-        WHERE a.name             = account
-          AND rol."timestamp"::DATE BETWEEN _from AND _to
-    ),
-    totals AS (SELECT SUM(base.rc_cost) AS grand_total FROM base)
-    SELECT
-        base.label,
-        SUM(base.rc_cost)::BIGINT                                       AS rc_consumed,
-        COUNT(*)::BIGINT                                                AS op_count,
-        ROUND(SUM(base.rc_cost) * 100.0 / NULLIF(t.grand_total, 0), 2)  AS pct
-    FROM base, totals t
-    GROUP BY base.label, t.grand_total
-    ORDER BY 2 DESC;
+
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
+    IF _account_id IS NULL THEN
+        RETURN;   -- unknown account -> empty result
+    END IF;
+
+    -- Estimated RC footprint, computed ON-DEMAND from account_operations (issue #33): the
+    -- account's own signed ops are those with account_id = transacting_account_id (the tx
+    -- signer = the RC payer), which correctly excludes ops it only received. The date range
+    -- is converted to a block range so the scan rides the indexed (account_id, block) lookup
+    -- instead of the account's whole history. Virtual ops are excluded (they consume no RC).
+    SELECT MIN(num) INTO _from_block FROM hafd.blocks WHERE created_at >= _from::timestamp;
+    SELECT MAX(num) INTO _to_block FROM hafd.blocks WHERE created_at < (_to + 1)::timestamp;
+    IF _from_block IS NULL OR _to_block IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF group_by = 'op_type' THEN
+        -- RC = op_count * avg_cost_rc per op type (op-count model). avg_cost_rc is the rc_api
+        -- average for the type, applied at the rate effective on/before each op's day - this
+        -- avoids a per-op hafd.operations body join (the on-demand cost driver).
+        RETURN QUERY
+        WITH acct_ops AS (
+            SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
+            FROM haf_stats_app.account_operations_view ao
+            JOIN hafd.blocks bv ON bv.num = ao.block_num
+            JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
+            WHERE ao.account_id = _account_id
+              AND ao.transacting_account_id = ao.account_id
+              AND ao.block_num BETWEEN _from_block AND _to_block
+            GROUP BY ao.op_type_id, bv.created_at::DATE
+        ),
+        priced AS (
+            SELECT
+                COALESCE(replace(ot.name, 'hive::protocol::', ''),
+                         'op_type_' || ao.op_type_id)                          AS label,
+                ao.op_count,
+                (ao.op_count * haf_stats_app.rc_avg_cost(ao.op_type_id, ao.day))::BIGINT AS rc
+            FROM acct_ops ao
+            LEFT JOIN hafd.operation_types ot ON ot.id = ao.op_type_id
+        ),
+        agg AS (
+            SELECT priced.label,
+                   SUM(priced.rc)::BIGINT       AS rc_consumed,
+                   SUM(priced.op_count)::BIGINT AS op_count
+            FROM priced GROUP BY priced.label
+        ),
+        tot AS (SELECT SUM(agg.rc_consumed) AS gt FROM agg)
+        SELECT agg.label, agg.rc_consumed, agg.op_count,
+               ROUND(agg.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2)
+        FROM agg, tot t
+        ORDER BY agg.rc_consumed DESC, agg.label;
+    ELSE
+        -- group_by = 'app': size-aware custom_json apps from the pre-aggregated
+        -- account_custom_json_daily (op_count + op_bytes per json_id, base+byte op-18 rate),
+        -- plus one 'non-custom_json' bucket for all other signed ops (op_count * avg_cost).
+        RETURN QUERY
+        WITH cj AS (
+            SELECT acj.json_id                  AS label,
+                   SUM(acj.op_count)::BIGINT     AS op_count,
+                   SUM(acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)::BIGINT AS rc_consumed
+            FROM haf_stats_backend.account_custom_json_daily acj
+            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
+            WHERE acj.account_id = _account_id
+              AND acj.day BETWEEN _from AND _to
+            GROUP BY acj.json_id
+        ),
+        noncj AS (
+            SELECT 'non-custom_json'::TEXT       AS label,
+                   SUM(t.op_count)::BIGINT        AS op_count,
+                   SUM(t.op_count * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed
+            FROM (
+                SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
+                FROM haf_stats_app.account_operations_view ao
+                JOIN hafd.blocks bv ON bv.num = ao.block_num
+                JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
+                WHERE ao.account_id = _account_id
+                  AND ao.transacting_account_id = ao.account_id
+                  AND ao.block_num BETWEEN _from_block AND _to_block
+                  AND ao.op_type_id <> 18
+                GROUP BY ao.op_type_id, bv.created_at::DATE
+            ) t
+        ),
+        combined AS (
+            SELECT cj.label, cj.rc_consumed, cj.op_count FROM cj
+            UNION ALL
+            SELECT noncj.label, noncj.rc_consumed, noncj.op_count FROM noncj WHERE noncj.op_count > 0
+        ),
+        tot AS (SELECT SUM(combined.rc_consumed) AS gt FROM combined)
+        SELECT combined.label, combined.rc_consumed, combined.op_count,
+               ROUND(combined.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2)
+        FROM combined, tot t
+        ORDER BY combined.rc_consumed DESC, combined.label;
+    END IF;
 END;
 $$;
 

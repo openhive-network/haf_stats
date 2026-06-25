@@ -207,4 +207,57 @@ ORDER BY op_type_id ASC, day DESC;
 
 GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
 
+-- ---------------------------------------------------------------------------
+-- Per-day rate accessors (read-time pricing, issue #33)
+--
+-- Resolve the rate effective ON/BEFORE a given day for an op type: the most recent sampled
+-- day <= _day, else the earliest sample (for activity predating sampling), else a default.
+-- Used by the estimated-RC endpoints so each op is priced at its era's rate as the
+-- rc_op_stats_daily series grows.
+-- ---------------------------------------------------------------------------
+
+-- Average total RC cost per op (op-count model, no payload-size term) - used where a
+-- per-op body/byte join would be too expensive (e.g. on-demand account RC footprint).
+CREATE OR REPLACE FUNCTION haf_stats_app.rc_avg_cost(_op_type_id SMALLINT, _day DATE)
+RETURNS BIGINT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE((
+        SELECT r.avg_cost_rc
+        FROM haf_stats_backend.rc_op_stats_daily r
+        WHERE r.op_type_id = _op_type_id
+        ORDER BY (r.day <= _day) DESC,
+                 CASE WHEN r.day <= _day THEN r.day END DESC,
+                 r.day ASC
+        LIMIT 1
+    ), 120000000::BIGINT)
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.rc_avg_cost(SMALLINT, DATE) TO haf_stats_user;
+
+-- Size-aware (base_rc, byte_rc) rate; always returns exactly one row (seeded custom_json
+-- defaults when no sample exists), so callers can CROSS JOIN LATERAL it per row.
+CREATE OR REPLACE FUNCTION haf_stats_app.rc_rate(_op_type_id SMALLINT, _day DATE)
+RETURNS TABLE (base_rc BIGINT, byte_rc NUMERIC)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT
+        COALESCE(r.base_rc, 23428456::BIGINT) AS base_rc,
+        COALESCE(r.byte_rc, 475000::NUMERIC)  AS byte_rc
+    FROM (SELECT 1) z(x)
+    LEFT JOIN LATERAL (
+        SELECT rr.base_rc, rr.byte_rc
+        FROM haf_stats_backend.rc_op_stats_daily rr
+        WHERE rr.op_type_id = _op_type_id
+        ORDER BY (rr.day <= _day) DESC,
+                 CASE WHEN rr.day <= _day THEN rr.day END DESC,
+                 rr.day ASC
+        LIMIT 1
+    ) r ON TRUE
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
+
 RESET ROLE;
