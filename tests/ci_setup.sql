@@ -48,8 +48,12 @@ CREATE TABLE IF NOT EXISTS hive.account_operations_view (
     account_id INT NOT NULL,
     transacting_account_id INT NOT NULL,
     block_num INT NOT NULL,
-    op_type_id INT NOT NULL
+    op_type_id INT NOT NULL,
+    account_op_seq_no BIGINT   -- nullable: existing stub rows (cohort/content) do not set it
 );
+-- get_account_rc_footprint reads this view on-demand as haf_stats_user.
+GRANT USAGE ON SCHEMA hive TO haf_stats_user;
+GRANT SELECT ON hive.account_operations_view TO haf_stats_user;
 
 -- Stubs of the HAF helpers process_account_cohorts (Step 2) and
 -- process_active_users rely on. The real HAF schema provides these; the CI stub
@@ -102,6 +106,30 @@ INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fu
 (5001, '2021-03-01 00:01:00', 1000000000, 1000000000),
 (6000, '2021-03-10 00:00:00', 1000000000, 1000000000)
 ON CONFLICT (num) DO NOTHING;
+
+-- Account-operations fixtures for get_account_rc_footprint (rctester, id 3001), in
+-- hive.account_operations_view (the global view the endpoint reads). The endpoint counts ops
+-- the account SIGNED (account_id = transacting_account_id). vote (op 1) avg_cost = 97,278,897,
+-- custom_json (op 18) avg_cost = 167,828,015 (latest rate on/before 2021-03 = the 2020-06-08
+-- row). Blocks 5000-6000 sit well outside the cohort fixture's 1000-1005 range, so
+-- process_account_cohorts does not see them. account_op_seq_no must be dense (1..8) per account
+-- for the binary-search helper.
+INSERT INTO hive.account_operations_view
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no)
+VALUES
+-- signed votes (op 1): 3 on 2021-03-01, 1 on 2021-03-10 = 4 -> 4 * 97278897 = 389115588
+(3001, 3001, 5000, 1, 1),
+(3001, 3001, 5000, 1, 2),
+(3001, 3001, 5001, 1, 3),
+(3001, 3001, 6000, 1, 4),
+-- signed custom_json (op 18): 2 on 2021-03-01 -> 2 * 167828015 = 335656030
+(3001, 3001, 5000, 18, 5),
+(3001, 3001, 5000, 18, 6),
+-- received vote (transacting_account_id <> account_id) -> EXCLUDED (rctester is not the payer)
+(3001, 9999, 5000, 1, 7),
+-- virtual producer_reward (op 64) -> EXCLUDED (is_virtual, consumes no RC)
+(3001, 3001, 5000, 64, 8)
+ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
@@ -238,16 +266,6 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.custom_json_app_registry (
     app_name TEXT NOT NULL,
     category TEXT NOT NULL,
     homepage TEXT
-);
-
-CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_operation_log (
-    id BIGSERIAL PRIMARY KEY,
-    block_num INT NOT NULL,
-    account_id INT NOT NULL,
-    op_type_id SMALLINT,
-    custom_json_id TEXT,
-    rc_cost BIGINT NOT NULL,
-    "timestamp" TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_members (
@@ -426,13 +444,6 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_op_stats_daily (
 );
 GRANT SELECT ON haf_stats_backend.rc_op_stats_daily TO haf_stats_user;
 
-CREATE OR REPLACE VIEW haf_stats_backend.rc_op_rate_latest AS
-SELECT DISTINCT ON (op_type_id)
-    op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, day
-FROM haf_stats_backend.rc_op_stats_daily
-ORDER BY op_type_id, day DESC;
-GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
-
 -- Per-day rate accessors (mirror db/process_rc.sql, which the stub does not load) - used by
 -- get_account_rc_footprint on-demand.
 CREATE OR REPLACE FUNCTION haf_stats_app.rc_avg_cost(_op_type_id SMALLINT, _day DATE)
@@ -460,25 +471,25 @@ $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
 
 -- Block-range -> account_op_seq_no-range binary search (mirrors db/process_rc.sql) used by
--- get_account_rc_footprint. References haf_stats_app.account_operations_view, created below.
+-- get_account_rc_footprint. References hive.account_operations_view, seeded before SET ROLE.
 CREATE OR REPLACE FUNCTION haf_stats_app.account_op_seq_range(_account_id INT, _from_block INT, _to_block INT)
 RETURNS TABLE (lo_seq BIGINT, hi_seq BIGINT) LANGUAGE plpgsql STABLE AS $$
 DECLARE _min BIGINT; _max BIGINT; _l BIGINT; _r BIGINT; _mid BIGINT; _blk INT; _lo BIGINT; _hi BIGINT;
 BEGIN
     -- Two single-row index probes (not combined MIN+MAX, which degrades to a full per-account
     -- scan through the view's join filter on real data); mirrors db/process_rc.sql. (#40 review)
-    SELECT account_op_seq_no INTO _min FROM haf_stats_app.account_operations_view
+    SELECT account_op_seq_no INTO _min FROM hive.account_operations_view
         WHERE account_id = _account_id ORDER BY account_op_seq_no ASC LIMIT 1;
-    SELECT account_op_seq_no INTO _max FROM haf_stats_app.account_operations_view
+    SELECT account_op_seq_no INTO _max FROM hive.account_operations_view
         WHERE account_id = _account_id ORDER BY account_op_seq_no DESC LIMIT 1;
     IF _max IS NULL THEN RETURN; END IF;
     _l := _min; _r := _max;
     WHILE _l <= _r LOOP _mid := (_l + _r) / 2;
-        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        SELECT block_num INTO _blk FROM hive.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
         IF _blk >= _from_block THEN _lo := _mid; _r := _mid - 1; ELSE _l := _mid + 1; END IF; END LOOP;
     _l := _min; _r := _max;
     WHILE _l <= _r LOOP _mid := (_l + _r) / 2;
-        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        SELECT block_num INTO _blk FROM hive.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
         IF _blk <= _to_block THEN _hi := _mid; _l := _mid + 1; ELSE _r := _mid - 1; END IF; END LOOP;
     lo_seq := _lo; hi_seq := _hi; RETURN NEXT;
 END; $$;
@@ -551,38 +562,8 @@ VALUES
 ('2020-06-10', 18, 10, 100)
 ON CONFLICT DO NOTHING;
 
--- Account RC footprint stub: haf_stats_app.account_operations_view (mirrors the HAF view the
--- endpoint reads on-demand) + fixtures for account rctester (id 3001) in March 2021. The
--- endpoint counts ops the account SIGNED (account_id = transacting_account_id) and prices them
--- by avg_cost_rc (op_type) / base+byte (app). vote (op 1) avg_cost = 97,278,897, custom_json
--- (op 18) avg_cost = 167,828,015 (the latest rate on/before 2021-03 is the 2020-06-08 row).
-CREATE TABLE IF NOT EXISTS haf_stats_app.account_operations_view (
-    block_num INT NOT NULL,
-    account_id INT NOT NULL,
-    transacting_account_id INT NOT NULL,
-    account_op_seq_no INT NOT NULL,
-    operation_id BIGINT NOT NULL,
-    op_type_id SMALLINT NOT NULL,
-    PRIMARY KEY (account_id, account_op_seq_no)
-);
-GRANT SELECT ON haf_stats_app.account_operations_view TO haf_stats_user;
-
-INSERT INTO haf_stats_app.account_operations_view
-(block_num, account_id, transacting_account_id, account_op_seq_no, operation_id, op_type_id)
-VALUES
--- signed votes (op 1): 3 on 2021-03-01, 1 on 2021-03-10 = 4 -> 4 * 97278897 = 389115588
-(5000, 3001, 3001, 1, 50001, 1),
-(5000, 3001, 3001, 2, 50002, 1),
-(5001, 3001, 3001, 3, 50003, 1),
-(6000, 3001, 3001, 4, 60001, 1),
--- signed custom_json (op 18): 2 on 2021-03-01 -> 2 * 167828015 = 335656030
-(5000, 3001, 3001, 5, 50010, 18),
-(5000, 3001, 3001, 6, 50011, 18),
--- received vote (transacting_account_id <> account_id) -> EXCLUDED (rctester is not the payer)
-(5000, 3001, 9999, 7, 50020, 1),
--- virtual producer_reward (op 64) -> EXCLUDED (is_virtual, consumes no RC)
-(5000, 3001, 3001, 8, 50030, 64)
-ON CONFLICT (account_id, account_op_seq_no) DO NOTHING;
+-- (account-operations fixtures for rctester are seeded into hive.account_operations_view
+-- before SET ROLE - that is the global view the endpoint reads.)
 
 -- rctester custom_json for the group_by=app test: 2 sm_claim_daily ops on 2021-03-01,
 -- priced by the op-18 base+byte rate effective then (2020-06-08: 1000/100) = 2*1000+200*100 = 22000.
