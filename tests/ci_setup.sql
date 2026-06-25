@@ -465,8 +465,12 @@ CREATE OR REPLACE FUNCTION haf_stats_app.account_op_seq_range(_account_id INT, _
 RETURNS TABLE (lo_seq BIGINT, hi_seq BIGINT) LANGUAGE plpgsql STABLE AS $$
 DECLARE _min BIGINT; _max BIGINT; _l BIGINT; _r BIGINT; _mid BIGINT; _blk INT; _lo BIGINT; _hi BIGINT;
 BEGIN
-    SELECT MIN(account_op_seq_no), MAX(account_op_seq_no) INTO _min, _max
-    FROM haf_stats_app.account_operations_view WHERE account_id = _account_id;
+    -- Two single-row index probes (not combined MIN+MAX, which degrades to a full per-account
+    -- scan through the view's join filter on real data); mirrors db/process_rc.sql. (#40 review)
+    SELECT account_op_seq_no INTO _min FROM haf_stats_app.account_operations_view
+        WHERE account_id = _account_id ORDER BY account_op_seq_no ASC LIMIT 1;
+    SELECT account_op_seq_no INTO _max FROM haf_stats_app.account_operations_view
+        WHERE account_id = _account_id ORDER BY account_op_seq_no DESC LIMIT 1;
     IF _max IS NULL THEN RETURN; END IF;
     _l := _min; _r := _max;
     WHILE _l <= _r LOOP _mid := (_l + _r) / 2;

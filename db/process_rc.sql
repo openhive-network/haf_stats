@@ -286,8 +286,14 @@ DECLARE
     _lo BIGINT;
     _hi BIGINT;
 BEGIN
-    SELECT MIN(account_op_seq_no), MAX(account_op_seq_no) INTO _min, _max
-    FROM haf_stats_app.account_operations_view WHERE account_id = _account_id;
+    -- Two single-row index probes, NOT a combined MIN+MAX: a combined min/max cannot use the
+    -- index InitPlan, and through the account_operations_view's irreversible join filter it
+    -- degrades to a full per-account scan (~13s for an 8M-op account). ORDER BY ... LIMIT 1
+    -- each rides the (account_id, account_op_seq_no) index (~5ms). (#40 review)
+    SELECT account_op_seq_no INTO _min FROM haf_stats_app.account_operations_view
+        WHERE account_id = _account_id ORDER BY account_op_seq_no ASC LIMIT 1;
+    SELECT account_op_seq_no INTO _max FROM haf_stats_app.account_operations_view
+        WHERE account_id = _account_id ORDER BY account_op_seq_no DESC LIMIT 1;
     IF _max IS NULL THEN
         RETURN;
     END IF;
