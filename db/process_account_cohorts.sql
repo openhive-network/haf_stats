@@ -182,37 +182,20 @@ BEGIN
     -- uses. This deliberately EXCLUDES pow/pow2 mining (authorless), so a mining
     -- bot re-mining at D7 is not counted as user retention.
     --
-    -- Perf: drive from the bounded set of operations IN THIS BATCH, not from the
-    -- ever-growing member table. The previous member-driven probe scanned all
-    -- ~12k members whose 91-day window overlapped the batch and index-probed
-    -- account_operations once each — O(accumulated members), ~4.3s/batch and
-    -- worsening as the cohort grows. account_operations has no block/operation_id
-    -- index (only (account_id, ...)), so it cannot be range-scanned by block at
-    -- all. operations_view CAN: bound by the operation_id half-open range
-    -- [op_id(first,0), op_id(last+1,0)) to PK range-scan exactly this block range
-    -- (the process_active_users / haf_block_explorer idiom), making Step 2
-    -- O(ops in batch) — a few hundred rows — instead of O(members).
+    -- Perf: drive from the shared authored-op set prepared by process_block_range
+    -- (or lazily here for direct rebuild calls), not from the ever-growing member
+    -- table. The previous member-driven probe scanned all ~12k members whose
+    -- 91-day window overlapped the batch and index-probed account_operations once
+    -- each — O(accumulated members), ~4.3s/batch and worsening as the cohort grows.
+    -- account_operations has no block/operation_id index (only (account_id, ...)),
+    -- so it cannot be range-scanned by block at all. The shared helper scans
+    -- operations_view once for both this processor and process_active_users using
+    -- the operation_id half-open range [op_id(first,0), op_id(last+1,0)).
+    PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
     WITH batch_authored AS MATERIALIZED (
-        -- One row per (authoring account, op timestamp) in this block range.
-        -- Pre-exclude virtual ops so get_required_authorities is never evaluated
-        -- on the ~half of the stream that can never yield an author; authorless
-        -- real ops (pow/pow2) are dropped by the INNER LATERAL join.
-        --
-        -- Use the crash-safe wrapper (haf_stats_app.sql), not raw
-        -- hive.get_required_authorities: a handful of legacy ops past the 5M CI cap
-        -- FC_ASSERT inside it, which would abort the batch and restart-loop the
-        -- processor; the wrapper yields no rows for such an op (treated authorless).
-        SELECT DISTINCT ni.id AS account_id, b.created_at AS op_time
-        FROM hive.operations_view ov
-        JOIN hafd.blocks b ON b.num = ov.block_num
-        CROSS JOIN LATERAL haf_stats_app.get_required_authorities_safe(ov.body) ra
-        JOIN hive.accounts_view ni ON ni.name = ra.account_name
-        WHERE ov.block_num BETWEEN _first_block AND _last_block
-          AND ov.id >= hafd.operation_id(_first_block, 0)
-          AND ov.id <  hafd.operation_id(_last_block + 1, 0)
-          AND ov.op_type_id IN (
-              SELECT id FROM hafd.operation_types WHERE NOT is_virtual
-          )
+        -- Preserve the old retention grain: one row per account per op timestamp.
+        SELECT DISTINCT account_id, op_time
+        FROM haf_stats_batch_authored_ops
     )
     UPDATE haf_stats_backend.account_cohort_members acm
     SET

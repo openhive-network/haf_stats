@@ -30,15 +30,11 @@ VALUES
 ON CONFLICT (num) DO NOTHING;
 
 -- Step 1 source: the account_created virtual op (one per new account at block 1000).
-INSERT INTO hive.operations_view (id, block_num, op_type_id, body)
+INSERT INTO hafd.operations (id, op_type_id, body_value)
 SELECT
     hafd.operation_id(1000, (ROW_NUMBER() OVER ())::INT),
-    1000,
     100,
-    JSONB_BUILD_OBJECT(
-        'value',
-        JSONB_BUILD_OBJECT('new_account_name', account_name)
-    )
+    JSONB_BUILD_OBJECT('new_account_name', account_name)
 FROM (
     VALUES
         ('retained-d7'),
@@ -46,17 +42,19 @@ FROM (
         ('retained-d90'),
         ('early-only'),
         ('inactive')
-) AS created(account_name);
+) AS created(account_name)
+ON CONFLICT (id) DO NOTHING;
 
 -- Step 2 source: retention activity is now AUTHORED ops in operations_view; the
 -- get_required_authorities stub resolves the synthetic '_signer' field. Each is a
 -- non-virtual vote_operation (op_type 1) the account signed in a given window.
-INSERT INTO hive.operations_view (id, block_num, op_type_id, body)
+INSERT INTO hafd.operations (id, op_type_id, body_value)
 VALUES
-    (hafd.operation_id(1001, 1), 1001, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'early-only'))),  -- D2: outside every [N,N+1) window
-    (hafd.operation_id(1002, 1), 1002, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d7'))), -- D7
-    (hafd.operation_id(1003, 1), 1003, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d30'))),-- D30
-    (hafd.operation_id(1004, 1), 1004, 1, JSONB_BUILD_OBJECT('value', JSONB_BUILD_OBJECT('_signer', 'retained-d90')));-- D90
+    (hafd.operation_id(1001, 1), 1, JSONB_BUILD_OBJECT('_signer', 'early-only')),  -- D2: outside every [N,N+1) window
+    (hafd.operation_id(1002, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d7')), -- D7
+    (hafd.operation_id(1003, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d30')),-- D30
+    (hafd.operation_id(1004, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d90')) -- D90
+ON CONFLICT (id) DO NOTHING;
 
 SET ROLE haf_stats_owner;
 

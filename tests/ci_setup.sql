@@ -34,15 +34,32 @@ CREATE TABLE IF NOT EXISTS hafd.blocks (
     total_vesting_fund_hive BIGINT NOT NULL DEFAULT 0
 );
 
+-- hafd.operation_id(block, op_in_block): a monotonic op id whose ordering tracks
+-- block number, so the half-open [operation_id(first,0), operation_id(last+1,0))
+-- range selects exactly a block range (mirrors real HAF's block-packed ids).
+CREATE OR REPLACE FUNCTION hafd.operation_id(_block INT, _op INT)
+RETURNS BIGINT LANGUAGE sql IMMUTABLE AS $$
+    SELECT _block::BIGINT * 1000000 + _op
+$$;
+
 -- Minimal HAF operation relations used by process_account_cohorts.sql.
--- id: operations carry a monotonic op id (real HAF packs the block number into
--- the high bits). process_account_cohorts range-scans it via hafd.operation_id.
-CREATE TABLE IF NOT EXISTS hive.operations_view (
-    id BIGINT,
-    block_num INT NOT NULL,
+-- Balance tracker mocks insert parsed operation values into hafd.operations.body_value;
+-- keep the haf_stats stub shaped the same way and expose hive.operations_view as the
+-- HAF-style read view that processors scan.
+CREATE TABLE IF NOT EXISTS hafd.operations (
+    id BIGINT PRIMARY KEY,
     op_type_id INT NOT NULL,
-    body JSONB NOT NULL
+    body_value JSONB NOT NULL
 );
+
+CREATE OR REPLACE VIEW hive.operations_view AS
+SELECT
+    id,
+    (id / 1000000)::INT AS block_num,
+    op_type_id,
+    JSONB_BUILD_OBJECT('value', body_value) AS body,
+    body_value
+FROM hafd.operations;
 
 CREATE TABLE IF NOT EXISTS hive.account_operations_view (
     account_id INT NOT NULL,
@@ -56,14 +73,6 @@ CREATE TABLE IF NOT EXISTS hive.account_operations_view (
 -- process_active_users rely on. The real HAF schema provides these; the CI stub
 -- stack reproduces just enough for the synthetic cohort fixture to exercise the
 -- real processor path.
-
--- hafd.operation_id(block, op_in_block): a monotonic op id whose ordering tracks
--- block number, so the half-open [operation_id(first,0), operation_id(last+1,0))
--- range selects exactly a block range (mirrors real HAF's block-packed ids).
-CREATE OR REPLACE FUNCTION hafd.operation_id(_block INT, _op INT)
-RETURNS BIGINT LANGUAGE sql IMMUTABLE AS $$
-    SELECT _block::BIGINT * 1000000 + _op
-$$;
 
 -- hive.accounts_view: name -> id resolution (real HAF view over hafd.accounts).
 CREATE OR REPLACE VIEW hive.accounts_view AS
