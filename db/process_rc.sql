@@ -260,4 +260,61 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
 
+-- Translate a block range to an account's account_op_seq_no range via binary search over the
+-- unique (account_id, account_op_seq_no) index. account_operations.block_num is computed
+-- (operation_id_to_block_num) and unindexed, so a block-range predicate is only a heap Filter
+-- and cannot bound the scan (issue #33 review). account_op_seq_no is dense and monotonic with
+-- block within an account, so ~log2(n) single-row probes find the [lo, hi] seq_no covering ops
+-- in [_from_block, _to_block]; callers add account_op_seq_no BETWEEN lo AND hi to ride the
+-- index. Returns no row when the account has no ops (so callers can short-circuit).
+CREATE OR REPLACE FUNCTION haf_stats_app.account_op_seq_range(
+    _account_id INT,
+    _from_block INT,
+    _to_block INT
+)
+RETURNS TABLE (lo_seq BIGINT, hi_seq BIGINT)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _min BIGINT;
+    _max BIGINT;
+    _l BIGINT;
+    _r BIGINT;
+    _mid BIGINT;
+    _blk INT;
+    _lo BIGINT;
+    _hi BIGINT;
+BEGIN
+    SELECT MIN(account_op_seq_no), MAX(account_op_seq_no) INTO _min, _max
+    FROM haf_stats_app.account_operations_view WHERE account_id = _account_id;
+    IF _max IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- smallest seq whose block_num >= _from_block
+    _l := _min; _r := _max;
+    WHILE _l <= _r LOOP
+        _mid := (_l + _r) / 2;
+        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view
+            WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        IF _blk >= _from_block THEN _lo := _mid; _r := _mid - 1; ELSE _l := _mid + 1; END IF;
+    END LOOP;
+
+    -- largest seq whose block_num <= _to_block
+    _l := _min; _r := _max;
+    WHILE _l <= _r LOOP
+        _mid := (_l + _r) / 2;
+        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view
+            WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        IF _blk <= _to_block THEN _hi := _mid; _l := _mid + 1; ELSE _r := _mid - 1; END IF;
+    END LOOP;
+
+    lo_seq := _lo; hi_seq := _hi;
+    RETURN NEXT;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.account_op_seq_range(INT, INT, INT) TO haf_stats_user;
+
 RESET ROLE;

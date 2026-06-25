@@ -1599,6 +1599,8 @@ DECLARE
     _account_id INT;
     _from_block INT;
     _to_block INT;
+    _lo_seq BIGINT;
+    _hi_seq BIGINT;
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -1618,13 +1620,23 @@ BEGIN
 
     -- Estimated RC footprint, computed ON-DEMAND from account_operations (issue #33): the
     -- account's own signed ops are those with account_id = transacting_account_id (the tx
-    -- signer = the RC payer), which correctly excludes ops it only received. The date range
-    -- is converted to a block range so the scan rides the indexed (account_id, block) lookup
-    -- instead of the account's whole history. Virtual ops are excluded (they consume no RC).
+    -- signer = the RC payer), which correctly excludes ops it only received. Virtual ops are
+    -- excluded (they consume no RC).
+    --
+    -- The date range is translated to a block range and then to this account's
+    -- account_op_seq_no range (binary search), because account_operations.block_num is computed
+    -- and unindexed - only account_op_seq_no bounds the indexed (account_id, seq) scan, so a
+    -- narrow window actually reads only its slice instead of the account's whole history.
     SELECT MIN(num) INTO _from_block FROM hafd.blocks WHERE created_at >= _from::timestamp;
     SELECT MAX(num) INTO _to_block FROM hafd.blocks WHERE created_at < (_to + 1)::timestamp;
     IF _from_block IS NULL OR _to_block IS NULL THEN
         RETURN;
+    END IF;
+
+    SELECT lo_seq, hi_seq INTO _lo_seq, _hi_seq
+    FROM haf_stats_app.account_op_seq_range(_account_id, _from_block, _to_block);
+    IF _lo_seq IS NULL OR _hi_seq IS NULL OR _lo_seq > _hi_seq THEN
+        RETURN;   -- no ops in the window
     END IF;
 
     IF group_by = 'op_type' THEN
@@ -1639,6 +1651,7 @@ BEGIN
             JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
             WHERE ao.account_id = _account_id
               AND ao.transacting_account_id = ao.account_id
+              AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
               AND ao.block_num BETWEEN _from_block AND _to_block
             GROUP BY ao.op_type_id, bv.created_at::DATE
         ),
@@ -1688,6 +1701,7 @@ BEGIN
                 JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
                 WHERE ao.account_id = _account_id
                   AND ao.transacting_account_id = ao.account_id
+                  AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
                   AND ao.block_num BETWEEN _from_block AND _to_block
                   AND ao.op_type_id <> 18
                 GROUP BY ao.op_type_id, bv.created_at::DATE

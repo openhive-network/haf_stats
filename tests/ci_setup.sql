@@ -459,6 +459,27 @@ RETURNS TABLE (base_rc BIGINT, byte_rc NUMERIC) LANGUAGE sql STABLE AS $$
 $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
 
+-- Block-range -> account_op_seq_no-range binary search (mirrors db/process_rc.sql) used by
+-- get_account_rc_footprint. References haf_stats_app.account_operations_view, created below.
+CREATE OR REPLACE FUNCTION haf_stats_app.account_op_seq_range(_account_id INT, _from_block INT, _to_block INT)
+RETURNS TABLE (lo_seq BIGINT, hi_seq BIGINT) LANGUAGE plpgsql STABLE AS $$
+DECLARE _min BIGINT; _max BIGINT; _l BIGINT; _r BIGINT; _mid BIGINT; _blk INT; _lo BIGINT; _hi BIGINT;
+BEGIN
+    SELECT MIN(account_op_seq_no), MAX(account_op_seq_no) INTO _min, _max
+    FROM haf_stats_app.account_operations_view WHERE account_id = _account_id;
+    IF _max IS NULL THEN RETURN; END IF;
+    _l := _min; _r := _max;
+    WHILE _l <= _r LOOP _mid := (_l + _r) / 2;
+        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        IF _blk >= _from_block THEN _lo := _mid; _r := _mid - 1; ELSE _l := _mid + 1; END IF; END LOOP;
+    _l := _min; _r := _max;
+    WHILE _l <= _r LOOP _mid := (_l + _r) / 2;
+        SELECT block_num INTO _blk FROM haf_stats_app.account_operations_view WHERE account_id = _account_id AND account_op_seq_no = _mid;
+        IF _blk <= _to_block THEN _hi := _mid; _l := _mid + 1; ELSE _r := _mid - 1; END IF; END LOOP;
+    lo_seq := _lo; hi_seq := _hi; RETURN NEXT;
+END; $$;
+GRANT EXECUTE ON FUNCTION haf_stats_app.account_op_seq_range(INT, INT, INT) TO haf_stats_user;
+
 -- Two dated test rates (custom_json, op_type 18) so the per-day read path is exercised:
 -- a cheap early rate from 2020-06-01 (rc = op_count*100 + op_bytes*10) and a pricier one
 -- from 2020-06-08 (rc = op_count*1000 + op_bytes*100). The endpoint prices each activity day
