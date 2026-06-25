@@ -51,9 +51,6 @@ CREATE TABLE IF NOT EXISTS hive.account_operations_view (
     op_type_id INT NOT NULL,
     account_op_seq_no BIGINT   -- nullable: existing stub rows (cohort/content) do not set it
 );
--- get_account_rc_footprint reads this view on-demand as haf_stats_user.
-GRANT USAGE ON SCHEMA hive TO haf_stats_user;
-GRANT SELECT ON hive.account_operations_view TO haf_stats_user;
 
 -- Stubs of the HAF helpers process_account_cohorts (Step 2) and
 -- process_active_users rely on. The real HAF schema provides these; the CI stub
@@ -158,6 +155,9 @@ GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
 GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_owner;
+-- get_account_rc_footprint reads hive.account_operations_view on-demand as haf_stats_user.
+GRANT USAGE ON SCHEMA hive TO haf_stats_user;
+GRANT SELECT ON hive.account_operations_view TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Schemas
