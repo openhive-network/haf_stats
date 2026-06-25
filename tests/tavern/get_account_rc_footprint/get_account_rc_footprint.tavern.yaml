@@ -7,7 +7,7 @@ marks:
 includes:
   - !include ../common.yaml
 
-# Reads haf_stats_app.account_operations_view on-demand (ci_setup), counting only ops the
+# Reads hive.account_operations_view on-demand (ci_setup), counting only ops the
 # account SIGNED (account_id = transacting_account_id = the RC payer) and pricing them from
 # rc_op_stats_daily (#33). rctester in March 2021 signed 4 votes (op 1) and 2 custom_json
 # (op 18); a received vote and a virtual producer_reward are present but excluded. vote

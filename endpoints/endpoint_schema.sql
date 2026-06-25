@@ -1646,7 +1646,7 @@ BEGIN
         RETURN QUERY
         WITH acct_ops AS (
             SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
-            FROM haf_stats_app.account_operations_view ao
+            FROM hive.account_operations_view ao
             JOIN hafd.blocks bv ON bv.num = ao.block_num
             JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
             WHERE ao.account_id = _account_id
@@ -1696,7 +1696,7 @@ BEGIN
                    SUM(t.op_count * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed
             FROM (
                 SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
-                FROM haf_stats_app.account_operations_view ao
+                FROM hive.account_operations_view ao
                 JOIN hafd.blocks bv ON bv.num = ao.block_num
                 JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
                 WHERE ao.account_id = _account_id
