@@ -189,21 +189,41 @@ GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Rollup refresh (feeds get_network_vote_stats)
 --
--- Recomputes network_vote_period_counts for every day/week/month period that includes a
--- day >= _lo, exactly (re-aggregates network_vote_daily counters + network_voter_daily
--- voter set). The ON CONFLICT upsert is idempotent, so callers pass a recent _lo for the
--- cheap incremental refresh (current period + slack) and the genesis day for a one-time
--- full rebuild on an already-synced node. Daily unique_voters needs no DISTINCT (the
--- (day, voter) PK already gives one row per voter per day, so COUNT(*)); week/month need
--- COUNT(DISTINCT voter_id). Counters come from the additive table, voters from the
--- membership table, FULL JOIN per period so a period present in only one table is still
--- written.
+-- Recomputes network_vote_period_counts for every day/week/month period touched
+-- by [_lo, _hi], exactly (re-aggregates network_vote_daily counters +
+-- network_voter_daily voter set). Passing NULL _hi keeps the old full-refresh
+-- behavior from _lo forward for one-time repairs on already-synced nodes. Daily
+-- unique_voters needs no DISTINCT (the (day, voter) PK already gives one row per
+-- voter per day, so COUNT(*)); week/month need COUNT(DISTINCT voter_id). Counters
+-- come from the additive table, voters from the membership table, FULL JOIN per
+-- period so a period present in only one table is still written.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION haf_stats_app.refresh_network_vote_periods(_lo DATE)
+-- A previous app version defined this as a 1-argument function. An in-place upgrade runs
+-- CREATE OR REPLACE for the 2-arg form below but leaves that legacy 1-arg overload in
+-- place, and a 1-arg call would then be ambiguous between them ("function ... is not
+-- unique"). Drop the legacy signature so only the single 2-arg form (with a defaulted
+-- _hi) remains; 1-arg callers (install_app.sh full refresh) resolve to it unambiguously.
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_network_vote_periods(DATE);
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_network_vote_periods(
+    _lo DATE,
+    _hi DATE DEFAULT NULL
+)
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    _week_lo DATE := DATE_TRUNC('week', _lo)::DATE;
+    _week_hi DATE := CASE
+        WHEN _hi IS NULL THEN NULL
+        ELSE (DATE_TRUNC('week', _hi)::DATE + INTERVAL '1 week')::DATE
+    END;
+    _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+    _month_hi DATE := CASE
+        WHEN _hi IS NULL THEN NULL
+        ELSE (DATE_TRUNC('month', _hi)::DATE + INTERVAL '1 month')::DATE
+    END;
 BEGIN
     -- day: distinct-per-day unique_voters == row count of the (day, voter) PK
     INSERT INTO haf_stats_backend.network_vote_period_counts
@@ -215,11 +235,13 @@ BEGIN
         SELECT day AS period, upvotes, downvotes, unvotes, self_votes
         FROM haf_stats_backend.network_vote_daily
         WHERE day >= _lo
+          AND (_hi IS NULL OR day <= _hi)
     ) c
     FULL JOIN (
         SELECT day AS period, COUNT(*) AS voters
         FROM haf_stats_backend.network_voter_daily
         WHERE day >= _lo
+          AND (_hi IS NULL OR day <= _hi)
         GROUP BY day
     ) v ON v.period = c.period
     ON CONFLICT (period_type, period) DO UPDATE SET
@@ -238,13 +260,15 @@ BEGIN
                SUM(upvotes) AS upvotes, SUM(downvotes) AS downvotes,
                SUM(unvotes) AS unvotes, SUM(self_votes) AS self_votes
         FROM haf_stats_backend.network_vote_daily
-        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        WHERE day >= _week_lo
+          AND (_week_hi IS NULL OR day < _week_hi)
         GROUP BY 1
     ) c
     FULL JOIN (
         SELECT DATE_TRUNC('week', day)::DATE AS period, COUNT(DISTINCT voter_id) AS voters
         FROM haf_stats_backend.network_voter_daily
-        WHERE day >= DATE_TRUNC('week', _lo)::DATE
+        WHERE day >= _week_lo
+          AND (_week_hi IS NULL OR day < _week_hi)
         GROUP BY 1
     ) v ON v.period = c.period
     ON CONFLICT (period_type, period) DO UPDATE SET
@@ -263,13 +287,15 @@ BEGIN
                SUM(upvotes) AS upvotes, SUM(downvotes) AS downvotes,
                SUM(unvotes) AS unvotes, SUM(self_votes) AS self_votes
         FROM haf_stats_backend.network_vote_daily
-        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        WHERE day >= _month_lo
+          AND (_month_hi IS NULL OR day < _month_hi)
         GROUP BY 1
     ) c
     FULL JOIN (
         SELECT DATE_TRUNC('month', day)::DATE AS period, COUNT(DISTINCT voter_id) AS voters
         FROM haf_stats_backend.network_voter_daily
-        WHERE day >= DATE_TRUNC('month', _lo)::DATE
+        WHERE day >= _month_lo
+          AND (_month_hi IS NULL OR day < _month_hi)
         GROUP BY 1
     ) v ON v.period = c.period
     ON CONFLICT (period_type, period) DO UPDATE SET
@@ -342,7 +368,9 @@ LANGUAGE plpgsql
 SET jit = OFF
 AS $$
 DECLARE
-    _block_day DATE;
+    _first_day DATE;
+    _last_day DATE;
+    _refresh_lo_block INT;
 BEGIN
 
 -- Comment ops: ONE scan, five outputs.
@@ -667,16 +695,30 @@ FROM vote_ops vo
 JOIN hafd.accounts a ON a.name = vo.voter
 ON CONFLICT (day, voter_id) DO NOTHING;
 
--- Refresh the get_network_vote_stats rollup on a ~1200-block (~1h) boundary, covering
--- every period this batch touched (lower bound = the batch's FIRST block's month minus
--- one month of slack, so a large catch-up batch spanning several months stays gap-free).
--- See process_active_users for the full rationale; an already-synced node needs a
--- one-time full refresh (SELECT haf_stats_app.refresh_network_vote_periods(<genesis day>)).
+-- Refresh the get_network_vote_stats rollup on a ~1200-block (~1h) boundary. Recompute
+-- every day/week/month period that received data since the previous refresh. A batch fires
+-- whenever it crosses a 1200-block bucket boundary, so every block processed since the
+-- previous fire lies either in the bucket containing this batch's first block (LIVE batches
+-- that did not cross a boundary accumulate there, and can spill into the previous calendar
+-- day) or in this batch itself (a MASSIVE catch-up batch may span many buckets); the lower
+-- bound reaches back to that bucket's start, ((_first_block - 1) / 1200) * 1200, anchored on
+-- _first_block (not _last_block) so coverage stays correct even when a firing batch spans
+-- several buckets after a skipped one. See process_active_users for the full rationale;
+-- an already-synced node can still run a full refresh with
+-- SELECT haf_stats_app.refresh_network_vote_periods(<genesis day>, NULL).
 IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-    SELECT created_at::DATE INTO _block_day FROM hafd.blocks WHERE num = _first_block;
-    PERFORM haf_stats_app.refresh_network_vote_periods(
-        (DATE_TRUNC('month', _block_day) - INTERVAL '1 month')::DATE
-    );
+    _refresh_lo_block := GREATEST(((_first_block - 1) / 1200) * 1200, 1);
+    SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _refresh_lo_block;
+    SELECT created_at::DATE INTO _last_day  FROM hafd.blocks WHERE num = _last_block;
+    -- _refresh_lo_block and _last_block are already-processed blocks, so their rows
+    -- normally exist. Guard the pathological case (a missing hafd.blocks row from a gap or
+    -- partial replay): a NULL _lo would make the refresh silently roll up nothing, so fall
+    -- back to this batch's own first block (always present) to keep the touched days covered.
+    IF _first_day IS NULL THEN
+        SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
+    END IF;
+
+    PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
 END IF;
 
 END;
