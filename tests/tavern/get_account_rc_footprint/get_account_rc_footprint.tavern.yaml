@@ -1,25 +1,59 @@
 ---
-test_name: Account RC footprint is empty before RC exists
+test_name: Account RC footprint prices the account's signed ops on-demand
 
 marks:
-  - patterntest
+  - synthetic
 
 includes:
   - !include ../common.yaml
 
+# Reads haf_stats_app.account_operations_view on-demand (ci_setup), counting only ops the
+# account SIGNED (account_id = transacting_account_id = the RC payer) and pricing them from
+# rc_op_stats_daily (#33). rctester in March 2021 signed 4 votes (op 1) and 2 custom_json
+# (op 18); a received vote and a virtual producer_reward are present but excluded. vote
+# avg_cost 97,278,897, custom_json avg_cost 167,828,015 (2020-06-08 rate, effective on/before
+# 2021-03). op_type: 4*97278897=389115588, 2*167828015=335656030. app: custom_json apps come
+# from account_custom_json_daily (size-aware op-18 rate, sm_claim_daily 2*1000+200*100=22000),
+# other signed ops roll into one non-custom_json bucket (the 4 votes = 389115588).
 stages:
-  - name: GET /rpc/get_account_rc_footprint in 2016-04
+  - name: group_by=op_type ranks op types by estimated RC (excludes received + virtual ops)
     request:
       url: "{api_url}/rpc/get_account_rc_footprint"
       method: GET
       params:
-        account: "hiveio"
-        from_date: "2016-04-01"
-        to_date: "2016-04-30"
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
         group_by: "op_type"
     response:
       status_code: 200
-      headers:
-        content-type: "application/json; charset=utf-8"
-      verify_response_with:
-        function: validate_response:compare_rest_response_with_pattern
+      json:
+        - label: "vote_operation"
+          rc_consumed: 389115588
+          op_count: 4
+          pct: 53.69
+        - label: "custom_json_operation"
+          rc_consumed: 335656030
+          op_count: 2
+          pct: 46.31
+
+  - name: group_by=app splits custom_json apps from a non-custom_json bucket
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        group_by: "app"
+    response:
+      status_code: 200
+      json:
+        - label: "non-custom_json"
+          rc_consumed: 389115588
+          op_count: 4
+          pct: 99.99
+        - label: "sm_claim_daily"
+          rc_consumed: 22000
+          op_count: 2
+          pct: 0.01
