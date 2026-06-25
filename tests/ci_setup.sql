@@ -95,11 +95,12 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Blocks for the get_account_rc_footprint synthetic test (March 2021; nums chosen above the
 -- other fixtures' blocks). The endpoint maps the requested date range to a block range, then
--- maps each op's block back to its day.
-INSERT INTO hafd.blocks (num, created_at) VALUES
-(5000, '2021-03-01 00:00:00'),
-(5001, '2021-03-01 00:01:00'),
-(6000, '2021-03-10 00:00:00')
+-- maps each op's block back to its day. Vesting columns mirror block 2000 so these (now the
+-- highest-num blocks) leave get_network_hp_distribution's VESTS/HP ratio unchanged.
+INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive) VALUES
+(5000, '2021-03-01 00:00:00', 1000000000, 1000000000),
+(5001, '2021-03-01 00:01:00', 1000000000, 1000000000),
+(6000, '2021-03-10 00:00:00', 1000000000, 1000000000)
 ON CONFLICT (num) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -431,6 +432,32 @@ SELECT DISTINCT ON (op_type_id)
 FROM haf_stats_backend.rc_op_stats_daily
 ORDER BY op_type_id, day DESC;
 GRANT SELECT ON haf_stats_backend.rc_op_rate_latest TO haf_stats_user;
+
+-- Per-day rate accessors (mirror db/process_rc.sql, which the stub does not load) - used by
+-- get_account_rc_footprint on-demand.
+CREATE OR REPLACE FUNCTION haf_stats_app.rc_avg_cost(_op_type_id SMALLINT, _day DATE)
+RETURNS BIGINT LANGUAGE sql STABLE AS $$
+    SELECT COALESCE((
+        SELECT r.avg_cost_rc FROM haf_stats_backend.rc_op_stats_daily r
+        WHERE r.op_type_id = _op_type_id
+        ORDER BY (r.day <= _day) DESC, CASE WHEN r.day <= _day THEN r.day END DESC, r.day ASC
+        LIMIT 1
+    ), 120000000::BIGINT)
+$$;
+GRANT EXECUTE ON FUNCTION haf_stats_app.rc_avg_cost(SMALLINT, DATE) TO haf_stats_user;
+
+CREATE OR REPLACE FUNCTION haf_stats_app.rc_rate(_op_type_id SMALLINT, _day DATE)
+RETURNS TABLE (base_rc BIGINT, byte_rc NUMERIC) LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(r.base_rc, 23428456::BIGINT), COALESCE(r.byte_rc, 475000::NUMERIC)
+    FROM (SELECT 1) z(x)
+    LEFT JOIN LATERAL (
+        SELECT rr.base_rc, rr.byte_rc FROM haf_stats_backend.rc_op_stats_daily rr
+        WHERE rr.op_type_id = _op_type_id
+        ORDER BY (rr.day <= _day) DESC, CASE WHEN rr.day <= _day THEN rr.day END DESC, rr.day ASC
+        LIMIT 1
+    ) r ON TRUE
+$$;
+GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
 
 -- Two dated test rates (custom_json, op_type 18) so the per-day read path is exercised:
 -- a cheap early rate from 2020-06-01 (rc = op_count*100 + op_bytes*10) and a pricier one
