@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS hive.account_operations_view (
     account_id INT NOT NULL,
     transacting_account_id INT NOT NULL,
     block_num INT NOT NULL,
-    op_type_id INT NOT NULL,
+    op_type_id SMALLINT NOT NULL,   -- SMALLINT in real HAF; rc_avg_cost(SMALLINT, DATE) needs it
     account_op_seq_no BIGINT   -- nullable: existing stub rows (cohort/content) do not set it
 );
 
