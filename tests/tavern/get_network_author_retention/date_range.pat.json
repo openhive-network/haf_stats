@@ -1,0 +1,72 @@
+[
+  {
+    "cohort_month": "2016-03",
+    "first_post_accounts": 1,
+    "active_at_30d": 0,
+    "pct_30d": 0.0,
+    "active_at_90d": 0,
+    "pct_90d": 0.0,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-04",
+    "first_post_accounts": 111,
+    "active_at_30d": 85,
+    "pct_30d": 76.6,
+    "active_at_90d": 70,
+    "pct_90d": 63.1,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-05",
+    "first_post_accounts": 544,
+    "active_at_30d": 340,
+    "pct_30d": 62.5,
+    "active_at_90d": 336,
+    "pct_90d": 61.8,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-06",
+    "first_post_accounts": 645,
+    "active_at_30d": 428,
+    "pct_30d": 66.4,
+    "active_at_90d": null,
+    "pct_90d": null,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-07",
+    "first_post_accounts": 9218,
+    "active_at_30d": 5933,
+    "pct_30d": 64.4,
+    "active_at_90d": null,
+    "pct_90d": null,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-08",
+    "first_post_accounts": 9313,
+    "active_at_30d": null,
+    "pct_30d": null,
+    "active_at_90d": null,
+    "pct_90d": null,
+    "active_at_180d": null,
+    "pct_180d": null
+  },
+  {
+    "cohort_month": "2016-09",
+    "first_post_accounts": 1848,
+    "active_at_30d": null,
+    "pct_30d": null,
+    "active_at_90d": null,
+    "pct_90d": null,
+    "active_at_180d": null,
+    "pct_180d": null
+  }
+]

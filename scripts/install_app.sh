@@ -41,6 +41,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 
@@ -90,6 +91,10 @@ psql_cmd -c "
         'haf_stats_backend.account_cohort_retention',
         'haf_stats_backend.account_cohort_members',
         'SELECT haf_stats_app.refresh_account_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.author_cohort_retention',
+        'haf_stats_backend.author_cohort_members',
+        'SELECT haf_stats_app.refresh_author_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
     RESET ROLE;
 "
 
