@@ -1,0 +1,23 @@
+---
+test_name: Network author retention respects date range filter
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_network_author_retention with explicit range
+    request:
+      url: "{api_url}/rpc/get_network_author_retention"
+      method: GET
+      params:
+        from_date: "2016-03-01"
+        to_date: "2016-12-31"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

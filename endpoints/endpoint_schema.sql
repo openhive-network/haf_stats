@@ -399,7 +399,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp.",
+        "description": "Breakdown of estimated Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer) and prices them from the calibrated rc_op_stats_daily rates; RC is an ESTIMATE (op_type uses op_count * average rc_api cost), as real per-op RC cost is unavailable on this node.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -482,13 +482,146 @@ DECLARE
         }
       }
     },
+    "/account/{account}/dapp-footprint": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account DApp footprint",
+        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account); RC figures are a calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api), as real per-op RC cost is unavailable on this node. Defaults to the last 30 days.",
+        "operationId": "haf_stats_endpoints.get_account_dapp_footprint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DApp footprint aggregate for the account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "jsonb",
+                  "type": "object",
+                  "properties": {
+                    "account": {
+                      "type": "string"
+                    },
+                    "from_date": {
+                      "type": "string"
+                    },
+                    "to_date": {
+                      "type": "string"
+                    },
+                    "total_ops": {
+                      "type": "integer"
+                    },
+                    "total_rc_estimated": {
+                      "type": "integer",
+                      "description": "Estimated total RC consumed (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily; a calibrated estimate, not real RC spend)"
+                    },
+                    "top_category": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "top_dapp": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "categories": {
+                      "type": "array",
+                      "description": "Per-category totals (donut chart)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "op_count": {
+                            "type": "integer"
+                          },
+                          "pct": {
+                            "type": "number"
+                          },
+                          "rc_estimated": {
+                            "type": "integer"
+                          },
+                          "rc_pct": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    },
+                    "dapps": {
+                      "type": "array",
+                      "description": "Per-app totals (registered app name), each tagged with its category (drill-down bars)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "app_name": {
+                            "type": "string"
+                          },
+                          "op_count": {
+                            "type": "integer"
+                          },
+                          "pct": {
+                            "type": "number"
+                          },
+                          "rc_estimated": {
+                            "type": "integer"
+                          },
+                          "rc_pct": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/network/rc-utilization": {
       "get": {
         "tags": [
           "Network"
         ],
         "summary": "Network RC utilization",
-        "description": "Time-series of total RC consumption across the network, broken down by operation type or DApp, aggregated by the chosen granularity.",
+        "description": "Time-series of estimated total RC consumption across the network, broken down by operation type, aggregated by the chosen granularity. RC is a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before each day), as real per-op RC cost is unavailable on this node.",
         "operationId": "haf_stats_endpoints.get_network_rc_utilization",
         "parameters": [
           {
@@ -682,6 +815,89 @@ DECLARE
                         "nullable": true
                       },
                       "pct_90d": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/network/author-retention": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Content creator cohort retention",
+        "description": "Month cohorts of accounts whose first-ever root post falls in the cohort month, with the share that created content again in the 30-, 90-, and 180-day windows after that first post day. \"Created content again\" means a new post or comment create under chain comment_operation semantics; edits are excluded. Windows are contiguous and non-overlapping: (0,30], (30,90], and (90,180] days. Results are grouped by first-post month; active_at_Nd is null until the full cohort month plus that observation horizon has elapsed. The usual retention decay ordering is empirical, not a mathematical guarantee.",
+        "operationId": "haf_stats_endpoints.get_network_author_retention",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Author cohort retention rows ordered by month",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "cohort_month": {
+                        "type": "string",
+                        "example": "2026-01"
+                      },
+                      "first_post_accounts": {
+                        "type": "integer"
+                      },
+                      "active_at_30d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "pct_30d": {
+                        "type": "number",
+                        "nullable": true
+                      },
+                      "active_at_90d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "pct_90d": {
+                        "type": "number",
+                        "nullable": true
+                      },
+                      "active_at_180d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "pct_180d": {
                         "type": "number",
                         "nullable": true
                       }
@@ -1760,7 +1976,7 @@ $$;
         required: false
         schema:
           x-sql-datatype: TEXT
-          x-sql-default-value: "(NOW() - INTERVAL '30 days')::DATE"
+          x-sql-default-value: "NULL"
           type: string
         description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
       - in: query
@@ -1768,7 +1984,7 @@ $$;
         required: false
         schema:
           x-sql-datatype: TEXT
-          x-sql-default-value: "NOW()::DATE"
+          x-sql-default-value: "NULL"
           type: string
         description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
     responses:
@@ -2345,6 +2561,105 @@ AS $$
         acr.active_at_90d,
         ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
     FROM haf_stats_backend.account_cohort_retention acr
+    WHERE acr.cohort_month
+        BETWEEN DATE_TRUNC('month', haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE))::DATE
+        AND DATE_TRUNC('month', haf_stats_app.to_filter_date("to_date", NOW()::DATE))::DATE
+    ORDER BY acr.cohort_month;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: content-creator cohort retention
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/author-retention:
+  get:
+    tags:
+      - Network
+    summary: Content creator cohort retention
+    description: >-
+      Month cohorts of accounts whose first-ever root post falls in the cohort
+      month, with the share that created content again in the 30-, 90-, and
+      180-day windows after that first post day. "Created content again" means a
+      new post or comment create under chain comment_operation semantics; edits
+      are excluded. Windows are contiguous and non-overlapping: (0,30],
+      (30,90], and (90,180] days. Results are grouped by first-post month;
+      active_at_Nd is null until the full cohort month plus that observation
+      horizon has elapsed. The usual retention decay ordering is empirical, not
+      a mathematical guarantee.
+    operationId: haf_stats_endpoints.get_network_author_retention
+    parameters:
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start cohort month (YYYY-MM-DD), inclusive, defaults to 1 year ago
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end cohort month (YYYY-MM-DD), inclusive, defaults to today
+    responses:
+      '200':
+        description: Author cohort retention rows ordered by month
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  cohort_month:
+                    type: string
+                    example: "2026-01"
+                  first_post_accounts:
+                    type: integer
+                  active_at_30d:
+                    type: integer
+                    nullable: true
+                  pct_30d:
+                    type: number
+                    nullable: true
+                  active_at_90d:
+                    type: integer
+                    nullable: true
+                  pct_90d:
+                    type: number
+                    nullable: true
+                  active_at_180d:
+                    type: integer
+                    nullable: true
+                  pct_180d:
+                    type: number
+                    nullable: true
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_author_retention;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_author_retention(
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL
+)
+RETURNS TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                      AS cohort_month,
+        acr.first_post_accounts,
+        acr.active_at_30d,
+        ROUND(acr.active_at_30d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1)  AS pct_30d,
+        acr.active_at_90d,
+        ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1)  AS pct_90d,
+        acr.active_at_180d,
+        ROUND(acr.active_at_180d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1) AS pct_180d
+    FROM haf_stats_backend.author_cohort_retention acr
     WHERE acr.cohort_month
         BETWEEN DATE_TRUNC('month', haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE))::DATE
         AND DATE_TRUNC('month', haf_stats_app.to_filter_date("to_date", NOW()::DATE))::DATE

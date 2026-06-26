@@ -24,6 +24,7 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 | `get_network_hp_distribution` | Bucketed HP stake distribution — existing top-holders is a ranked list, not bucketed |
 | `get_network_vote_stats` | Network-wide vote activity time-series (up/down/unvotes, self-votes, unique voters) — no existing API aggregates votes |
 | `get_network_content_volume` | Posts/comments **created** per period + unique authors (chain-exact: edits excluded, delete→re-create counted) — no existing API aggregates content volume |
+| `get_network_author_retention` | First-post author cohorts + 30/90/180-day created-content retention (edits excluded) — distinct from all-account funnel retention |
 | `get_network_top_accounts` | Time-bounded multi-metric account leaderboard (rewards, transfers, HP, op counts) — balance-api has per-account history only, hafbe has witness rankings only |
 | `get_hp_delegation_graph` | Recursive delegation graph from a root account — per-account list exists in balance-api, recursive traversal does not |
 | `get_governance_proxy_chains` | Recursive proxy chain traversal (A→B→C→D) — hafbe-api has single-level proxy-power only |
@@ -66,6 +67,8 @@ db/
   process_block_range.sql   Block range dispatcher (calls all processors in order)
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
   process_rc.sql            ⚠ RC cost attribution — BLOCKED: rc_account_statuses ops are not captured by HAF (see docs/VERIFICATION.md)
+  process_content_cohorts.sql
+                            ✓ First-post author retention cohorts
   process_delegations.sql   HP delegation current state (graph traversal only; per-account list → balance-api)
   process_governance.sql    Proxy chain current state only (witness + DHF proposal data → hafbe-api)
   process_network_stats.sql Supply snapshots from hafd.blocks (DAU/tx stats → hafbe-api)
@@ -156,6 +159,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_daily_active_users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
 | `GET /rpc/get_network_vote_stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
 | `GET /rpc/get_network_content_volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
+| `GET /rpc/get_network_author_retention` | ✅ Live | process_content_cohorts.sql | First-post author cohorts with created-content retention at 30/90/180 days |
 | `GET /rpc/get_network_top_accounts` | ✅ Live | *(reads financial + active-users tables)* | Top N accounts by rewards, transfer volume, HP balance, or op count |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
 | `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
