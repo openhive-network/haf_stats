@@ -1917,7 +1917,8 @@ BEGIN
                 SELECT r.app_name
                 FROM haf_stats_backend.custom_json_app_registry r
                 WHERE starts_with(acj.json_id, r.app_id_pattern)
-                ORDER BY LENGTH(r.app_id_pattern) DESC
+                -- Secondary sort by pattern makes equal-length-prefix ties deterministic.
+                ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
                 LIMIT 1
             ) reg ON TRUE
             WHERE acj.account_id = _account_id
@@ -2144,7 +2145,8 @@ BEGIN
             SELECT reg.category, reg.app_name
             FROM haf_stats_backend.custom_json_app_registry reg
             WHERE starts_with(pj.json_id, reg.app_id_pattern)
-            ORDER BY LENGTH(reg.app_id_pattern) DESC
+            -- Secondary sort by pattern makes equal-length-prefix ties deterministic.
+            ORDER BY LENGTH(reg.app_id_pattern) DESC, reg.app_id_pattern
             LIMIT 1
         ) r ON TRUE
     ),

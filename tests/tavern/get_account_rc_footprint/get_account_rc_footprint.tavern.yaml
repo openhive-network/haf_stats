@@ -59,3 +59,50 @@ stages:
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
+
+---
+test_name: Account RC footprint group_by=app merges shared DApps and keeps unmatched ids raw
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# dapptester (2001) reuses the get_account_dapp_footprint fixture, so the per-app RC values
+# match it exactly. Two json_ids that share a DApp roll up into one row:
+# sm_claim_daily (25 ops, 06-01) + sm_battle (5 ops, 06-05) -> Splinterlands (30 ops, 6000),
+# both at the cheap 06-01 op-18 rate (100/10). ssc-mainnet-hive -> Hive Engine (SSC) (20, 7000);
+# follow -> Hivemind Follow (10, 15000, pricey 06-08 rate); mystery_app matches no registry
+# pattern -> kept raw (5, 85000). The 07-01 sm_market row is outside the window. dapptester's two
+# op-18 rows in account_operations_view only open the read window (op 18 is excluded from the
+# non-custom_json bucket), so the result is purely these four resolved apps, ordered by RC desc.
+stages:
+  - name: ids sharing a DApp merge under one name; unmatched ids stay raw
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        group_by: "app"
+    response:
+      status_code: 200
+      json:
+        - label: "mystery_app"
+          rc_consumed: 85000
+          op_count: 5
+          pct: 75.22
+        - label: "Hivemind Follow"
+          rc_consumed: 15000
+          op_count: 10
+          pct: 13.27
+        - label: "Hive Engine (SSC)"
+          rc_consumed: 7000
+          op_count: 20
+          pct: 6.19
+        - label: "Splinterlands"
+          rc_consumed: 6000
+          op_count: 30
+          pct: 5.31

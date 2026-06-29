@@ -108,6 +108,10 @@ ON CONFLICT (id) DO NOTHING;
 -- maps each op's block back to its day. Vesting columns mirror block 2000 so these (now the
 -- highest-num blocks) leave get_network_hp_distribution's VESTS/HP ratio unchanged.
 INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive) VALUES
+-- June 2020 block so get_account_rc_footprint can map the dapptester app-merge test's
+-- date range to a block range (see the dapptester op-view rows below). Vesting mirrors
+-- the others, so get_network_hp_distribution's ratio is unchanged.
+(4000, '2020-06-01 00:00:00', 1000000000, 1000000000),
 (5000, '2021-03-01 00:00:00', 1000000000, 1000000000),
 (5001, '2021-03-01 00:01:00', 1000000000, 1000000000),
 (6000, '2021-03-10 00:00:00', 1000000000, 1000000000)
@@ -135,6 +139,19 @@ VALUES
 (3001, 9999, 5000, 1, 7),
 -- virtual producer_reward (op 64) -> EXCLUDED (is_virtual, consumes no RC)
 (3001, 3001, 5000, 64, 8)
+ON CONFLICT DO NOTHING;
+
+-- dapptester (2001) needs a valid signed-op window or get_account_rc_footprint short-circuits
+-- to [] (it RETURNs early when the account has no ops in account_operations_view). Two op-18
+-- (custom_json) rows in the June 2020 block establish the seq range; op 18 is excluded from the
+-- non-custom_json bucket, so the group_by=app result is purely the resolved custom_json apps
+-- from dapptester's account_custom_json_daily seed (the merge/fallback fixture). These rows only
+-- bound the read window; the per-app op/RC totals come from account_custom_json_daily.
+INSERT INTO hive.account_operations_view
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no)
+VALUES
+(2001, 2001, 4000, 18, 1),
+(2001, 2001, 4000, 18, 2)
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------
