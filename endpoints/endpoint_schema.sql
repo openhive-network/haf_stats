@@ -1901,16 +1901,28 @@ BEGIN
         -- group_by = 'app': size-aware custom_json apps from the pre-aggregated
         -- account_custom_json_daily (op_count + op_bytes per json_id, base+byte op-18 rate),
         -- plus one 'non-custom_json' bucket for all other signed ops (op_count * avg_cost).
+        -- Each json_id is resolved to its registered DApp name via a longest-prefix
+        -- starts_with match against custom_json_app_registry (mirrors
+        -- get_account_dapp_footprint); an unmatched id keeps its raw json_id, and
+        -- distinct json_ids that map to the same app (e.g. 'sm_' and 'splinterlands')
+        -- roll up into a single labelled bucket.
         RETURN QUERY
         WITH cj AS (
-            SELECT acj.json_id                  AS label,
+            SELECT COALESCE(reg.app_name, acj.json_id)  AS label,
                    SUM(acj.op_count)::BIGINT     AS op_count,
                    SUM(acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)::BIGINT AS rc_consumed
             FROM haf_stats_backend.account_custom_json_daily acj
             CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
+            LEFT JOIN LATERAL (
+                SELECT r.app_name
+                FROM haf_stats_backend.custom_json_app_registry r
+                WHERE starts_with(acj.json_id, r.app_id_pattern)
+                ORDER BY LENGTH(r.app_id_pattern) DESC
+                LIMIT 1
+            ) reg ON TRUE
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
-            GROUP BY acj.json_id
+            GROUP BY COALESCE(reg.app_name, acj.json_id)
         ),
         noncj AS (
             SELECT 'non-custom_json'::TEXT       AS label,

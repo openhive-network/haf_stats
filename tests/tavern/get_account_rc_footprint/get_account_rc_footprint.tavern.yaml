@@ -14,7 +14,9 @@ includes:
 # avg_cost 97,278,897, custom_json avg_cost 167,828,015 (2020-06-08 rate, effective on/before
 # 2021-03). op_type: 4*97278897=389115588, 2*167828015=335656030. app: custom_json apps come
 # from account_custom_json_daily (size-aware op-18 rate, sm_claim_daily 2*1000+200*100=22000),
-# other signed ops roll into one non-custom_json bucket (the 4 votes = 389115588).
+# with each json_id resolved to its DApp name via custom_json_app_registry (sm_claim_daily
+# starts_with 'sm_' -> "Splinterlands"); other signed ops roll into one non-custom_json
+# bucket (the 4 votes = 389115588).
 stages:
   - name: group_by=op_type ranks op types by estimated RC (excludes received + virtual ops)
     request:
@@ -37,7 +39,7 @@ stages:
           op_count: 2
           pct: 46.31
 
-  - name: group_by=app splits custom_json apps from a non-custom_json bucket
+  - name: group_by=app resolves custom_json apps to DApp names, split from a non-custom_json bucket
     request:
       url: "{api_url}/rpc/get_account_rc_footprint"
       method: GET
@@ -53,7 +55,7 @@ stages:
           rc_consumed: 389115588
           op_count: 4
           pct: 99.99
-        - label: "sm_claim_daily"
+        - label: "Splinterlands"
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
