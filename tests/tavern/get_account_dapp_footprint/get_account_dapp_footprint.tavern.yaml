@@ -11,7 +11,7 @@ includes:
 # rate effective on/before each activity day (per-day read path, #33), resolving
 # apps/categories from the seeded custom_json_app_registry. dapptester in June 2020:
 # sm_claim_daily 25 + sm_battle 5 -> Splinterlands/Gaming, ssc-mainnet-hive 20 -> Hive Engine
-# (SSC)/DeFi, follow 10 -> Hivemind Follow/Social Graph, mystery_app 5 -> Uncategorized = 65
+# (SSC)/DeFi & Tokens, follow 10 -> Hivemind Follow/Social Graph, mystery_app 5 -> Uncategorized = 65
 # ops. A 999-op July row is outside the range and excluded. Two dated rates (cheap from
 # 2020-06-01, pricey from 2020-06-08) mean 06-01/06-05 ops cost less than 06-10 ops, so RC
 # shares diverge from op shares by size AND era (Uncategorized: 7.69% of ops but 75.22% of
@@ -41,7 +41,7 @@ stages:
             pct: 46.15
             rc_estimated: 6000
             rc_pct: 5.31
-          - category: "DeFi"
+          - category: "DeFi & Tokens"
             op_count: 20
             pct: 30.77
             rc_estimated: 7000
@@ -63,7 +63,7 @@ stages:
             pct: 46.15
             rc_estimated: 6000
             rc_pct: 5.31
-          - category: "DeFi"
+          - category: "DeFi & Tokens"
             app_name: "Hive Engine (SSC)"
             op_count: 20
             pct: 30.77

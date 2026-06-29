@@ -184,15 +184,32 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 
 ## DApp Attribution
 
-`custom_json` operations are attributed to DApps via `haf_stats_backend.custom_json_app_registry`, a longest-prefix `starts_with` match from a custom_json id to a DApp name + category. This drives `get_account_dapp_footprint` (full per-DApp/per-category dashboard) and the `group_by=app` mode of `get_account_rc_footprint` (ids that share a DApp roll up under one name; unmatched ids keep their raw id). To add a new DApp:
+`custom_json` operations are attributed to DApps via `haf_stats_backend.custom_json_app_registry`, a longest-prefix `starts_with` match from a custom_json id to a DApp name + category. This drives `get_account_dapp_footprint` (full per-DApp/per-category dashboard) and the `group_by=app` mode of `get_account_rc_footprint` (ids that share a DApp roll up under one name; unmatched ids keep their raw id).
+
+Apps are classified into a **9-category system** (8 assigned + the `Uncategorized` fallback for unmatched ids), shared with the block_explorer_ui RC Footprint dashboard:
+
+| Category | Examples |
+|---|---|
+| Social Graph | follow, reblog, community |
+| Social Front-Ends | PeakD, Ecency, InLeo, Liketu |
+| Gaming | Splinterlands (`sm_`), Rising Star, dCity, Rabona |
+| DeFi & Tokens | Hive Engine (`ssc-`/`he_`/`scot_`), LeoDex, dLease, TribalDex |
+| NFTs | NFT Showroom, NFTMart, DLUX |
+| Media & Content | 3Speak, D.Buzz, Engrave |
+| Community & Social DApps | Curangel, Actifit, OCD, TravelFeed |
+| Governance & Infrastructure | RC delegations, SPK Network, Hive Keychain, VSC |
+
+To add or recategorize a DApp:
 
 ```sql
 INSERT INTO haf_stats_backend.custom_json_app_registry
-    (app_id_pattern, app_name, category)
-VALUES ('my_app_', 'My App', 'Gaming');
+    (app_id_pattern, app_name, category, homepage)
+VALUES ('my_app_', 'My App', 'Gaming', NULL)
+ON CONFLICT (app_id_pattern) DO UPDATE SET
+    app_name = excluded.app_name, category = excluded.category, homepage = excluded.homepage;
 ```
 
-Submit additions via MR to `db/seed_data.sql`.
+Submit additions via MR to `db/seed_data.sql` (the registry upserts on install, so edits to existing rows are reconciled).
 
 ## Known TODOs
 
