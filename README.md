@@ -192,12 +192,12 @@ Apps are classified into a **9-category system** (8 assigned + the `Uncategorize
 |---|---|
 | Social Graph | follow, reblog, community |
 | Social Front-Ends | PeakD, Ecency, InLeo, Liketu |
-| Gaming | Splinterlands (`sm_`), Rising Star, dCity, Rabona |
+| Gaming | Splinterlands (`sm_`), Rising Star, dCity, Rabona, NextColony, Genesis League Sports (`gls-`), PeakMonsters (`pm_`) |
 | DeFi & Tokens | Hive Engine (`ssc-`/`he_`/`scot_`), LeoDex, dLease, TribalDex |
 | NFTs | NFT Showroom, NFTMart, DLUX |
 | Media & Content | 3Speak, D.Buzz, Engrave |
 | Community & Social DApps | Curangel, Actifit, OCD, TravelFeed |
-| Governance & Infrastructure | RC delegations, SPK Network, Hive Keychain, VSC |
+| Governance & Infrastructure | RC delegations, SPK Network, Hive Keychain, VSC, Podping (`podping`/`pp_`) |
 
 To add or recategorize a DApp:
 
