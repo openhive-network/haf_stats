@@ -47,6 +47,9 @@ VALUES
 ('holybread', 'Holybread', 'Gaming', NULL),
 ('holozing', 'Holozing', 'Gaming', 'https://holozing.com'),
 ('exode', 'Exode', 'Gaming', 'https://exodegame.com'),
+('nextcolony', 'NextColony', 'Gaming', 'https://www.nextcolony.io'),
+('gls-', 'Genesis League Sports', 'Gaming', 'https://genesisleaguesports.com'),
+('pm_', 'PeakMonsters', 'Gaming', 'https://peakmonsters.com'),
 -- DeFi & Tokens (Hive Engine, tribe tokens, leasing, liquidity, bridges)
 ('ssc-', 'Hive Engine (SSC)', 'DeFi & Tokens', 'https://hive-engine.com'),
 ('hive-engine', 'Hive Engine', 'DeFi & Tokens', 'https://hive-engine.com'),
@@ -89,6 +92,7 @@ VALUES
 ('hiveonboard', 'HiveOnboard', 'Governance & Infrastructure', 'https://hiveonboard.com'),
 ('vsc', 'VSC Network', 'Governance & Infrastructure', 'https://vsc.network'),
 ('podping', 'Podping', 'Governance & Infrastructure', 'https://podping.org'),
+('pp_', 'Podping', 'Governance & Infrastructure', 'https://podping.org'),
 ('inji', 'Inji', 'Governance & Infrastructure', NULL),
 ('dao_post', 'DHF Governance', 'Governance & Infrastructure', NULL)
 ON CONFLICT (app_id_pattern) DO UPDATE SET
