@@ -41,9 +41,6 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.author_cohort_members (
     active_180d BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-ALTER TABLE haf_stats_backend.author_cohort_members
-DROP COLUMN IF EXISTS first_post_id;
-
 CREATE INDEX IF NOT EXISTS idx_achm_cohort
 ON haf_stats_backend.author_cohort_members (cohort_month);
 

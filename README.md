@@ -83,6 +83,8 @@ scripts/
   process_blocks.sh         Starts the infinite block-processing loop
   rebuild_account_cohorts.sh
                             Rebuilds account cohorts after definition changes
+  rebuild_content_cohorts.sh
+                            Rebuilds content-creator cohorts (required on already-synced nodes)
   rebuild_financial.sh      Rebuilds account financial aggregates after category changes
 
 docker/
@@ -122,6 +124,22 @@ historical cohort tables. Stop the block processor, then run:
 
 `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may be supplied as environment
 variables. Restart the processor after the rebuild completes.
+
+### Rebuilding content cohorts
+
+`get_network_author_retention` builds its cohort membership
+(`author_cohort_members`) only by processing blocks forward, so deploying it onto
+an already-synced node leaves the historical cohorts empty — the install hook only
+rebuilds the summary *from* that membership table. Run this one-time backfill
+after install, with the block processor stopped:
+
+```bash
+./scripts/rebuild_content_cohorts.sh
+```
+
+It reads `network_author_daily`, so `get_network_content_volume` must already be
+installed with its history present. `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may
+be supplied as environment variables. Restart the processor after it completes.
 
 ### Rebuilding financial aggregates
 
