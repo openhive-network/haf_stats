@@ -1,0 +1,29 @@
+---
+test_name: Network RC utilization no-date default returns full history (issue #35)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #35: with no from_date the endpoint must default to chain genesis
+# (full history), consistent with get_network_vote_stats / get_daily_active_users — NOT the
+# last 30 days. ci_setup seeds network_op_daily only on 2020-06-05 and 2020-06-10; a genesis
+# default (from 2016-03-24) rolls those into the single 2020-06 month period, whereas the old
+# NOW()-30d default would return [] (the 2020 rows fall outside the last month).
+stages:
+  - name: GET /rpc/get_network_rc_utilization with no date params returns the historical period
+    request:
+      url: "{api_url}/rpc/get_network_rc_utilization"
+      method: GET
+      params:
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-01"
+          rc_total: 84000
+          by_label:
+            vote_operation: 60000
+            custom_json_operation: 24000
