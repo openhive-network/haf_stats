@@ -174,6 +174,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
+| `GET /rpc/get_governance_influence_concentration` | ✅ Live | process_governance_concentration.sql | Current HP concentration snapshot: Gini, top 1%/10% share, holder count, median and mean HP |
 | `GET /rpc/get_daily_active_users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
 | `GET /rpc/get_network_vote_stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
 | `GET /rpc/get_network_content_volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |

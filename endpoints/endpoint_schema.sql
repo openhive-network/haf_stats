@@ -744,6 +744,64 @@ DECLARE
         }
       }
     },
+    "/governance/influence-concentration": {
+      "get": {
+        "tags": [
+          "Governance"
+        ],
+        "summary": "Stake influence concentration",
+        "description": "Network-wide stake-concentration snapshot: Gini coefficient, the share of total Hive Power (HP) held by the richest 1% and 10% of accounts, the total number of HP holders, and the median and mean HP per holder. Computed from current VESTS balances (converted to HP via the live VESTS/HP ratio) and served from a precomputed snapshot, so the read is O(1). Returns an empty array (HTTP 200, not an error) when the snapshot has not been computed yet - no readable balance relation, or hafd.blocks has no rows yet (fresh node). Consumers should treat an empty array as \"not available yet\", not \"zero accounts\".",
+        "operationId": "haf_stats_endpoints.get_governance_influence_concentration",
+        "responses": {
+          "200": {
+            "description": "One row of network stake-concentration metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(gini NUMERIC, top_1pct_hp_share NUMERIC, top_10pct_hp_share NUMERIC, total_hp_holders BIGINT, median_hp NUMERIC, mean_hp NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "gini": {
+                        "type": "number",
+                        "description": "Gini coefficient of HP across all holders (0 = perfect equality, 1 = one account holds everything)",
+                        "example": 0.94
+                      },
+                      "top_1pct_hp_share": {
+                        "type": "number",
+                        "description": "Percentage of total HP held by the richest 1% of accounts",
+                        "example": 71.2
+                      },
+                      "top_10pct_hp_share": {
+                        "type": "number",
+                        "description": "Percentage of total HP held by the richest 10% of accounts",
+                        "example": 93.4
+                      },
+                      "total_hp_holders": {
+                        "type": "integer",
+                        "description": "Number of accounts holding a positive VESTS balance",
+                        "example": 164780
+                      },
+                      "median_hp": {
+                        "type": "number",
+                        "description": "Median HP per holder",
+                        "example": 12.4
+                      },
+                      "mean_hp": {
+                        "type": "number",
+                        "description": "Mean HP per holder",
+                        "example": 284.1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/network/account-funnel": {
       "get": {
         "tags": [
@@ -2484,6 +2542,85 @@ BEGIN
     $q$, _balance_rel);
 END
 $_$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: governance influence concentration (stake concentration snapshot, #11)
+-- Reads the precomputed haf_stats_backend.governance_concentration_snapshot,
+-- refreshed by haf_stats_app.refresh_governance_concentration() (scheduled via
+-- pg_cron; see db/process_governance_concentration.sql). The expensive balance
+-- scan+sort lives in the refresh, so this read is O(1).
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/governance/influence-concentration:
+  get:
+    tags:
+      - Governance
+    summary: Stake influence concentration
+    description: >-
+      Network-wide stake-concentration snapshot: Gini coefficient, the share of
+      total Hive Power (HP) held by the richest 1% and 10% of accounts, the total
+      number of HP holders, and the median and mean HP per holder. Computed from
+      current VESTS balances (converted to HP via the live VESTS/HP ratio) and
+      served from a precomputed snapshot, so the read is O(1).
+      Returns an empty array (HTTP 200, not an error) when the snapshot has not
+      been computed yet - no readable balance relation, or hafd.blocks has no rows
+      yet (fresh node). Consumers should treat an empty array as "not available
+      yet", not "zero accounts".
+    operationId: haf_stats_endpoints.get_governance_influence_concentration
+    responses:
+      '200':
+        description: One row of network stake-concentration metrics
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(gini NUMERIC, top_1pct_hp_share NUMERIC, top_10pct_hp_share NUMERIC, total_hp_holders BIGINT, median_hp NUMERIC, mean_hp NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  gini:
+                    type: number
+                    description: Gini coefficient of HP across all holders (0 = perfect equality, 1 = one account holds everything)
+                    example: 0.94
+                  top_1pct_hp_share:
+                    type: number
+                    description: Percentage of total HP held by the richest 1% of accounts
+                    example: 71.2
+                  top_10pct_hp_share:
+                    type: number
+                    description: Percentage of total HP held by the richest 10% of accounts
+                    example: 93.4
+                  total_hp_holders:
+                    type: integer
+                    description: Number of accounts holding a positive VESTS balance
+                    example: 164780
+                  median_hp:
+                    type: number
+                    description: Median HP per holder
+                    example: 12.4
+                  mean_hp:
+                    type: number
+                    description: Mean HP per holder
+                    example: 284.1
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_governance_influence_concentration;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_governance_influence_concentration()
+RETURNS TABLE(gini NUMERIC, top_1pct_hp_share NUMERIC, top_10pct_hp_share NUMERIC, total_hp_holders BIGINT, median_hp NUMERIC, mean_hp NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        s.gini,
+        s.top_1pct_hp_share,
+        s.top_10pct_hp_share,
+        s.total_hp_holders,
+        s.median_hp,
+        s.mean_hp
+    FROM haf_stats_backend.governance_concentration_snapshot s
+    LIMIT 1;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Feature: new account cohort retention
