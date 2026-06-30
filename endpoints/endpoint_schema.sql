@@ -986,7 +986,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
           },
           {
             "in": "query",
@@ -2848,7 +2848,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
       - in: query
         name: to_date
         required: false
@@ -2916,7 +2916,13 @@ DECLARE
     _classes SMALLINT[];
     _bad     TEXT;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    -- No date filter ⇒ full history, for consistency with get_network_vote_stats and
+    -- balance-api transfer-statistics (issue #34). Omitting from_date previously defaulted
+    -- to the last 30 days, so a client's "No Filter / all history" option silently returned
+    -- only a month; default to the chain genesis day (2016-03-24, block 1) instead so an
+    -- unfiltered request returns every available period. The rollup holds no rows before the
+    -- first data, so a genesis floor is exact regardless of how much history the node replayed.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
