@@ -1,0 +1,31 @@
+---
+test_name: Daily active users no-date default returns full history (issue #34)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #34: with no from_date the endpoint must default to chain genesis
+# (full history), consistent with get_network_vote_stats / transfer-statistics — NOT the
+# last 30 days. The stub seeds month/ALL (op_class -1) rows for 2020-01 and 2020-02; a
+# genesis default (from 2016-03-24) returns both, whereas the old NOW()-30d default would
+# return [] (the 2020 rows fall outside the last month).
+stages:
+  - name: GET /rpc/get_daily_active_users with no date params returns historical periods
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        granularity: "month"
+        operation_types: "all"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          active_accounts: 100
+          operations: 5000
+        - period: "2020-02-01"
+          active_accounts: 150
+          operations: 6000
