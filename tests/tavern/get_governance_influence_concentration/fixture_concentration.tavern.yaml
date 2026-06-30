@@ -1,0 +1,30 @@
+---
+test_name: Governance influence concentration returns exact stake-concentration metrics
+
+# Computed by refresh_governance_concentration() from the ci_setup btracker fixture
+# (VESTS balances 50/4 950/2 000 000/3 000 000 HP at r=1000). gini 0.5492 matches the
+# canonical Gini of those four values; median (1 002 475) < mean (1 251 250) as expected
+# for a right-skewed distribution. With <100 holders CEIL keeps the top 1% / 10% band at the
+# single richest account (3 000 000 / 5 005 000 = 59.94%). Exercises the four acceptance
+# checks in one assertion (issue #11).
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_governance_influence_concentration
+    request:
+      url: "{api_url}/rpc/get_governance_influence_concentration"
+      method: GET
+    response:
+      status_code: 200
+      json:
+        - gini: 0.5492
+          top_1pct_hp_share: 59.94
+          top_10pct_hp_share: 59.94
+          total_hp_holders: 4
+          median_hp: 1002475.000
+          mean_hp: 1251250.000

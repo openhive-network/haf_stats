@@ -1,0 +1,24 @@
+---
+test_name: Governance influence concentration is empty without balance tracker
+
+# Mirrors get_network_hp_distribution's empty-source contract: when no balance relation is
+# readable (and so the snapshot was never populated) the endpoint returns [] (HTTP 200), not
+# an error. Runs in the full-replay path (no balance tracker installed).
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_governance_influence_concentration
+    request:
+      url: "{api_url}/rpc/get_governance_influence_concentration"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

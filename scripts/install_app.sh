@@ -44,6 +44,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
 
 # 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
 #     unavailable (e.g. CI), so it never fails the install. Scheduling is a deploy step.
@@ -97,6 +98,13 @@ psql_cmd -c "
         'SELECT haf_stats_app.refresh_author_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
     RESET ROLE;
 "
+
+# 8b. Compute the governance-concentration snapshot once so the endpoint is populated
+#     immediately on an already-synced node. No-op-safe: writes nothing without a readable
+#     balance relation. Recurring refresh is a pg_cron deploy step (see the file header in
+#     db/process_governance_concentration.sql).
+log "Computing initial governance concentration snapshot (if a balance tracker is readable)..."
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_governance_concentration(); RESET ROLE;"
 
 log "Installation complete."
 
