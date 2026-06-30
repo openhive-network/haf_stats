@@ -141,6 +141,14 @@ It reads `network_author_daily`, so `get_network_content_volume` must already be
 installed with its history present. `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may
 be supplied as environment variables. Restart the processor after it completes.
 
+For a one-time full-history rebuild, raise `BATCH_SIZE` well above the `10000`
+default — content cohorts are heavy per block (a `comment_operation` scan plus a
+180-day pending-member rescan each batch), so `BATCH_SIZE=1000000` rebuilds full
+mainnet history (~107.6M blocks) in roughly 1h35m versus ~10,760 batches at the
+default. The script `TRUNCATE`s `author_cohort_retention` first, so on an
+already-populated node `get_network_author_retention` returns `[]` until the
+rebuild's final refresh — run it as a maintenance window.
+
 ### Rebuilding financial aggregates
 
 The financial category/direction vocabulary changed in issue #26 (canonical

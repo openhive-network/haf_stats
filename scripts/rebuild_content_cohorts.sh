@@ -16,6 +16,18 @@
 #
 # Stop the haf_stats processor before running this script. The rebuild commits
 # once per batch so it can process full history without one enormous transaction.
+#
+# For a one-time full-history rebuild, set a large BATCH_SIZE. Content cohorts are
+# heavy per block -- Step 1 scans comment_operation and Step 2 rescans the pending
+# members' 180-day window each batch -- so the 10000 default means ~10,760 batches
+# (and repeated pending rescans) over full mainnet history. Measured on testapi:
+# BATCH_SIZE=1000000 rebuilds full history (~107.6M blocks) in ~1h35m. The smaller
+# default suits incremental / bounded-range rebuilds.
+#
+# This TRUNCATEs author_cohort_retention before rebuilding, so on an
+# already-populated node GET /rpc/get_network_author_retention returns [] from the
+# start of the run until the final refresh -- treat the rebuild as a maintenance
+# window (the "stop the processor" step above already implies downtime).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
