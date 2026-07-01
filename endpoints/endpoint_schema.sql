@@ -808,7 +808,7 @@ DECLARE
           "Network"
         ],
         "summary": "New account cohort retention",
-        "description": "Day-7, day-30, and day-90 retention for all newly created accounts, including accounts created through legacy pow/pow2 mining. An account is retained at day N when it signs at least one non-virtual operation during the exact 24-hour window [N, N+1) days after creation. Results are grouped by creation month; active_at_Nd is null until every account in that cohort has completed the corresponding observation window.",
+        "description": "Day-7, day-30, and day-90 rolling retention for all newly created accounts, including accounts created through legacy pow/pow2 mining. An account is retained at day N when it signs at least one non-virtual operation on or after N days after creation, observed within a 180-day horizon [N, 180) days; the milestones nest and decline (day-90 subset of day-30 subset of day-7). Results are grouped by creation month. Disclosure is per-milestone: eligible_at_Nd counts only cohort members that have reached day N (created + N <= now), active_at_Nd counts the eligible members that were active, and pct_Nd = active_at_Nd / eligible_at_Nd (null when eligible_at_Nd is 0).",
         "operationId": "haf_stats_endpoints.get_network_account_funnel",
         "parameters": [
           {
@@ -840,7 +840,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)",
+                  "x-sql-datatype": "TABLE(cohort_month TEXT, new_accounts INT, eligible_at_7d INT, active_at_7d INT, pct_7d NUMERIC, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -852,6 +852,10 @@ DECLARE
                       "new_accounts": {
                         "type": "integer"
                       },
+                      "eligible_at_7d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
                       "active_at_7d": {
                         "type": "integer",
                         "nullable": true
@@ -860,12 +864,20 @@ DECLARE
                         "type": "number",
                         "nullable": true
                       },
+                      "eligible_at_30d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
                       "active_at_30d": {
                         "type": "integer",
                         "nullable": true
                       },
                       "pct_30d": {
                         "type": "number",
+                        "nullable": true
+                      },
+                      "eligible_at_90d": {
+                        "type": "integer",
                         "nullable": true
                       },
                       "active_at_90d": {
@@ -2640,12 +2652,16 @@ $$;
       - Network
     summary: New account cohort retention
     description: >-
-      Day-7, day-30, and day-90 retention for all newly created accounts,
-      including accounts created through legacy pow/pow2 mining. An account is
-      retained at day N when it signs at least one non-virtual operation during
-      the exact 24-hour window [N, N+1) days after creation. Results are grouped
-      by creation month; active_at_Nd is null until every account in that
-      cohort has completed the corresponding observation window.
+      Day-7, day-30, and day-90 rolling retention for all newly created
+      accounts, including accounts created through legacy pow/pow2 mining. An
+      account is retained at day N when it signs at least one non-virtual
+      operation on or after N days after creation, observed within a 180-day
+      horizon [N, 180) days; the milestones nest and decline (day-90 subset of
+      day-30 subset of day-7). Results are grouped by creation month. Disclosure
+      is per-milestone: eligible_at_Nd counts only cohort members that have
+      reached day N (created + N <= now), active_at_Nd counts the eligible
+      members that were active, and pct_Nd = active_at_Nd / eligible_at_Nd
+      (null when eligible_at_Nd is 0).
     operationId: haf_stats_endpoints.get_network_account_funnel
     parameters:
       - in: query
@@ -2670,7 +2686,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)"
+              x-sql-datatype: "TABLE(cohort_month TEXT, new_accounts INT, eligible_at_7d INT, active_at_7d INT, pct_7d NUMERIC, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC)"
               type: array
               items:
                 type: object
@@ -2680,17 +2696,26 @@ $$;
                     example: "2026-01"
                   new_accounts:
                     type: integer
+                  eligible_at_7d:
+                    type: integer
+                    nullable: true
                   active_at_7d:
                     type: integer
                     nullable: true
                   pct_7d:
                     type: number
                     nullable: true
+                  eligible_at_30d:
+                    type: integer
+                    nullable: true
                   active_at_30d:
                     type: integer
                     nullable: true
                   pct_30d:
                     type: number
+                    nullable: true
+                  eligible_at_90d:
+                    type: integer
                     nullable: true
                   active_at_90d:
                     type: integer
@@ -2705,19 +2730,22 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_account_funnel(
     "from_date" TEXT = NULL,
     "to_date" TEXT = NULL
 )
-RETURNS TABLE(cohort_month TEXT, new_accounts INT, active_at_7d INT, pct_7d NUMERIC, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC)
+RETURNS TABLE(cohort_month TEXT, new_accounts INT, eligible_at_7d INT, active_at_7d INT, pct_7d NUMERIC, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
-        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                   AS cohort_month,
+        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                    AS cohort_month,
         acr.new_accounts,
+        acr.eligible_at_7d,
         acr.active_at_7d,
-        ROUND(acr.active_at_7d  * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_7d,
+        ROUND(acr.active_at_7d  * 100.0 / NULLIF(acr.eligible_at_7d, 0), 1)     AS pct_7d,
+        acr.eligible_at_30d,
         acr.active_at_30d,
-        ROUND(acr.active_at_30d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_30d,
+        ROUND(acr.active_at_30d * 100.0 / NULLIF(acr.eligible_at_30d, 0), 1)    AS pct_30d,
+        acr.eligible_at_90d,
         acr.active_at_90d,
-        ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.new_accounts, 0), 1)     AS pct_90d
+        ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.eligible_at_90d, 0), 1)    AS pct_90d
     FROM haf_stats_backend.account_cohort_retention acr
     WHERE acr.cohort_month
         BETWEEN DATE_TRUNC('month', haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE))::DATE
