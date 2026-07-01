@@ -12,12 +12,12 @@ SET ROLE haf_stats_owner;
 --      account_operations_view row. This excludes pow/pow2 mining, so a mining
 --      bot is no longer counted as a retained user (2016-04: 508/203/231 ->
 --      325/89/219).
---   2. Activity WINDOW: Day-N retention is now activity during the exact 24-hour
---      bracket [created_at + N days, created_at + N + 1 days), NOT the previous
---      cumulative "active within N days" (earliest op <= created + N days). The
---      bracket is the standard cohort-retention definition and makes D7/D30/D90
---      independent signals; the cumulative form made every later window
---      automatically true once an earlier one was.
+--   2. Activity WINDOW: Day-N retention is now ROLLING — activity on or after
+--      created_at + N days, observed within a 180-day horizon [N, 180) days,
+--      NOT the previous cumulative "active within N days" (earliest op <=
+--      created + N days). These are independent, declining signals
+--      (active_90d subset of active_30d subset of active_7d), and bounding the
+--      observation to 180 days lets cohorts finalize and never drift.
 --
 -- Two tables:
 --   account_cohort_members  — one row per account, tracks per-account activity flags
@@ -47,7 +47,7 @@ ON haf_stats_backend.account_cohort_members (cohort_month);
 -- The old idx_acm_pending partial index used WHERE NOT active_90d. That worked
 -- only when active_90d meant "ever active within 90 days"; with true D90
 -- retention, most accounts legitimately remain false forever and would bloat
--- the partial index. A full created_at index keeps the 91-day range probe
+-- the partial index. A full created_at index keeps the 180-day range probe
 -- bounded without retaining a misleading notion of "pending".
 --
 -- CONCURRENTLY: this index swap is the one that can hit a populated table on an
@@ -83,10 +83,20 @@ GRANT SELECT ON haf_stats_backend.account_cohort_members TO haf_stats_user;
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
     cohort_month DATE PRIMARY KEY,
     new_accounts INT NOT NULL DEFAULT 0,
+    eligible_at_7d INT,
     active_at_7d INT,
+    eligible_at_30d INT,
     active_at_30d INT,
+    eligible_at_90d INT,
     active_at_90d INT
 );
+
+-- Upgrade path for existing deployments: the eligible_at_Nd disclosure columns
+-- were added alongside rolling-to-180 retention; back-fill the schema on tables
+-- that predate them.
+ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_7d INT;
+ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT;
+ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT;
 
 GRANT SELECT ON haf_stats_backend.account_cohort_retention TO haf_stats_user;
 
@@ -103,25 +113,46 @@ RETURNS VOID
 LANGUAGE sql
 AS $$
     INSERT INTO haf_stats_backend.account_cohort_retention
-        (cohort_month, new_accounts, active_at_7d, active_at_30d, active_at_90d)
+        (cohort_month, new_accounts,
+         eligible_at_7d, active_at_7d,
+         eligible_at_30d, active_at_30d,
+         eligible_at_90d, active_at_90d)
     SELECT
         cohort_month,
         COUNT(*) AS new_accounts,
-        CASE WHEN MAX(created_at) + INTERVAL '8 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_7d) ELSE NULL END AS active_at_7d,
-        CASE WHEN MAX(created_at) + INTERVAL '31 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_30d) ELSE NULL END AS active_at_30d,
-        CASE WHEN MAX(created_at) + INTERVAL '91 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_90d) ELSE NULL END AS active_at_90d
+        -- Per-milestone eligibility: a member counts toward day N only once it
+        -- has actually reached day N (created_at + N days <= _as_of). pct_Nd is
+        -- then active_at_Nd / eligible_at_Nd, computed by the endpoint.
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '7 days' <= _as_of
+        ) AS eligible_at_7d,
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '7 days' <= _as_of AND active_7d
+        ) AS active_at_7d,
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '30 days' <= _as_of
+        ) AS eligible_at_30d,
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '30 days' <= _as_of AND active_30d
+        ) AS active_at_30d,
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '90 days' <= _as_of
+        ) AS eligible_at_90d,
+        COUNT(*) FILTER (
+            WHERE created_at + INTERVAL '90 days' <= _as_of AND active_90d
+        ) AS active_at_90d
     FROM haf_stats_backend.account_cohort_members
     WHERE (_from_month IS NULL OR cohort_month >= _from_month)
       AND (_to_month IS NULL OR cohort_month <= _to_month)
     GROUP BY cohort_month
     ON CONFLICT (cohort_month) DO UPDATE SET
-        new_accounts  = EXCLUDED.new_accounts,
-        active_at_7d  = EXCLUDED.active_at_7d,
-        active_at_30d = EXCLUDED.active_at_30d,
-        active_at_90d = EXCLUDED.active_at_90d;
+        new_accounts    = EXCLUDED.new_accounts,
+        eligible_at_7d  = EXCLUDED.eligible_at_7d,
+        active_at_7d    = EXCLUDED.active_at_7d,
+        eligible_at_30d = EXCLUDED.eligible_at_30d,
+        active_at_30d   = EXCLUDED.active_at_30d,
+        eligible_at_90d = EXCLUDED.eligible_at_90d,
+        active_at_90d   = EXCLUDED.active_at_90d;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -172,10 +203,11 @@ BEGIN
       )
     ON CONFLICT (account_id) DO NOTHING;
 
-    -- Step 2: Mark independent day-N retention flags. An account is retained at
-    -- N days only when it AUTHORS a non-virtual operation during [N, N+1) days
-    -- after creation. Early activation therefore does not automatically count as
-    -- D30 or D90 retention.
+    -- Step 2: Mark rolling day-N retention flags. An account is retained at N
+    -- days when it AUTHORS a non-virtual operation on or after N days after
+    -- creation, observed within a 180-day horizon [N, 180) days. The flags nest
+    -- (active_90d subset of active_30d subset of active_7d) and decline, rather
+    -- than every later window being automatically true once an earlier one was.
     --
     -- "Authored" = the account is a required signing authority of the op
     -- (hive.get_required_authorities), the same definition process_active_users
@@ -185,7 +217,7 @@ BEGIN
     -- Perf: drive from the shared authored-op set prepared by process_block_range
     -- (or lazily here for direct rebuild calls), not from the ever-growing member
     -- table. The previous member-driven probe scanned all ~12k members whose
-    -- 91-day window overlapped the batch and index-probed account_operations once
+    -- 180-day window overlapped the batch and index-probed account_operations once
     -- each — O(accumulated members), ~4.3s/batch and worsening as the cohort grows.
     -- account_operations has no block/operation_id index (only (account_id, ...)),
     -- so it cannot be range-scanned by block at all. The shared helper scans
@@ -207,22 +239,19 @@ BEGIN
             m.account_id,
             BOOL_OR(
                 ba.op_time >= m.created_at + INTERVAL '7 days'
-                AND ba.op_time < m.created_at + INTERVAL '8 days'
             ) AS active_7d,
             BOOL_OR(
                 ba.op_time >= m.created_at + INTERVAL '30 days'
-                AND ba.op_time < m.created_at + INTERVAL '31 days'
             ) AS active_30d,
             BOOL_OR(
                 ba.op_time >= m.created_at + INTERVAL '90 days'
-                AND ba.op_time < m.created_at + INTERVAL '91 days'
             ) AS active_90d
         FROM batch_authored ba
         JOIN haf_stats_backend.account_cohort_members m
               ON m.account_id = ba.account_id
         WHERE NOT (m.active_7d AND m.active_30d AND m.active_90d)
           AND ba.op_time >= m.created_at + INTERVAL '7 days'
-          AND ba.op_time <  m.created_at + INTERVAL '91 days'
+          AND ba.op_time <  m.created_at + INTERVAL '180 days'
         GROUP BY m.account_id
     ) ra
     WHERE acm.account_id = ra.account_id
@@ -230,15 +259,16 @@ BEGIN
 
     -- Step 3: Recompute cohort retention summary from member flags.
     --
-    -- A cohort's Dn result is disclosed only after the latest-created member's
-    -- [N,N+1) window has closed. refresh_account_cohort_retention derives this
-    -- from MAX(created_at), avoiding both partial results and month-long delays.
+    -- A cohort's Dn result is disclosed per-milestone: refresh counts only the
+    -- members that have reached day N (created_at + N days <= _as_of), so a
+    -- cohort can show D7 (and any matured slice of D30) while D90 is still
+    -- pending, avoiding both partial results and month-long delays.
     --
     -- #20.3: only recompute cohorts whose flags can still change. Step 2 stops
-    -- updating members older than 90 days, so any cohort whose accounts are all
-    -- >90 days old is final. Restrict the aggregate to recent cohorts instead of
+    -- updating members older than 180 days, so any cohort whose accounts are all
+    -- >180 days old is final. Restrict the aggregate to recent cohorts instead of
     -- scanning the whole (ever-growing) table on every call. The extra month of
-    -- slack keeps a cohort in scope until its 90-day disclosure has been written.
+    -- slack keeps a cohort in scope until its 180-day window has been written.
     --
     -- Perf (#21): the summary recompute is by far the dominant per-block cost,
     -- yet retention is a coarse metric with day-granular disclosure windows.
@@ -250,7 +280,7 @@ BEGIN
         PERFORM haf_stats_app.refresh_account_cohort_retention(
             _block_time,
             (
-                DATE_TRUNC('month', _block_time - INTERVAL '91 days')
+                DATE_TRUNC('month', _block_time - INTERVAL '180 days')
                 - INTERVAL '1 month'
             )::DATE
         );

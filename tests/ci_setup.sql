@@ -306,8 +306,11 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_members (
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
     cohort_month DATE PRIMARY KEY,
     new_accounts INT NOT NULL DEFAULT 0,
+    eligible_at_7d INT,
     active_at_7d INT,
+    eligible_at_30d INT,
     active_at_30d INT,
+    eligible_at_90d INT,
     active_at_90d INT
 );
 

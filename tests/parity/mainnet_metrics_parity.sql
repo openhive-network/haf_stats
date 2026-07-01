@@ -362,7 +362,11 @@ FROM endpoint e CROSS JOIN independent i CROSS JOIN LATERAL (
 
 -- 9) get_network_account_funnel (2016-04 cohort). New accounts use
 -- hafd.accounts.block_num, while D7/D30/D90 independently probe signed,
--- non-virtual activity in the exact [N,N+1 day) windows.
+-- non-virtual activity with ROLLING semantics: active at day N = authored an op
+-- on or after created+N, within the [N, 180) day horizon. Per-milestone
+-- eligibility (created+N <= as_of) gives the denominator; here as_of is the head
+-- block time, and every 2016-04 account has long passed day 90 by then, so all
+-- are eligible for all three milestones.
 WITH members AS MATERIALIZED (
     SELECT a.id AS account_id, b.created_at
     FROM hafd.accounts a
@@ -374,9 +378,10 @@ WITH members AS MATERIALIZED (
 -- single direct pass over the operation stream — the same definition the
 -- endpoint's incremental processor uses, computed here independently. This is
 -- authored activity: pow/pow2 mining is authorless and excluded. Bound the scan
--- to the block range spanning every D7..D91 window of the 2016-04 cohort
--- ([created+7d) earliest .. [created+91d) latest) so it is an operations PK
--- range scan, not a full-stream scan.
+-- below at the earliest D7 (2016-04-08) and above at the head block: the rolling
+-- 180-day windows of the 2016-04 cohort reach into October, past the replay
+-- horizon, so every available block after D7 is in range (an operations PK range
+-- scan from D7 to head, not a full-stream scan).
 authored AS MATERIALIZED (
     SELECT ni.id AS account_id, b.created_at AS op_time
     FROM hive.operations_view ov
@@ -384,27 +389,45 @@ authored AS MATERIALIZED (
     CROSS JOIN LATERAL hive.get_required_authorities(ov.body) ra
     JOIN hive.accounts_view ni ON ni.name = ra.account_name
     WHERE ov.block_num >= (SELECT MIN(num) FROM hafd.blocks WHERE created_at >= TIMESTAMP '2016-04-08')
-      AND ov.block_num <  (SELECT MIN(num) FROM hafd.blocks WHERE created_at >= TIMESTAMP '2016-08-01')
+      AND ov.block_num <= (SELECT MAX(num) FROM hafd.blocks)
       AND ov.op_type_id IN (SELECT id FROM hafd.operation_types WHERE NOT is_virtual)
 ),
 flags AS (
     SELECT m.account_id,
+           m.created_at,
            BOOL_OR(au.op_time >= m.created_at + INTERVAL '7 days'
-                   AND au.op_time < m.created_at + INTERVAL '8 days')  AS d7,
+                   AND au.op_time < m.created_at + INTERVAL '180 days')  AS d7,
            BOOL_OR(au.op_time >= m.created_at + INTERVAL '30 days'
-                   AND au.op_time < m.created_at + INTERVAL '31 days') AS d30,
+                   AND au.op_time < m.created_at + INTERVAL '180 days') AS d30,
            BOOL_OR(au.op_time >= m.created_at + INTERVAL '90 days'
-                   AND au.op_time < m.created_at + INTERVAL '91 days') AS d90
+                   AND au.op_time < m.created_at + INTERVAL '180 days') AS d90
     FROM members m
     LEFT JOIN authored au ON au.account_id = m.account_id
-    GROUP BY m.account_id
+    GROUP BY m.account_id, m.created_at
 ),
 independent AS (
-    SELECT COUNT(*)::NUMERIC AS new_accounts,
-           COUNT(*) FILTER (WHERE d7)::NUMERIC AS active_at_7d,
-           COUNT(*) FILTER (WHERE d30)::NUMERIC AS active_at_30d,
-           COUNT(*) FILTER (WHERE d90)::NUMERIC AS active_at_90d
-    FROM flags
+    SELECT
+        COUNT(*)::NUMERIC AS new_accounts,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '7 days' <= ao.ts
+        )::NUMERIC AS eligible_at_7d,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '7 days' <= ao.ts AND f.d7
+        )::NUMERIC AS active_at_7d,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '30 days' <= ao.ts
+        )::NUMERIC AS eligible_at_30d,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '30 days' <= ao.ts AND f.d30
+        )::NUMERIC AS active_at_30d,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '90 days' <= ao.ts
+        )::NUMERIC AS eligible_at_90d,
+        COUNT(*) FILTER (
+            WHERE f.created_at + INTERVAL '90 days' <= ao.ts AND f.d90
+        )::NUMERIC AS active_at_90d
+    FROM flags f
+    CROSS JOIN (SELECT MAX(created_at) AS ts FROM hafd.blocks) ao
 ),
 endpoint AS (
     SELECT *
@@ -417,8 +440,11 @@ SELECT 'account_funnel', field, endpoint_val, independent_val
 FROM endpoint e CROSS JOIN independent i CROSS JOIN LATERAL (
     VALUES
         ('new_accounts', e.new_accounts::NUMERIC, i.new_accounts),
+        ('eligible_at_7d', e.eligible_at_7d::NUMERIC, i.eligible_at_7d),
         ('active_at_7d', e.active_at_7d::NUMERIC, i.active_at_7d),
+        ('eligible_at_30d', e.eligible_at_30d::NUMERIC, i.eligible_at_30d),
         ('active_at_30d', e.active_at_30d::NUMERIC, i.active_at_30d),
+        ('eligible_at_90d', e.eligible_at_90d::NUMERIC, i.eligible_at_90d),
         ('active_at_90d', e.active_at_90d::NUMERIC, i.active_at_90d)
 ) AS fields(field, endpoint_val, independent_val);
 
