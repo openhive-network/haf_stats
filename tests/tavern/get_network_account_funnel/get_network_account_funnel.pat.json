@@ -2,14 +2,14 @@
   {
     "cohort_month": "2016-04",
     "new_accounts": 6840,
-    "eligible_at_7d": 0,
-    "active_at_7d": 0,
-    "pct_7d": 0,
-    "eligible_at_30d": 0,
-    "active_at_30d": 0,
-    "pct_30d": 0,
-    "eligible_at_90d": 0,
-    "active_at_90d": 0,
-    "pct_90d": 0
+    "eligible_at_7d": 6840,
+    "active_at_7d": 3022,
+    "pct_7d": 44.2,
+    "eligible_at_30d": 6840,
+    "active_at_30d": 2527,
+    "pct_30d": 36.9,
+    "eligible_at_90d": 6840,
+    "active_at_90d": 1350,
+    "pct_90d": 19.7
   }
 ]
