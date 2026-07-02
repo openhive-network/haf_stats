@@ -52,6 +52,74 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
 
+-- get_network_top_accounts window decomposition (issue #37). Splits [_from, _to]
+-- into the full interior months served from the *_monthly rollups plus the partial
+-- leading/trailing months served from the daily tables. Extracted from the endpoint
+-- so the split — in particular the current-month seal guard — is unit-testable with an
+-- injected _now (the endpoint passes NOW()::DATE; the parity suite passes literals,
+-- since a replay-based HTTP test can never make "the trailing month == the current
+-- month AND has data"). IMMUTABLE: a pure function of its three arguments.
+--
+-- Unused sub-ranges get an inverted [3000-01-01, 1900-01-01] bound so their index scan
+-- returns nothing. Guarantee (verified in tests/parity): the leading days, trailing
+-- days, and full months (expanded to days) partition [_from, _to] exactly — every day
+-- covered once, nothing outside. The trailing month folds into the rollup only when it
+-- is (a) fully elapsed (_to is its last day) AND (b) sealed (not the in-progress current
+-- month) — the rollup lags daily by up to one refresh gate (~1h), so the current month
+-- must come from daily to stay byte-exact even when queried on its final calendar day.
+-- Interior/leading rollup months are always strictly before the trailing month (hence
+-- sealed); a leading current month only arises in the same-month all-daily case.
+CREATE OR REPLACE FUNCTION haf_stats_app.top_accounts_window(
+    _from DATE,
+    _to DATE,
+    _now DATE,
+    OUT lead_from DATE,
+    OUT lead_to DATE,
+    OUT trail_from DATE,
+    OUT trail_to DATE,
+    OUT mm_from DATE,
+    OUT mm_to DATE
+)
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    _m_from DATE := DATE_TRUNC('month', _from)::DATE;  -- first day of _from's month
+    _m_to   DATE := DATE_TRUNC('month', _to)::DATE;    -- first day of _to's month
+    _empty_from CONSTANT DATE := DATE '3000-01-01';
+    _empty_to   CONSTANT DATE := DATE '1900-01-01';
+BEGIN
+    IF _m_from = _m_to THEN
+        -- Single calendar month: read it all from daily; no rollup, no trailing piece.
+        lead_from  := _from;       lead_to  := _to;
+        trail_from := _empty_from; trail_to := _empty_to;
+        mm_from    := _empty_from;  mm_to   := _empty_to;
+    ELSE
+        -- Leading month: whole month -> rollup when _from is the 1st, else daily to month end.
+        IF _from = _m_from THEN
+            lead_from := _empty_from; lead_to := _empty_to;
+            mm_from   := _m_from;
+        ELSE
+            lead_from := _from;
+            lead_to   := (_m_from + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
+            mm_from   := (_m_from + INTERVAL '1 month')::DATE;
+        END IF;
+        -- Trailing month: fold into the rollup only when fully elapsed AND sealed.
+        IF _to = (_m_to + INTERVAL '1 month' - INTERVAL '1 day')::DATE
+           AND _m_to < DATE_TRUNC('month', _now)::DATE THEN
+            trail_from := _empty_from; trail_to := _empty_to;
+            mm_to      := _m_to;
+        ELSE
+            trail_from := _m_to;
+            trail_to   := _to;
+            mm_to      := (_m_to - INTERVAL '1 month')::DATE;
+        END IF;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.top_accounts_window(DATE, DATE, DATE) TO haf_stats_user;
+
 /** openapi
 openapi: 3.1.0
 info:
@@ -3566,59 +3634,23 @@ DECLARE
     -- Window decomposition for the daily/monthly hybrid (issue #37): full interior
     -- months are read from the *_monthly rollups; the partial leading/trailing months
     -- (including the always-in-progress current month) are read from the daily tables,
-    -- so results stay byte-exact and the current month is never stale. An unused
-    -- sub-range gets an inverted [3000-01-01, 1900-01-01] bound so its index scan
-    -- returns nothing. See the reward branch for how the three pieces are UNIONed.
-    _m_from DATE;           -- first day of _from's month
-    _m_to DATE;             -- first day of _to's month
+    -- so results stay byte-exact and the current month is never stale. The split lives
+    -- in haf_stats_app.top_accounts_window (unit-tested there with an injected _now); an
+    -- unused sub-range comes back as an inverted [3000-01-01, 1900-01-01] bound so its
+    -- index scan returns nothing. See the reward branch for how the pieces are UNIONed.
     _lead_from DATE;        -- daily leading partial range
     _lead_to DATE;
     _trail_from DATE;       -- daily trailing partial range
     _trail_to DATE;
     _mm_from DATE;          -- monthly full-month range (month-start keys)
     _mm_to DATE;
-    _empty_from CONSTANT DATE := DATE '3000-01-01';
-    _empty_to   CONSTANT DATE := DATE '1900-01-01';
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
-    -- Decompose [_from, _to] into full interior months (rollup) + partial edge days (daily).
-    _m_from := DATE_TRUNC('month', _from)::DATE;
-    _m_to   := DATE_TRUNC('month', _to)::DATE;
-    IF _m_from = _m_to THEN
-        -- Single calendar month: read it all from daily; no rollup, no trailing piece.
-        _lead_from  := _from;       _lead_to  := _to;
-        _trail_from := _empty_from; _trail_to := _empty_to;
-        _mm_from    := _empty_from;  _mm_to   := _empty_to;
-    ELSE
-        -- Leading month: whole month -> rollup when _from is the 1st, else daily to month end.
-        IF _from = _m_from THEN
-            _lead_from := _empty_from; _lead_to := _empty_to;
-            _mm_from   := _m_from;
-        ELSE
-            _lead_from := _from;
-            _lead_to   := (_m_from + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
-            _mm_from   := (_m_from + INTERVAL '1 month')::DATE;
-        END IF;
-        -- Trailing month: fold into the rollup only when it is a fully-elapsed
-        -- calendar month — (a) _to is its last day AND (b) it is not the in-progress
-        -- current month. The rollup lags daily by up to one refresh gate (~1h), so the
-        -- current month must be read from daily to stay byte-exact even when the window
-        -- ends on its final calendar day (reachable via the default to_date = NOW() on a
-        -- month-end). Otherwise read the trailing month from daily. (Interior/leading
-        -- rollup months are always strictly before the trailing month, hence sealed; a
-        -- leading current month only arises in the same-month case, already all-daily.)
-        IF _to = (_m_to + INTERVAL '1 month' - INTERVAL '1 day')::DATE
-           AND _m_to < DATE_TRUNC('month', NOW())::DATE THEN
-            _trail_from := _empty_from; _trail_to := _empty_to;
-            _mm_to      := _m_to;
-        ELSE
-            _trail_from := _m_to;
-            _trail_to   := _to;
-            _mm_to      := (_m_to - INTERVAL '1 month')::DATE;
-        END IF;
-    END IF;
+    SELECT w.lead_from, w.lead_to, w.trail_from, w.trail_to, w.mm_from, w.mm_to
+      INTO _lead_from, _lead_to, _trail_from, _trail_to, _mm_from, _mm_to
+      FROM haf_stats_app.top_accounts_window(_from, _to, NOW()::DATE) w;
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "author_rewards"); see issue #22.
     "metric" := TRIM('"' FROM "metric");
