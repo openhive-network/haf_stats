@@ -1,0 +1,42 @@
+[
+  {
+    "rank": 1,
+    "account": "bittrex",
+    "value_hive_nai": 653824712,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 1376
+  },
+  {
+    "rank": 2,
+    "account": "openledger",
+    "value_hive_nai": 186006659,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 256
+  },
+  {
+    "rank": 3,
+    "account": "blocktrades",
+    "value_hive_nai": 76060430,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 57
+  },
+  {
+    "rank": 4,
+    "account": "steemit",
+    "value_hive_nai": 45840093,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 2
+  },
+  {
+    "rank": 5,
+    "account": "onceuponatime",
+    "value_hive_nai": 43637325,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 100
+  }
+]

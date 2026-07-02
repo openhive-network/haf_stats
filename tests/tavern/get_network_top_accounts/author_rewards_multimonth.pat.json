@@ -1,0 +1,42 @@
+[
+  {
+    "rank": 1,
+    "account": "gavvet",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 68010911,
+    "value_vests_nai": 132475926557752,
+    "op_count": 406
+  },
+  {
+    "rank": 2,
+    "account": "ericvancewalton",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 32739030,
+    "value_vests_nai": 89265686086607,
+    "op_count": 201
+  },
+  {
+    "rank": 3,
+    "account": "dollarvigilante",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 40130690,
+    "value_vests_nai": 86287138566563,
+    "op_count": 174
+  },
+  {
+    "rank": 4,
+    "account": "charlieshrem",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 27313148,
+    "value_vests_nai": 77782758611118,
+    "op_count": 64
+  },
+  {
+    "rank": 5,
+    "account": "calaber24p",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 29920898,
+    "value_vests_nai": 65964448470394,
+    "op_count": 287
+  }
+]

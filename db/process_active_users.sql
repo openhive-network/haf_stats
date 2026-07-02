@@ -204,6 +204,57 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Per-account monthly rollup (get_network_top_accounts performance, issue #37)
+--
+-- active_users_period_counts above is NETWORK-WIDE (one row per period/op_class with
+-- an account COUNT + op total), so it cannot serve a per-account leaderboard. This
+-- table pre-aggregates per-account op totals at month grain for the ALL rollup
+-- (op_class -1) — the only class get_network_top_accounts' transaction_count metric
+-- reads. Its purpose mirrors account_financial_monthly: a 365-day transaction_count
+-- leaderboard scans ~6.9M daily rows (~4s warm, worse cold); reading full interior
+-- months here and the partial edges from active_users_daily keeps it byte-exact and
+-- fast. ops is additive, so a month total is just SUM of the daily ops.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_account_monthly (
+    month DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    account_id INT NOT NULL,
+    ops BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, op_class, account_id)
+);
+
+-- Leaderboard access path: an (op_class, month)-range scan across all accounts.
+CREATE INDEX IF NOT EXISTS idx_auam_class_month
+ON haf_stats_backend.active_users_account_monthly (op_class, month);
+
+GRANT SELECT ON haf_stats_backend.active_users_account_monthly TO haf_stats_user;
+
+-- Recompute every month touched by [_lo, _hi] exactly from active_users_daily, whole
+-- months from their first day (see refresh_financial_monthly for the identical
+-- rationale). Only op_class -1 is materialised (the sole consumer). REPLACE semantics;
+-- NULL _hi restates from _lo forward for a one-time genesis backfill.
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_active_users_account_monthly(
+    _lo DATE,
+    _hi DATE DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+BEGIN
+    INSERT INTO haf_stats_backend.active_users_account_monthly (month, op_class, account_id, ops)
+    SELECT DATE_TRUNC('month', au.day)::DATE, au.op_class, au.account_id, SUM(au.ops)::BIGINT
+    FROM haf_stats_backend.active_users_daily au
+    WHERE au.op_class = -1
+      AND au.day >= _month_lo
+      AND (_hi IS NULL OR au.day <= _hi)
+    GROUP BY DATE_TRUNC('month', au.day)::DATE, au.op_class, au.account_id
+    ON CONFLICT (month, op_class, account_id) DO UPDATE SET
+        ops = EXCLUDED.ops;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Processor
 --
 -- The shared batch-authored temp table feeds both active users and account cohorts.
@@ -324,6 +375,8 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     END IF;
 
     PERFORM haf_stats_app.refresh_active_users_periods(_first_day, _last_day);
+    -- Same touched-day range feeds the per-account monthly leaderboard rollup (#37).
+    PERFORM haf_stats_app.refresh_active_users_account_monthly(_first_day, _last_day);
 END IF;
 
 END;

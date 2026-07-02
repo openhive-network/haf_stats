@@ -130,6 +130,23 @@ INSERT INTO _parity VALUES
    WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
      AND b.created_at>='2016-04-01' AND b.created_at<'2016-05-01'));
 
+-- 4b) get_network_top_accounts transfer_volume_in across MONTHS (2016-04-15..2016-06-20)
+--     — exercises the daily/monthly hybrid (issue #37): the interior month (May) is
+--     served from account_financial_monthly, the partial edges from the daily table.
+--     bittrex is rank 1; recompute its incoming HIVE straight from raw operations, so
+--     this validates the rollup end-to-end against the source, not just against daily.
+INSERT INTO _parity VALUES
+('top_accounts.transfer_in_multimonth_rank1','value_hive_nai',
+ (SELECT value_hive_nai FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-15','2016-06-20',5) WHERE rank=1),
+ (SELECT SUM((body_value->'amount'->>'amount')::BIGINT) FROM hafd.operations o JOIN hafd.blocks b ON b.num=hafd.operation_id_to_block_num(o.id)
+   WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
+     AND b.created_at>='2016-04-15' AND b.created_at<'2016-06-21')),
+('top_accounts.transfer_in_multimonth_rank1','op_count',
+ (SELECT op_count FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-15','2016-06-20',5) WHERE rank=1),
+ (SELECT COUNT(*) FROM hafd.operations o JOIN hafd.blocks b ON b.num=hafd.operation_id_to_block_num(o.id)
+   WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
+     AND b.created_at>='2016-04-15' AND b.created_at<'2016-06-21'));
+
 -- 5) get_account_content_stats (tuck-fheman, 2016-04 month)
 INSERT INTO _parity VALUES
 ('account_content_stats.tuck-fheman','posts',
@@ -447,6 +464,39 @@ FROM endpoint e CROSS JOIN independent i CROSS JOIN LATERAL (
         ('eligible_at_90d', e.eligible_at_90d::NUMERIC, i.eligible_at_90d),
         ('active_at_90d', e.active_at_90d::NUMERIC, i.active_at_90d)
 ) AS fields(field, endpoint_val, independent_val);
+
+-- 8) top_accounts_window decomposition — the current-month seal guard (issue #37).
+--    Pure date logic (independent of replay data), so we assert the exact bounds with an
+--    injected _now. This covers the case an HTTP/replay test can NEVER reach: the trailing
+--    month IS the in-progress current month (window ends on its last calendar day, e.g. via
+--    the default to_date = NOW()) and must route to DAILY, not the ~1h-lagging rollup.
+--    Bounds are compared as YYYYMMDD; 30000101/19000101 are the inverted "empty" sentinels.
+INSERT INTO _parity
+SELECT 'top_accounts_window.' || c.name, f.field,
+       to_char(f.actual, 'YYYYMMDD')::NUMERIC, f.expected::NUMERIC
+FROM (VALUES
+    -- name, from, to, now,  e_lead_from, e_lead_to, e_trail_from, e_trail_to, e_mm_from, e_mm_to
+    ('current_month_lastday','2024-12-01'::date,'2025-01-31'::date,'2025-01-15'::date,
+        30000101,19000101,20250101,20250131,20241201,20241201),
+    ('sealed_month_lastday','2024-12-01'::date,'2025-01-31'::date,'2025-03-10'::date,
+        30000101,19000101,30000101,19000101,20241201,20250101),
+    ('current_month_midmonth','2024-12-01'::date,'2025-01-15'::date,'2025-01-15'::date,
+        30000101,19000101,20250101,20250115,20241201,20241201),
+    ('mixed_edges_sealed','2016-04-15'::date,'2016-06-20'::date,'2026-07-01'::date,
+        20160415,20160430,20160601,20160620,20160501,20160501),
+    ('single_month','2016-04-01'::date,'2016-04-30'::date,'2026-07-01'::date,
+        20160401,20160430,30000101,19000101,30000101,19000101)
+) AS c(name, f_from, f_to, f_now,
+        e_lead_from, e_lead_to, e_trail_from, e_trail_to, e_mm_from, e_mm_to)
+CROSS JOIN LATERAL haf_stats_app.top_accounts_window(c.f_from, c.f_to, c.f_now) w
+CROSS JOIN LATERAL (VALUES
+    ('lead_from',  w.lead_from,  c.e_lead_from),
+    ('lead_to',    w.lead_to,    c.e_lead_to),
+    ('trail_from', w.trail_from, c.e_trail_from),
+    ('trail_to',   w.trail_to,   c.e_trail_to),
+    ('mm_from',    w.mm_from,    c.e_mm_from),
+    ('mm_to',      w.mm_to,      c.e_mm_to)
+) AS f(field, actual, expected);
 
 \echo '== parity result =='
 SELECT metric, field, endpoint_val, independent_val,

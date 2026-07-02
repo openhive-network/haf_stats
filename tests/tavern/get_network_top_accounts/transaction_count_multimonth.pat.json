@@ -1,0 +1,42 @@
+[
+  {
+    "rank": 1,
+    "account": "tuck-fheman",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 4548
+  },
+  {
+    "rank": 2,
+    "account": "steem",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 3401
+  },
+  {
+    "rank": 3,
+    "account": "pharesim",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 2580
+  },
+  {
+    "rank": 4,
+    "account": "dmitry",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 2205
+  },
+  {
+    "rank": 5,
+    "account": "pfunk",
+    "value_hive_nai": 0,
+    "value_hbd_nai": 0,
+    "value_vests_nai": 0,
+    "op_count": 2161
+  }
+]

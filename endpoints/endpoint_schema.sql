@@ -52,6 +52,74 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
 
+-- get_network_top_accounts window decomposition (issue #37). Splits [_from, _to]
+-- into the full interior months served from the *_monthly rollups plus the partial
+-- leading/trailing months served from the daily tables. Extracted from the endpoint
+-- so the split — in particular the current-month seal guard — is unit-testable with an
+-- injected _now (the endpoint passes NOW()::DATE; the parity suite passes literals,
+-- since a replay-based HTTP test can never make "the trailing month == the current
+-- month AND has data"). IMMUTABLE: a pure function of its three arguments.
+--
+-- Unused sub-ranges get an inverted [3000-01-01, 1900-01-01] bound so their index scan
+-- returns nothing. Guarantee (verified in tests/parity): the leading days, trailing
+-- days, and full months (expanded to days) partition [_from, _to] exactly — every day
+-- covered once, nothing outside. The trailing month folds into the rollup only when it
+-- is (a) fully elapsed (_to is its last day) AND (b) sealed (not the in-progress current
+-- month) — the rollup lags daily by up to one refresh gate (~1h), so the current month
+-- must come from daily to stay byte-exact even when queried on its final calendar day.
+-- Interior/leading rollup months are always strictly before the trailing month (hence
+-- sealed); a leading current month only arises in the same-month all-daily case.
+CREATE OR REPLACE FUNCTION haf_stats_app.top_accounts_window(
+    _from DATE,
+    _to DATE,
+    _now DATE,
+    OUT lead_from DATE,
+    OUT lead_to DATE,
+    OUT trail_from DATE,
+    OUT trail_to DATE,
+    OUT mm_from DATE,
+    OUT mm_to DATE
+)
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    _m_from DATE := DATE_TRUNC('month', _from)::DATE;  -- first day of _from's month
+    _m_to   DATE := DATE_TRUNC('month', _to)::DATE;    -- first day of _to's month
+    _empty_from CONSTANT DATE := DATE '3000-01-01';
+    _empty_to   CONSTANT DATE := DATE '1900-01-01';
+BEGIN
+    IF _m_from = _m_to THEN
+        -- Single calendar month: read it all from daily; no rollup, no trailing piece.
+        lead_from  := _from;       lead_to  := _to;
+        trail_from := _empty_from; trail_to := _empty_to;
+        mm_from    := _empty_from;  mm_to   := _empty_to;
+    ELSE
+        -- Leading month: whole month -> rollup when _from is the 1st, else daily to month end.
+        IF _from = _m_from THEN
+            lead_from := _empty_from; lead_to := _empty_to;
+            mm_from   := _m_from;
+        ELSE
+            lead_from := _from;
+            lead_to   := (_m_from + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
+            mm_from   := (_m_from + INTERVAL '1 month')::DATE;
+        END IF;
+        -- Trailing month: fold into the rollup only when fully elapsed AND sealed.
+        IF _to = (_m_to + INTERVAL '1 month' - INTERVAL '1 day')::DATE
+           AND _m_to < DATE_TRUNC('month', _now)::DATE THEN
+            trail_from := _empty_from; trail_to := _empty_to;
+            mm_to      := _m_to;
+        ELSE
+            trail_from := _m_to;
+            trail_to   := _to;
+            mm_to      := (_m_to - INTERVAL '1 month')::DATE;
+        END IF;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.top_accounts_window(DATE, DATE, DATE) TO haf_stats_user;
+
 /** openapi
 openapi: 3.1.0
 info:
@@ -3563,9 +3631,26 @@ DECLARE
     _category TEXT;
     _direction TEXT;
     _balance_rel TEXT;
+    -- Window decomposition for the daily/monthly hybrid (issue #37): full interior
+    -- months are read from the *_monthly rollups; the partial leading/trailing months
+    -- (including the always-in-progress current month) are read from the daily tables,
+    -- so results stay byte-exact and the current month is never stale. The split lives
+    -- in haf_stats_app.top_accounts_window (unit-tested there with an injected _now); an
+    -- unused sub-range comes back as an inverted [3000-01-01, 1900-01-01] bound so its
+    -- index scan returns nothing. See the reward branch for how the pieces are UNIONed.
+    _lead_from DATE;        -- daily leading partial range
+    _lead_to DATE;
+    _trail_from DATE;       -- daily trailing partial range
+    _trail_to DATE;
+    _mm_from DATE;          -- monthly full-month range (month-start keys)
+    _mm_to DATE;
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    SELECT w.lead_from, w.lead_to, w.trail_from, w.trail_to, w.mm_from, w.mm_to
+      INTO _lead_from, _lead_to, _trail_from, _trail_to, _mm_from, _mm_to
+      FROM haf_stats_app.top_accounts_window(_from, _to, NOW()::DATE) w;
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "author_rewards"); see issue #22.
     "metric" := TRIM('"' FROM "metric");
@@ -3594,21 +3679,36 @@ BEGIN
 
         RETURN QUERY
         -- Rewards are HBD/VESTS mixes; VESTS (the HP part) is the dominant and
-        -- always-present component, so it leads the sort key.
-        WITH top AS (
-            SELECT
-                f.account_id,
-                SUM(f.hive_nai)  AS hive,
-                SUM(f.hbd_nai)   AS hbd,
-                SUM(f.vests_nai) AS vests,
-                SUM(f.op_count)  AS ops
+        -- always-present component, so it leads the sort key. src UNIONs the full
+        -- interior months (rollup) with the partial leading/trailing days (daily);
+        -- unused pieces match nothing via their inverted bounds (issue #37).
+        WITH src AS (
+            SELECT m.account_id, m.hive_nai, m.hbd_nai, m.vests_nai, m.op_count
+            FROM haf_stats_backend.account_financial_monthly m
+            WHERE m.category = _category AND m.direction = 'incoming'
+              AND m.month BETWEEN _mm_from AND _mm_to
+            UNION ALL
+            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = _category
-              AND f.direction = 'incoming'
-              AND f.day BETWEEN _from AND _to
-            GROUP BY f.account_id
-            ORDER BY SUM(f.vests_nai) DESC, SUM(f.hbd_nai) DESC,
-                SUM(f.hive_nai) DESC, f.account_id ASC
+            WHERE f.category = _category AND f.direction = 'incoming'
+              AND f.day BETWEEN _lead_from AND _lead_to
+            UNION ALL
+            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
+            FROM haf_stats_backend.account_financial_daily f
+            WHERE f.category = _category AND f.direction = 'incoming'
+              AND f.day BETWEEN _trail_from AND _trail_to
+        ),
+        top AS (
+            SELECT
+                s.account_id,
+                SUM(s.hive_nai)  AS hive,
+                SUM(s.hbd_nai)   AS hbd,
+                SUM(s.vests_nai) AS vests,
+                SUM(s.op_count)  AS ops
+            FROM src s
+            GROUP BY s.account_id
+            ORDER BY SUM(s.vests_nai) DESC, SUM(s.hbd_nai) DESC,
+                SUM(s.hive_nai) DESC, s.account_id ASC
             LIMIT "limit_count"
         )
         SELECT
@@ -3631,19 +3731,32 @@ BEGIN
 
         RETURN QUERY
         -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
-        -- leads the sort key.
-        WITH top AS (
-            SELECT
-                f.account_id,
-                SUM(f.hive_nai) AS hive,
-                SUM(f.hbd_nai)  AS hbd,
-                SUM(f.op_count) AS ops
+        -- leads the sort key. Same daily/monthly hybrid as the reward branch (#37).
+        WITH src AS (
+            SELECT m.account_id, m.hive_nai, m.hbd_nai, m.op_count
+            FROM haf_stats_backend.account_financial_monthly m
+            WHERE m.category = 'transfer_operation' AND m.direction = _direction
+              AND m.month BETWEEN _mm_from AND _mm_to
+            UNION ALL
+            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = 'transfer_operation'
-              AND f.direction = _direction
-              AND f.day BETWEEN _from AND _to
-            GROUP BY f.account_id
-            ORDER BY SUM(f.hive_nai) DESC, SUM(f.hbd_nai) DESC, f.account_id ASC
+            WHERE f.category = 'transfer_operation' AND f.direction = _direction
+              AND f.day BETWEEN _lead_from AND _lead_to
+            UNION ALL
+            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
+            FROM haf_stats_backend.account_financial_daily f
+            WHERE f.category = 'transfer_operation' AND f.direction = _direction
+              AND f.day BETWEEN _trail_from AND _trail_to
+        ),
+        top AS (
+            SELECT
+                s.account_id,
+                SUM(s.hive_nai) AS hive,
+                SUM(s.hbd_nai)  AS hbd,
+                SUM(s.op_count) AS ops
+            FROM src s
+            GROUP BY s.account_id
+            ORDER BY SUM(s.hive_nai) DESC, SUM(s.hbd_nai) DESC, s.account_id ASC
             LIMIT "limit_count"
         )
         SELECT
@@ -3661,14 +3774,29 @@ BEGIN
     ELSIF "metric" = 'transaction_count' THEN
         RETURN QUERY
         -- op_class -1 is the ALL rollup: every authored op, counted once per
-        -- distinct signer (see process_active_users.sql).
-        WITH top AS (
-            SELECT au.account_id, SUM(au.ops) AS ops
+        -- distinct signer (see process_active_users.sql). Same daily/monthly hybrid
+        -- as the reward branch, over the per-account monthly ops rollup (#37).
+        WITH src AS (
+            SELECT m.account_id, m.ops
+            FROM haf_stats_backend.active_users_account_monthly m
+            WHERE m.op_class = -1
+              AND m.month BETWEEN _mm_from AND _mm_to
+            UNION ALL
+            SELECT au.account_id, au.ops
             FROM haf_stats_backend.active_users_daily au
             WHERE au.op_class = -1
-              AND au.day BETWEEN _from AND _to
-            GROUP BY au.account_id
-            ORDER BY SUM(au.ops) DESC, au.account_id ASC
+              AND au.day BETWEEN _lead_from AND _lead_to
+            UNION ALL
+            SELECT au.account_id, au.ops
+            FROM haf_stats_backend.active_users_daily au
+            WHERE au.op_class = -1
+              AND au.day BETWEEN _trail_from AND _trail_to
+        ),
+        top AS (
+            SELECT s.account_id, SUM(s.ops) AS ops
+            FROM src s
+            GROUP BY s.account_id
+            ORDER BY SUM(s.ops) DESC, s.account_id ASC
             LIMIT "limit_count"
         )
         SELECT

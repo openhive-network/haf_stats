@@ -23,3 +23,60 @@ stages:
         content-type: "application/json; charset=utf-8"
       verify_response_with:
         function: validate_response:compare_rest_response_with_pattern
+
+  # Multi-month windows exercise the daily/monthly hybrid (issue #37): a partial
+  # leading month + full interior month (read from the *_monthly rollup) + partial
+  # trailing month. These must stay byte-identical to a pure daily aggregation.
+  - name: GET /rpc/get_network_top_accounts transfer-volume across months
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transfer_volume_in"
+        from_date: "2016-04-15"
+        to_date: "2016-06-20"
+        limit_count: "5"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "transfer_volume_in_multimonth.pat.json"
+
+  - name: GET /rpc/get_network_top_accounts author-rewards across months
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "author_rewards"
+        from_date: "2016-07-15"
+        to_date: "2016-09-10"
+        limit_count: "5"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "author_rewards_multimonth.pat.json"
+
+  - name: GET /rpc/get_network_top_accounts transaction-count across months
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transaction_count"
+        from_date: "2016-04-15"
+        to_date: "2016-06-20"
+        limit_count: "5"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "transaction_count_multimonth.pat.json"
