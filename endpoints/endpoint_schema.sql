@@ -3601,8 +3601,16 @@ BEGIN
             _lead_to   := (_m_from + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
             _mm_from   := (_m_from + INTERVAL '1 month')::DATE;
         END IF;
-        -- Trailing month: whole month -> rollup when _to is the last day, else daily from month start.
-        IF _to = (_m_to + INTERVAL '1 month' - INTERVAL '1 day')::DATE THEN
+        -- Trailing month: fold into the rollup only when it is a fully-elapsed
+        -- calendar month — (a) _to is its last day AND (b) it is not the in-progress
+        -- current month. The rollup lags daily by up to one refresh gate (~1h), so the
+        -- current month must be read from daily to stay byte-exact even when the window
+        -- ends on its final calendar day (reachable via the default to_date = NOW() on a
+        -- month-end). Otherwise read the trailing month from daily. (Interior/leading
+        -- rollup months are always strictly before the trailing month, hence sealed; a
+        -- leading current month only arises in the same-month case, already all-daily.)
+        IF _to = (_m_to + INTERVAL '1 month' - INTERVAL '1 day')::DATE
+           AND _m_to < DATE_TRUNC('month', NOW())::DATE THEN
             _trail_from := _empty_from; _trail_to := _empty_to;
             _mm_to      := _m_to;
         ELSE
