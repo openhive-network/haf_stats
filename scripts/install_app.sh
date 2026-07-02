@@ -96,6 +96,14 @@ psql_cmd -c "
         'haf_stats_backend.author_cohort_retention',
         'haf_stats_backend.author_cohort_members',
         'SELECT haf_stats_app.refresh_author_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.account_financial_monthly',
+        'haf_stats_backend.account_financial_daily',
+        'SELECT haf_stats_app.refresh_financial_monthly(''2016-03-24'')');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.active_users_account_monthly',
+        'haf_stats_backend.active_users_daily',
+        'SELECT haf_stats_app.refresh_active_users_account_monthly(''2016-03-24'')');
     RESET ROLE;
 "
 

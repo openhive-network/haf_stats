@@ -130,6 +130,23 @@ INSERT INTO _parity VALUES
    WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
      AND b.created_at>='2016-04-01' AND b.created_at<'2016-05-01'));
 
+-- 4b) get_network_top_accounts transfer_volume_in across MONTHS (2016-04-15..2016-06-20)
+--     — exercises the daily/monthly hybrid (issue #37): the interior month (May) is
+--     served from account_financial_monthly, the partial edges from the daily table.
+--     bittrex is rank 1; recompute its incoming HIVE straight from raw operations, so
+--     this validates the rollup end-to-end against the source, not just against daily.
+INSERT INTO _parity VALUES
+('top_accounts.transfer_in_multimonth_rank1','value_hive_nai',
+ (SELECT value_hive_nai FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-15','2016-06-20',5) WHERE rank=1),
+ (SELECT SUM((body_value->'amount'->>'amount')::BIGINT) FROM hafd.operations o JOIN hafd.blocks b ON b.num=hafd.operation_id_to_block_num(o.id)
+   WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
+     AND b.created_at>='2016-04-15' AND b.created_at<'2016-06-21')),
+('top_accounts.transfer_in_multimonth_rank1','op_count',
+ (SELECT op_count FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-15','2016-06-20',5) WHERE rank=1),
+ (SELECT COUNT(*) FROM hafd.operations o JOIN hafd.blocks b ON b.num=hafd.operation_id_to_block_num(o.id)
+   WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
+     AND b.created_at>='2016-04-15' AND b.created_at<'2016-06-21'));
+
 -- 5) get_account_content_stats (tuck-fheman, 2016-04 month)
 INSERT INTO _parity VALUES
 ('account_content_stats.tuck-fheman','posts',

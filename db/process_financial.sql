@@ -61,6 +61,86 @@ ON haf_stats_backend.account_financial_daily (category, direction, day);
 GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
+-- Monthly leaderboard rollup (get_network_top_accounts performance, issue #37)
+--
+-- get_network_top_accounts aggregates account_financial_daily over the requested
+-- [from_date, to_date] window. Latency scales with the window width (a 365-day
+-- curation_rewards leaderboard scans ~2.9M daily rows / gigabytes of heap, ~20s
+-- cold), because it sums DAILY rows at request time. This table pre-aggregates the
+-- same amounts to one row per (account, month) so a wide window reads ~12 monthly
+-- rows per account instead of ~365 daily ones. The endpoint reads full interior
+-- months from here and the partial edge months (including the always-in-progress
+-- current month) straight from account_financial_daily, so results stay byte-exact
+-- and the current month is never stale.
+--
+-- Scope: only the categories/directions the leaderboard exposes (author/curation
+-- rewards incoming, transfers in/out). Adding a new metric to the endpoint that
+-- reads a category NOT listed here would silently undercount its interior months —
+-- extend refresh_financial_monthly's category filter in lockstep (guarded by the
+-- multi-month parity case in tests/parity).
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_monthly (
+    account_id INT NOT NULL,
+    month DATE NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, month, category, direction)
+);
+
+-- Same leaderboard access path as the daily index, one grain up: a
+-- (category, direction, month)-range scan across all accounts.
+CREATE INDEX IF NOT EXISTS idx_afm_category_direction_month
+ON haf_stats_backend.account_financial_monthly (category, direction, month);
+
+GRANT SELECT ON haf_stats_backend.account_financial_monthly TO haf_stats_user;
+
+-- Recompute every month touched by [_lo, _hi] exactly from the daily table. A whole
+-- month is always recomputed from its first day (the scan starts at _month_lo, never
+-- mid-month) so a month's totals are complete; the in-progress current month is
+-- recomputed month-to-date on each run, which is harmless because the endpoint serves
+-- the current/partial month from account_financial_daily and never from this rollup.
+-- REPLACE semantics (DO UPDATE SET = EXCLUDED): each run fully restates the months it
+-- covers from daily, matching refresh_active_users_periods. Passing NULL _hi restates
+-- from _lo forward (one-time genesis backfill). Only the leaderboard categories are
+-- materialised (see the table comment above).
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_financial_monthly(
+    _lo DATE,
+    _hi DATE DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+BEGIN
+    INSERT INTO haf_stats_backend.account_financial_monthly
+        (account_id, month, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
+    SELECT
+        f.account_id,
+        DATE_TRUNC('month', f.day)::DATE,
+        f.category,
+        f.direction,
+        SUM(f.hive_nai)::BIGINT,
+        SUM(f.hbd_nai)::BIGINT,
+        SUM(f.vests_nai)::BIGINT,
+        SUM(f.op_count)::BIGINT
+    FROM haf_stats_backend.account_financial_daily f
+    WHERE f.category IN ('author_reward_operation', 'curation_reward_operation', 'transfer_operation')
+      AND f.day >= _month_lo
+      AND (_hi IS NULL OR f.day <= _hi)
+    GROUP BY f.account_id, DATE_TRUNC('month', f.day)::DATE, f.category, f.direction
+    ON CONFLICT (account_id, month, category, direction) DO UPDATE SET
+        hive_nai  = EXCLUDED.hive_nai,
+        hbd_nai   = EXCLUDED.hbd_nai,
+        vests_nai = EXCLUDED.vests_nai,
+        op_count  = EXCLUDED.op_count;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Processor
 --
 -- Single pass: one INSERT … SELECT over a UNION ALL of per-operation "legs".
@@ -122,6 +202,9 @@ DECLARE
     _liquidity_reward_id           INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::liquidity_reward_operation');
     _proposal_pay_id               INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::proposal_pay_operation');
     _fill_order_id                 INT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::fill_order_operation');
+    _first_day DATE;
+    _last_day DATE;
+    _refresh_lo_block INT;
 BEGIN
 
 INSERT INTO haf_stats_backend.account_financial_daily
@@ -508,6 +591,26 @@ ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
     hbd_nai   = account_financial_daily.hbd_nai   + EXCLUDED.hbd_nai,
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,
     op_count  = account_financial_daily.op_count  + EXCLUDED.op_count;
+
+-- Refresh the get_network_top_accounts monthly rollup (issue #37). Same gated
+-- pattern as process_active_users' period refresh: only fire when the batch crosses
+-- a ~1200-block (~1 hour) boundary, and recompute every month that received data
+-- since the previous fire. The lower bound reaches back to that bucket's start
+-- ((_first_block - 1) / 1200 * 1200) so LIVE batches that accumulated in the bucket
+-- without crossing it are still covered; _month_lo inside the refresh rounds it down
+-- to the month start so partial-day lower bounds always restate a whole month. A
+-- one-time full backfill is available via
+-- SELECT haf_stats_app.refresh_financial_monthly(<genesis day>, NULL).
+IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
+    _refresh_lo_block := GREATEST(((_first_block - 1) / 1200) * 1200, 1);
+    SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _refresh_lo_block;
+    SELECT created_at::DATE INTO _last_day  FROM hafd.blocks WHERE num = _last_block;
+    IF _first_day IS NULL THEN
+        SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
+    END IF;
+
+    PERFORM haf_stats_app.refresh_financial_monthly(_first_day, _last_day);
+END IF;
 
 END;
 $$;

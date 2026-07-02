@@ -48,6 +48,7 @@ log "The haf_stats processor must remain stopped until this command finishes."
 
 psql_cmd -c "
     TRUNCATE TABLE haf_stats_backend.account_financial_daily;
+    TRUNCATE TABLE haf_stats_backend.account_financial_monthly;
 "
 
 first="${FROM_BLOCK}"
@@ -61,5 +62,14 @@ while (( first <= TO_BLOCK )); do
     psql_cmd -c "SELECT haf_stats_app.process_financial(${first}, ${last});"
     first=$((last + 1))
 done
+
+# process_financial's per-batch hook restates the monthly rollup as it goes, but a
+# final remainder batch shorter than the ~1200-block gate would not fire it, so seal
+# the last processed month explicitly (cheap: one month) to guarantee full coverage.
+log "Sealing the final month of the financial monthly rollup..."
+psql_cmd -c "
+    SELECT haf_stats_app.refresh_financial_monthly(
+        (SELECT DATE_TRUNC('month', created_at)::DATE FROM hafd.blocks WHERE num = ${TO_BLOCK}));
+"
 
 log "Financial rebuild complete."
