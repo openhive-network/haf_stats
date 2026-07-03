@@ -68,6 +68,31 @@ ADD COLUMN IF NOT EXISTS ops INT NOT NULL DEFAULT 0;
 
 GRANT SELECT ON haf_stats_backend.active_users_daily TO haf_stats_user;
 
+-- Covering index for get_network_top_accounts' transaction_count branch, which scans
+-- WHERE op_class = -1 AND day BETWEEN _from AND _to, GROUP BY account_id (#29 item 6).
+-- The PK (day, op_class, account_id) leads with day, so that query range-scans every
+-- op_class across the window. Leading with op_class (an equality key) + day (the range)
+-- and INCLUDE-ing account_id/ops lets the branch satisfy itself with an index-only scan
+-- of just the op_class = -1 slice. CONCURRENTLY + INVALID-leftover heal for the same
+-- reason as idx_pe_post_day (process_content_stats): install_app.sh loads this file with
+-- a plain psql -f (statement autocommit), and active_users_daily is large, so a plain
+-- build on an already-populated upgrade would take an ACCESS EXCLUSIVE lock.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'haf_stats_backend'
+          AND c.relname = 'idx_aud_opclass_day'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX haf_stats_backend.idx_aud_opclass_day;
+    END IF;
+END $$;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_aud_opclass_day
+ON haf_stats_backend.active_users_daily (op_class, day) INCLUDE (account_id, ops);
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
     day DATE NOT NULL,
     op_class SMALLINT NOT NULL,

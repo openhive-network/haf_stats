@@ -45,6 +45,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
 
 # 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
 #     unavailable (e.g. CI), so it never fails the install. Scheduling is a deploy step.
@@ -85,6 +86,14 @@ psql_cmd -c "
         'haf_stats_backend.network_vote_daily',
         'SELECT haf_stats_app.refresh_network_vote_periods(''2016-03-24'')');
     SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.network_content_period_counts',
+        'haf_stats_backend.network_content_daily',
+        'SELECT haf_stats_app.refresh_network_content_periods(''2016-03-24'')');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.engagement_period_counts',
+        'haf_stats_backend.post_engagement',
+        'SELECT haf_stats_app.refresh_engagement_full()');
+    SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.active_users_period_counts',
         'haf_stats_backend.active_users_daily',
         'SELECT haf_stats_app.refresh_active_users_periods(''2016-03-24'')');
@@ -107,12 +116,13 @@ psql_cmd -c "
     RESET ROLE;
 "
 
-# 8b. Compute the governance-concentration snapshot once so the endpoint is populated
-#     immediately on an already-synced node. No-op-safe: writes nothing without a readable
-#     balance relation. Recurring refresh is a pg_cron deploy step (see the file header in
-#     db/process_governance_concentration.sql).
-log "Computing initial governance concentration snapshot (if a balance tracker is readable)..."
+# 8b. Compute the current-state snapshots once so their endpoints are populated immediately on
+#     an already-synced node. No-op-safe: each writes nothing without a readable balance
+#     relation. Recurring refresh is a pg_cron deploy step (see the file headers in
+#     db/process_governance_concentration.sql and db/process_hp_distribution.sql).
+log "Computing initial governance concentration + HP distribution snapshots (if a balance tracker is readable)..."
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_governance_concentration(); RESET ROLE;"
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_hp_distribution_snapshot(); RESET ROLE;"
 
 log "Installation complete."
 

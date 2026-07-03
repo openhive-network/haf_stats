@@ -400,6 +400,18 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_author_daily (
     PRIMARY KEY (day, author_id)
 );
 
+-- get_network_content_volume reads this rollup directly (mirrors process_content_stats.sql,
+-- not loaded by the stub). Left empty: content_volume's value tests are patterntest-only (real
+-- replay), so the fast stub gate exercises only its param/negative paths, which never read it.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_content_period_counts (
+    period_type    TEXT   NOT NULL,
+    period         DATE   NOT NULL,
+    posts          BIGINT NOT NULL DEFAULT 0,
+    comments       BIGINT NOT NULL DEFAULT 0,
+    unique_authors BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
     day        DATE NOT NULL,
     upvotes    INT  NOT NULL DEFAULT 0,
@@ -453,6 +465,33 @@ VALUES
     (1, 'first-post',  '2016-03-15', 5, 2),
     (1, 'second-post', '2016-03-16', 0, 0),
     (1, 'third-post',  '2016-03-17', 3, 1)
+ON CONFLICT DO NOTHING;
+
+-- Engagement rollup (mirrors process_content_stats.sql, which the stub does not load, exactly
+-- like network_vote_period_counts above). get_network_engagement reads engagement_period_counts
+-- directly; the processor does not run here, so seed it as refresh_engagement_full() would from
+-- the 3 posts: day rows (each post's creation day) + the 2016-03 month rollup (sums: votes
+-- 5+0+3=8, replies 2+0+1=3; one zero-vote and one zero-reply post). Only this table is needed -
+-- the endpoint reads nothing else (engagement_daily was removed; engagement_touched_days is
+-- processor-internal), so no other engagement stubs are created here.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.engagement_period_counts (
+    period_type        TEXT   NOT NULL,
+    period             DATE   NOT NULL,
+    total_posts        BIGINT NOT NULL DEFAULT 0,
+    sum_votes          BIGINT NOT NULL DEFAULT 0,
+    sum_replies        BIGINT NOT NULL DEFAULT 0,
+    zero_vote_posts    BIGINT NOT NULL DEFAULT 0,
+    zero_comment_posts BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
+INSERT INTO haf_stats_backend.engagement_period_counts
+    (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+VALUES
+    ('day',   '2016-03-15', 1, 5, 2, 0, 0),
+    ('day',   '2016-03-16', 1, 0, 0, 1, 1),
+    ('day',   '2016-03-17', 1, 3, 1, 0, 0),
+    ('month', '2016-03-01', 3, 8, 3, 1, 1)
 ON CONFLICT DO NOTHING;
 
 -- DApp footprint stub: account_custom_json_daily + rc_op_stats_daily (mirror

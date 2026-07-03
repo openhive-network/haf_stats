@@ -7,8 +7,9 @@ version: "3.8"
 # hafd schema is mocked via tests/ci_setup.sql so endpoint functions that
 # join against hafd.accounts / hafd.operation_types can exercise deterministic
 # empty and error paths without pretending to validate mainnet values.
-# get_network_hp_distribution gracefully handles missing btracker_app
-# via its EXCEPTION WHEN undefined_table handler.
+# get_network_hp_distribution reads the precomputed hp_distribution_snapshot;
+# missing btracker_app is handled in refresh_hp_distribution_snapshot (the
+# information_schema probe leaves the snapshot empty -> endpoint returns []).
 #
 # Do NOT use --abort-on-container-exit — the setup container exits normally
 # after running SQL, which would abort postgrest before tavern finishes.
@@ -39,6 +40,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /seed_data.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_governance_concentration.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_governance_concentration();" &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_hp_distribution.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_hp_distribution_snapshot();" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SET custom.swagger_url = 'localhost';" -f /endpoint_schema.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_backend TO haf_stats_user; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;"
     volumes:
@@ -48,6 +51,7 @@ services:
       - ../db/seed_data.sql:/seed_data.sql:ro
       - ../db/process_account_cohorts.sql:/process_account_cohorts.sql:ro
       - ../db/process_governance_concentration.sql:/process_governance_concentration.sql:ro
+      - ../db/process_hp_distribution.sql:/process_hp_distribution.sql:ro
       - ../endpoints/endpoint_schema.sql:/endpoint_schema.sql:ro
     depends_on:
       postgres:

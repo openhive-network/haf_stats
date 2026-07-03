@@ -104,6 +104,45 @@ ON haf_stats_backend.post_engagement (post_day);
 
 GRANT SELECT ON haf_stats_backend.post_engagement TO haf_stats_user;
 
+-- Pre-aggregated endpoint rollup for get_network_engagement. One row per (period_type, period)
+-- with five additive metrics; the endpoint reconstructs avg_votes_per_post = sum_votes /
+-- total_posts, avg_comments_per_post = sum_replies / total_posts, and the zero-engagement
+-- percentages, so a wide range is a single indexed range scan instead of a COUNT/AVG/FILTER over
+-- the whole post set. period is DATE_TRUNC(period_type, day); period_type is 'day'|'week'|'month'.
+-- Every post belongs to exactly one creation-day, so all five metrics are ADDITIVE across days:
+-- the 'week'/'month' rows are just the SUM of their period's 'day' rows (including the
+-- zero_vote_posts / zero_comment_posts "created that period with no votes/replies yet" counts,
+-- which split per creation-day with no double counting). That is what lets the refresh roll
+-- day -> week/month by summing this table's own tiny 'day' slice (~one row per day) rather than
+-- re-scanning the millions-of-rows post_engagement per period.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.engagement_period_counts (
+    period_type TEXT NOT NULL,
+    period DATE NOT NULL,
+    total_posts BIGINT NOT NULL DEFAULT 0,
+    sum_votes BIGINT NOT NULL DEFAULT 0,
+    sum_replies BIGINT NOT NULL DEFAULT 0,
+    zero_vote_posts BIGINT NOT NULL DEFAULT 0,
+    zero_comment_posts BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
+GRANT SELECT ON haf_stats_backend.engagement_period_counts TO haf_stats_user;
+
+-- Staging set of post CREATION days whose post_engagement counts changed since the last rollup
+-- refresh. Unlike votes/content (keyed by activity day = current block day), a vote or reply
+-- landing on an OLD post mutates that post's old creation-day period, which the forward
+-- block-window refresh would never revisit. So every post_engagement insert/update records its
+-- post_day here (see the processor), and the ~1200-block boundary drains this set: it recomputes
+-- the 'day' rollup rows for exactly these (possibly scattered, possibly ancient) days and re-rolls
+-- their week/month periods - exact, and bounded by the days actually touched this window, NOT a
+-- contiguous genesis..now range. A regular (logged) table so a crash cannot silently drop
+-- un-drained days and leave the rollup permanently behind (it is tiny - a few days per hour).
+CREATE TABLE IF NOT EXISTS haf_stats_backend.engagement_touched_days (
+    day DATE NOT NULL PRIMARY KEY
+);
+
+GRANT SELECT ON haf_stats_backend.engagement_touched_days TO haf_stats_user;
+
 -- Daily created-content counters (additive across batches). edits is stored too
 -- so the invariant posts + comments + edits = raw comment_operation count stays
 -- verifiable per day against hive.operations_view.
@@ -131,6 +170,26 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_author_daily (
 );
 
 GRANT SELECT ON haf_stats_backend.network_author_daily TO haf_stats_user;
+
+-- Pre-aggregated endpoint rollup for get_network_content_volume. posts/comments are
+-- additive across days, but unique_authors is NOT (an author active on several days in a
+-- week/month counts once), so the endpoint previously COUNT(DISTINCT author_id)-scanned the
+-- whole network_author_daily membership on every request - fine at the 30-day daily default
+-- but several seconds on wide week/month ranges (past the Wax 2s client timeout). Mirroring
+-- network_vote_period_counts below, we precompute one row per (period_type, period): the
+-- additive posts/comments summed and the distinct author count materialised. period is
+-- DATE_TRUNC(period_type, day); period_type is 'day' | 'week' | 'month'. PK (period_type,
+-- period) makes the endpoint's period-range read a single index range scan.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_content_period_counts (
+    period_type TEXT NOT NULL,
+    period DATE NOT NULL,
+    posts BIGINT NOT NULL DEFAULT 0,
+    comments BIGINT NOT NULL DEFAULT 0,
+    unique_authors BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (period_type, period)
+);
+
+GRANT SELECT ON haf_stats_backend.network_content_period_counts TO haf_stats_user;
 
 -- Network-wide vote aggregates (get_network_vote_stats), populated from the same
 -- vote-op scan as the per-account stats below. Two tables, because the metrics
@@ -302,6 +361,219 @@ BEGIN
         upvotes = EXCLUDED.upvotes, downvotes = EXCLUDED.downvotes,
         unvotes = EXCLUDED.unvotes, self_votes = EXCLUDED.self_votes,
         unique_voters = EXCLUDED.unique_voters;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Rollup refresh (feeds get_network_content_volume)
+--
+-- Recomputes network_content_period_counts for every day/week/month period touched by
+-- [_lo, _hi], exactly (re-aggregates network_content_daily counters + network_author_daily
+-- author set). Direct sibling of refresh_network_vote_periods above: posts/comments come
+-- from the additive counter table, unique_authors from the (day, author) membership. Daily
+-- unique_authors needs no DISTINCT (the (day, author) PK gives one row per author per day,
+-- so COUNT(*)); week/month need COUNT(DISTINCT author_id). FULL JOIN per period so a period
+-- present in only one table is still written. Passing NULL _hi keeps the full-refresh-from-
+-- _lo behaviour for one-time backfills on already-synced nodes.
+-- ---------------------------------------------------------------------------
+
+-- Drop the legacy 1-arg signature (see refresh_network_vote_periods) so a 1-arg call
+-- resolves unambiguously to the 2-arg form below.
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_network_content_periods(DATE);
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_network_content_periods(
+    _lo DATE,
+    _hi DATE DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _week_lo DATE := DATE_TRUNC('week', _lo)::DATE;
+    _week_hi DATE := CASE
+        WHEN _hi IS NULL THEN NULL
+        ELSE (DATE_TRUNC('week', _hi)::DATE + INTERVAL '1 week')::DATE
+    END;
+    _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+    _month_hi DATE := CASE
+        WHEN _hi IS NULL THEN NULL
+        ELSE (DATE_TRUNC('month', _hi)::DATE + INTERVAL '1 month')::DATE
+    END;
+BEGIN
+    -- day: distinct-per-day unique_authors == row count of the (day, author) PK
+    INSERT INTO haf_stats_backend.network_content_period_counts
+        (period_type, period, posts, comments, unique_authors)
+    SELECT 'day', COALESCE(c.period, a.period),
+           COALESCE(c.posts, 0), COALESCE(c.comments, 0), COALESCE(a.authors, 0)
+    FROM (
+        SELECT day AS period, posts, comments
+        FROM haf_stats_backend.network_content_daily
+        WHERE day >= _lo
+          AND (_hi IS NULL OR day <= _hi)
+    ) c
+    FULL JOIN (
+        SELECT day AS period, COUNT(*) AS authors
+        FROM haf_stats_backend.network_author_daily
+        WHERE day >= _lo
+          AND (_hi IS NULL OR day <= _hi)
+        GROUP BY day
+    ) a ON a.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        posts = EXCLUDED.posts, comments = EXCLUDED.comments,
+        unique_authors = EXCLUDED.unique_authors;
+
+    -- week
+    INSERT INTO haf_stats_backend.network_content_period_counts
+        (period_type, period, posts, comments, unique_authors)
+    SELECT 'week', COALESCE(c.period, a.period),
+           COALESCE(c.posts, 0), COALESCE(c.comments, 0), COALESCE(a.authors, 0)
+    FROM (
+        SELECT DATE_TRUNC('week', day)::DATE AS period,
+               SUM(posts) AS posts, SUM(comments) AS comments
+        FROM haf_stats_backend.network_content_daily
+        WHERE day >= _week_lo
+          AND (_week_hi IS NULL OR day < _week_hi)
+        GROUP BY 1
+    ) c
+    FULL JOIN (
+        SELECT DATE_TRUNC('week', day)::DATE AS period, COUNT(DISTINCT author_id) AS authors
+        FROM haf_stats_backend.network_author_daily
+        WHERE day >= _week_lo
+          AND (_week_hi IS NULL OR day < _week_hi)
+        GROUP BY 1
+    ) a ON a.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        posts = EXCLUDED.posts, comments = EXCLUDED.comments,
+        unique_authors = EXCLUDED.unique_authors;
+
+    -- month
+    INSERT INTO haf_stats_backend.network_content_period_counts
+        (period_type, period, posts, comments, unique_authors)
+    SELECT 'month', COALESCE(c.period, a.period),
+           COALESCE(c.posts, 0), COALESCE(c.comments, 0), COALESCE(a.authors, 0)
+    FROM (
+        SELECT DATE_TRUNC('month', day)::DATE AS period,
+               SUM(posts) AS posts, SUM(comments) AS comments
+        FROM haf_stats_backend.network_content_daily
+        WHERE day >= _month_lo
+          AND (_month_hi IS NULL OR day < _month_hi)
+        GROUP BY 1
+    ) c
+    FULL JOIN (
+        SELECT DATE_TRUNC('month', day)::DATE AS period, COUNT(DISTINCT author_id) AS authors
+        FROM haf_stats_backend.network_author_daily
+        WHERE day >= _month_lo
+          AND (_month_hi IS NULL OR day < _month_hi)
+        GROUP BY 1
+    ) a ON a.period = c.period
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        posts = EXCLUDED.posts, comments = EXCLUDED.comments,
+        unique_authors = EXCLUDED.unique_authors;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Rollup refresh (feeds get_network_engagement)
+--
+-- Two entry points that maintain engagement_period_counts directly from post_engagement:
+--   refresh_engagement_full()     — rebuild everything (one GROUP BY post_day scan). Install-time
+--                                   backfill on an already-synced node + manual repairs. Clears the
+--                                   rollup, stages every creation-day, and delegates to
+--                                   refresh_engagement_touched (so the roll-up logic lives once).
+--   refresh_engagement_touched()  — forward path, called on the ~1200-block boundary: recompute the
+--                                   'day' rows for the creation-days staged in
+--                                   engagement_touched_days, re-roll their week/month periods from
+--                                   those 'day' rows, then drain the staging set.
+-- Both roll week/month by summing the rollup's own 'day' slice (~one row per day) rather than
+-- re-scanning the millions-of-rows post_engagement per period.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_full()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Rebuild from scratch: clear the rollup, stage every creation-day, then let the touched path
+    -- (which computes the 'day' rows from post_engagement and rolls week/month from them) fill it
+    -- all. Keeps the day/week/month roll-up SQL in one place (refresh_engagement_touched).
+    TRUNCATE haf_stats_backend.engagement_period_counts;
+
+    INSERT INTO haf_stats_backend.engagement_touched_days (day)
+    SELECT DISTINCT post_day FROM haf_stats_backend.post_engagement
+    ON CONFLICT (day) DO NOTHING;
+
+    PERFORM haf_stats_app.refresh_engagement_touched();
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_touched()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Nothing mutated since the last refresh -> nothing to do (cheap common case for a LIVE
+    -- batch on the boundary that produced no comments/votes).
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days) THEN
+        RETURN;
+    END IF;
+
+    -- 1. Recompute the 'day' rollup rows for exactly the touched creation-days (each an
+    -- idx_pe_post_day range). A day is only staged when a post with that post_day was inserted or
+    -- had its vote/reply count changed, and post_engagement rows are never deleted, so every touched
+    -- day still has >= 1 post - a 'day' row can only need upsert, never removal.
+    INSERT INTO haf_stats_backend.engagement_period_counts
+        (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+    SELECT 'day', pe.post_day,
+           COUNT(*),
+           SUM(pe.vote_count),
+           SUM(pe.reply_count),
+           COUNT(*) FILTER (WHERE pe.vote_count = 0),
+           COUNT(*) FILTER (WHERE pe.reply_count = 0)
+    FROM haf_stats_backend.post_engagement pe
+    WHERE pe.post_day IN (SELECT day FROM haf_stats_backend.engagement_touched_days)
+    GROUP BY pe.post_day
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
+        sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
+        zero_comment_posts = EXCLUDED.zero_comment_posts;
+
+    -- 2. Re-roll every week/month a touched day falls in by summing the rollup's own 'day' rows for
+    -- that period - ALL of the period's days, not just the touched ones, so the totals stay exact
+    -- even when only some of the period's days changed this window. The 'day' rows read here include
+    -- the ones just upserted in step 1 (a later statement in the same function sees them); reading
+    -- and writing engagement_period_counts in one statement is safe because the SELECT filters
+    -- period_type = 'day' while the INSERT only writes 'week'/'month' rows.
+    INSERT INTO haf_stats_backend.engagement_period_counts
+        (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+    SELECT 'week', DATE_TRUNC('week', d.period)::DATE,
+           SUM(d.total_posts), SUM(d.sum_votes), SUM(d.sum_replies),
+           SUM(d.zero_vote_posts), SUM(d.zero_comment_posts)
+    FROM haf_stats_backend.engagement_period_counts d
+    WHERE d.period_type = 'day'
+      AND DATE_TRUNC('week', d.period)::DATE IN (
+          SELECT DISTINCT DATE_TRUNC('week', day)::DATE FROM haf_stats_backend.engagement_touched_days)
+    GROUP BY 2   -- col 1 is the literal 'week'; group by the truncated date (col 2)
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
+        sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
+        zero_comment_posts = EXCLUDED.zero_comment_posts;
+
+    INSERT INTO haf_stats_backend.engagement_period_counts
+        (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+    SELECT 'month', DATE_TRUNC('month', d.period)::DATE,
+           SUM(d.total_posts), SUM(d.sum_votes), SUM(d.sum_replies),
+           SUM(d.zero_vote_posts), SUM(d.zero_comment_posts)
+    FROM haf_stats_backend.engagement_period_counts d
+    WHERE d.period_type = 'day'
+      AND DATE_TRUNC('month', d.period)::DATE IN (
+          SELECT DISTINCT DATE_TRUNC('month', day)::DATE FROM haf_stats_backend.engagement_touched_days)
+    GROUP BY 2   -- col 1 is the literal 'month'; group by the truncated date (col 2)
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
+        sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
+        zero_comment_posts = EXCLUDED.zero_comment_posts;
+
+    DELETE FROM haf_stats_backend.engagement_touched_days;
 END;
 $$;
 
@@ -570,6 +842,9 @@ insert_posts AS (
         ON br.author_id = c.author_id AND br.permlink = c.permlink
     WHERE c.is_create AND c.parent_author = ''
     ON CONFLICT (author_id, permlink) DO NOTHING
+    -- RETURNING yields only genuinely-inserted rows (ON CONFLICT skips re-creations),
+    -- i.e. this batch's new posts, so their creation-day gets total_posts refreshed.
+    RETURNING post_day
 ),
 -- Add this batch's replies to posts that existed before the statement. Posts just
 -- inserted by insert_posts are invisible here (same snapshot), so they match no
@@ -580,6 +855,19 @@ update_replies AS (
     FROM batch_replies br
     WHERE pe.author_id = br.author_id
       AND pe.permlink  = br.permlink
+    -- The replied-to post's creation-day may be old; record it so its engagement period
+    -- is re-rolled (the forward block-window refresh would never revisit it).
+    RETURNING pe.post_day
+),
+-- Stage every touched post creation-day (new posts + replied-to posts) for the boundary
+-- hook's refresh_engagement_touched(). A data-modifying CTE not read by the main statement
+-- still runs, so this executes even though account_content_daily below ignores it.
+stage_touched_content AS (
+    INSERT INTO haf_stats_backend.engagement_touched_days (day)
+    SELECT post_day FROM insert_posts
+    UNION
+    SELECT post_day FROM update_replies
+    ON CONFLICT (day) DO NOTHING
 )
 INSERT INTO haf_stats_backend.account_content_daily
     (account_id, day, posts, comments, replies_received)
@@ -685,6 +973,16 @@ update_engagement_votes AS (
     ) v
     WHERE pe.author_id = v.author_id
       AND pe.permlink  = v.permlink
+    -- The voted post's creation-day may be old; record it so its engagement period is
+    -- re-rolled by the boundary hook (see refresh_engagement_touched).
+    RETURNING pe.post_day
+),
+-- Stage the touched creation-days from this batch's votes for refresh_engagement_touched().
+-- Data-modifying CTE, unread by the main statement, so it runs on its own.
+stage_touched_votes AS (
+    INSERT INTO haf_stats_backend.engagement_touched_days (day)
+    SELECT DISTINCT post_day FROM update_engagement_votes
+    ON CONFLICT (day) DO NOTHING
 )
 -- Distinct (day, voter) presence set, resolved to account id once per pair. The
 -- counters above never touch hafd.accounts, so an (impossible) unknown voter can
@@ -695,17 +993,23 @@ FROM vote_ops vo
 JOIN hafd.accounts a ON a.name = vo.voter
 ON CONFLICT (day, voter_id) DO NOTHING;
 
--- Refresh the get_network_vote_stats rollup on a ~1200-block (~1h) boundary. Recompute
--- every day/week/month period that received data since the previous refresh. A batch fires
--- whenever it crosses a 1200-block bucket boundary, so every block processed since the
--- previous fire lies either in the bucket containing this batch's first block (LIVE batches
--- that did not cross a boundary accumulate there, and can spill into the previous calendar
--- day) or in this batch itself (a MASSIVE catch-up batch may span many buckets); the lower
--- bound reaches back to that bucket's start, ((_first_block - 1) / 1200) * 1200, anchored on
--- _first_block (not _last_block) so coverage stays correct even when a firing batch spans
--- several buckets after a skipped one. See process_active_users for the full rationale;
--- an already-synced node can still run a full refresh with
--- SELECT haf_stats_app.refresh_network_vote_periods(<genesis day>, NULL).
+-- Refresh the get_network_vote_stats and get_network_content_volume rollups on a ~1200-block
+-- (~1h) boundary. Recompute every day/week/month period that received data since the previous
+-- refresh. A batch fires whenever it crosses a 1200-block bucket boundary, so every block
+-- processed since the previous fire lies either in the bucket containing this batch's first
+-- block (LIVE batches that did not cross a boundary accumulate there, and can spill into the
+-- previous calendar day) or in this batch itself (a MASSIVE catch-up batch may span many
+-- buckets); the lower bound reaches back to that bucket's start, ((_first_block - 1) / 1200)
+-- * 1200, anchored on _first_block (not _last_block) so coverage stays correct even when a
+-- firing batch spans several buckets after a skipped one. See process_active_users for the
+-- full rationale. The vote and content rollups key on activity day = block day, so their
+-- block-window [_first_day, _last_day] refresh is exact. Engagement is different: its lifetime
+-- counts mutate posts by their (possibly old) creation-day, so it drives off the
+-- engagement_touched_days set staged above rather than the block window - refresh_engagement_
+-- touched() ignores _first_day/_last_day and drains exactly the touched creation-days. An
+-- already-synced node can still run full refreshes with
+-- SELECT haf_stats_app.refresh_network_vote_periods(<genesis day>, NULL) (and the
+-- refresh_network_content_periods sibling / refresh_engagement_full()).
 IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     _refresh_lo_block := GREATEST(((_first_block - 1) / 1200) * 1200, 1);
     SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _refresh_lo_block;
@@ -719,6 +1023,21 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     END IF;
 
     PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
+    PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
+
+    -- Engagement drain, gated. Unlike the vote/content refreshes (which re-aggregate only this
+    -- window's block-day rows), refresh_engagement_touched re-aggregates every touched CREATION-day,
+    -- whose posts can span the whole history. A large catch-up batch (post-downtime or a genesis
+    -- replay) touches creation-days across all of time, so draining it every boundary turns each
+    -- boundary into a near-full post_engagement re-scan - and re-scans the same popular old days on
+    -- every catch-up boundary. So we only drain when this batch is smaller than a bucket (LIVE or
+    -- light catch-up, i.e. at/near head). During a full-bucket-or-larger catch-up the touched days
+    -- just accumulate in the durable staging table and drain in a single pass once the node reaches
+    -- head. Freshness lags only while catching up (not serving); already-synced nodes are covered by
+    -- the install-time refresh_engagement_full backfill.
+    IF (_last_block - _first_block) < 1200 THEN
+        PERFORM haf_stats_app.refresh_engagement_touched();
+    END IF;
 END IF;
 
 END;
