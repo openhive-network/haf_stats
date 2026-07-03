@@ -476,10 +476,12 @@ $$;
 -- Rollup refresh (feeds get_network_engagement)
 --
 -- Two entry points that maintain engagement_period_counts directly from post_engagement:
---   refresh_engagement_full()     — rebuild everything (one GROUP BY post_day scan). Install-time
---                                   backfill on an already-synced node + manual repairs. Clears the
---                                   rollup, stages every creation-day, and delegates to
---                                   refresh_engagement_touched (so the roll-up logic lives once).
+--   refresh_engagement_full()     — rebuild everything. Install-time backfill on an already-synced
+--                                   node + manual repairs. Clears the rollup, stages every
+--                                   creation-day, and delegates to refresh_engagement_touched (so the
+--                                   roll-up logic lives once). Costs two post_engagement scans (one
+--                                   to stage the distinct days, one in touched to recompute them) vs
+--                                   the endpoint/hot path's zero - acceptable for a one-time backfill.
 --   refresh_engagement_touched()  — forward path, called on the ~1200-block boundary: recompute the
 --                                   'day' rows for the creation-days staged in
 --                                   engagement_touched_days, re-roll their week/month periods from
