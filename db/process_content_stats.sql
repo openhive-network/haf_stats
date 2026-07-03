@@ -1025,19 +1025,15 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
     PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
 
-    -- Engagement drain, gated. Unlike the vote/content refreshes (which re-aggregate only this
-    -- window's block-day rows), refresh_engagement_touched re-aggregates every touched CREATION-day,
-    -- whose posts can span the whole history. A large catch-up batch (post-downtime or a genesis
-    -- replay) touches creation-days across all of time, so draining it every boundary turns each
-    -- boundary into a near-full post_engagement re-scan - and re-scans the same popular old days on
-    -- every catch-up boundary. So we only drain when this batch is smaller than a bucket (LIVE or
-    -- light catch-up, i.e. at/near head). During a full-bucket-or-larger catch-up the touched days
-    -- just accumulate in the durable staging table and drain in a single pass once the node reaches
-    -- head. Freshness lags only while catching up (not serving); already-synced nodes are covered by
-    -- the install-time refresh_engagement_full backfill.
-    IF (_last_block - _first_block) < 1200 THEN
-        PERFORM haf_stats_app.refresh_engagement_touched();
-    END IF;
+    -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
+    -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
+    -- touched by THIS batch (never a growing backlog). It re-aggregates by creation-day rather than
+    -- block-day, so a lifetime count on an old post refreshes that post's old period - the reason
+    -- for the engagement_touched_days staging. (A previous version deferred this during full-bucket
+    -- catch-up to spread the work, but a bulk replay-then-serve flow - e.g. sync to head then run
+    -- the API - never produces the small LIVE batch that would trigger the deferred drain, leaving
+    -- the rollup permanently empty, so the drain must run unconditionally.)
+    PERFORM haf_stats_app.refresh_engagement_touched();
 END IF;
 
 END;
