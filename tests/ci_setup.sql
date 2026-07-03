@@ -401,8 +401,10 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_author_daily (
 );
 
 -- get_network_content_volume reads this rollup directly (mirrors process_content_stats.sql,
--- not loaded by the stub). Left empty: content_volume's value tests are patterntest-only (real
--- replay), so the fast stub gate exercises only its param/negative paths, which never read it.
+-- not loaded by the stub). Value tests stay patterntest-only (real replay); the fast stub gate
+-- exercises its param/negative paths plus the #35 no-date default test, which needs one
+-- historical period seeded below so a genesis default returns it while the old NOW()-30d
+-- default would not.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_content_period_counts (
     period_type    TEXT   NOT NULL,
     period         DATE   NOT NULL,
@@ -411,6 +413,19 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_content_period_counts (
     unique_authors BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (period_type, period)
 );
+
+-- One historical month (+ its days) for the get_network_content_volume no-date default test
+-- (#35): a genesis default rolls 2016-03 in; the old last-30-days default returns []. Mirrors the
+-- engagement_period_counts / post_engagement 2016-03 fixture below. unique_authors = 1 across the
+-- 3 days shows the non-additive author count (hiveio active 3 days = 1 unique in the month).
+INSERT INTO haf_stats_backend.network_content_period_counts
+    (period_type, period, posts, comments, unique_authors)
+VALUES
+    ('day',   '2016-03-15', 1, 2, 1),
+    ('day',   '2016-03-16', 1, 1, 1),
+    ('day',   '2016-03-17', 1, 2, 1),
+    ('month', '2016-03-01', 3, 5, 1)
+ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_daily (
     day        DATE NOT NULL,
