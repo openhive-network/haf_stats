@@ -2543,92 +2543,23 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_hp_distribution()
 RETURNS TABLE(bucket TEXT, account_count BIGINT, pct_accounts NUMERIC, total_hp NUMERIC, pct_hp NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
-AS $_$
-DECLARE
-    -- balance_tracker installs under different schemas depending on deployment:
-    -- standalone (btracker_app) vs. installed via the block explorer, which
-    -- exposes current balances as a btracker_backend view and/or the hafbe_bal
-    -- base table. Resolve the first current-balances relation this role can read.
-    -- information_schema.tables only lists relations we have privileges on, so the
-    -- pick is guaranteed to both exist and be readable; if none is found the
-    -- endpoint returns [] (documented contract), same as a fresh node.
-    _balance_rel TEXT;
+AS $$
 BEGIN
-    SELECT format('%I.%I', t.table_schema, t.table_name)
-      INTO _balance_rel
-      FROM (VALUES
-                ('btracker_app',     'current_account_balances',      1),
-                ('btracker_backend', 'current_account_balances_view',  2),
-                ('hafbe_bal',        'current_account_balances',      3)
-            ) AS cand (sch, rel, prio)
-      JOIN information_schema.tables t
-        ON t.table_schema = cand.sch AND t.table_name = cand.rel
-     ORDER BY cand.prio
-     LIMIT 1;
-
-    IF _balance_rel IS NULL THEN
-        RETURN;  -- no readable balance relation on this deployment
-    END IF;
-
-    -- #20.5: if hafd.blocks is empty (fresh node) the ratio CTE yields no row and
-    -- the result is [] (HTTP 200) rather than an error - intentional graceful
-    -- degradation; the empty-array contract is documented in the OpenAPI spec.
-    -- _balance_rel is built from format('%I.%I', ...) over a fixed allowlist, so
-    -- interpolating it (%s) into the dynamic query is injection-safe.
-    RETURN QUERY EXECUTE format($q$
-        WITH ratio AS (
-            SELECT (total_vesting_shares::NUMERIC * 1000)
-                   / NULLIF(total_vesting_fund_hive, 0) AS r
-            FROM hafd.blocks
-            ORDER BY num DESC
-            LIMIT 1
-        ),
-        balances AS (
-            SELECT
-                CASE
-                    WHEN b.balance < 1       * r.r THEN '0-1 HP'
-                    WHEN b.balance < 10      * r.r THEN '1-10 HP'
-                    WHEN b.balance < 100     * r.r THEN '10-100 HP'
-                    WHEN b.balance < 1000    * r.r THEN '100-1K HP'
-                    WHEN b.balance < 10000   * r.r THEN '1K-10K HP'
-                    WHEN b.balance < 100000  * r.r THEN '10K-100K HP'
-                    WHEN b.balance < 1000000 * r.r THEN '100K-1M HP'
-                    ELSE                               '1M+ HP'
-                END   AS bucket,
-                COUNT(*)       AS cnt,
-                -- Sum of actual VESTS balances in the bucket. For the unbounded 1M+
-                -- bucket this is the real total, not a midpoint estimate (#28).
-                SUM(b.balance) AS vests
-            FROM %s b, ratio r
-            WHERE b.nai = 37   -- VESTS (btracker nai smallint code: 13=HBD, 21=HIVE, 37=VESTS)
-              AND b.balance > 0
-            GROUP BY 1
-        ),
-        total AS (SELECT SUM(cnt) AS n, SUM(vests) AS v FROM balances)
-        SELECT
-            balances.bucket,
-            cnt::BIGINT                              AS account_count,
-            ROUND(cnt * 100.0 / total.n, 2)         AS pct_accounts,
-            -- HP = VESTS / ratio (same conversion the bucket boundaries use).
-            ROUND(balances.vests / NULLIF(ratio.r, 0), 2)         AS total_hp,
-            -- Bucket's share of total HP; the ratio cancels, so this is the
-            -- bucket's share of total VESTS.
-            ROUND(balances.vests * 100.0 / NULLIF(total.v, 0), 2) AS pct_hp
-        FROM balances, total, ratio
-        ORDER BY
-            CASE balances.bucket
-                WHEN '0-1 HP'      THEN 1
-                WHEN '1-10 HP'     THEN 2
-                WHEN '10-100 HP'   THEN 3
-                WHEN '100-1K HP'   THEN 4
-                WHEN '1K-10K HP'   THEN 5
-                WHEN '10K-100K HP' THEN 6
-                WHEN '100K-1M HP'  THEN 7
-                ELSE                    8
-            END
-    $q$, _balance_rel);
-END
-$_$;
+    -- Served from the precomputed haf_stats_backend.hp_distribution_snapshot (refreshed by
+    -- haf_stats_app.refresh_hp_distribution_snapshot, scheduled via pg_cron; see
+    -- db/process_hp_distribution.sql). The expensive whole-table scan of ~1.8M current VESTS
+    -- balances lives in that refresh, off the request path, so this read is O(8 rows) instead
+    -- of aggregating every account's balance into buckets on every request.
+    -- #20.5: the snapshot is empty until first computed (no readable balance relation, or a
+    -- fresh node with no VESTS/HP ratio), so this returns [] (HTTP 200) - the documented
+    -- "distribution not available yet" contract, unchanged from the previous inline version.
+    -- The refresh's bucket order is preserved via sort_order.
+    RETURN QUERY
+    SELECT s.bucket, s.account_count, s.pct_accounts, s.total_hp, s.pct_hp
+    FROM haf_stats_backend.hp_distribution_snapshot s
+    ORDER BY s.sort_order;
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Feature: governance influence concentration (stake concentration snapshot, #11)
@@ -3377,33 +3308,24 @@ BEGIN
     END IF;
 
     RETURN QUERY
-    -- Counters and unique authors live in separate tables (unique_authors is not
-    -- additive across days, so it is counted from the (day, author) presence set
-    -- here). Both are pre-aggregated to the period, so the join is 1:1 on period.
-    WITH counts AS (
-        SELECT
-            DATE_TRUNC("granularity", ncd.day) AS period,
-            SUM(ncd.posts)    AS posts,
-            SUM(ncd.comments) AS comments
-        FROM haf_stats_backend.network_content_daily ncd
-        WHERE ncd.day BETWEEN _from AND _to
-        GROUP BY 1
-    ),
-    authors AS (
-        SELECT
-            DATE_TRUNC("granularity", nad.day) AS period,
-            COUNT(DISTINCT nad.author_id)       AS unique_authors
-        FROM haf_stats_backend.network_author_daily nad
-        WHERE nad.day BETWEEN _from AND _to
-        GROUP BY 1
-    )
+    -- Read the per-period rollup (network_content_period_counts, maintained by
+    -- process_content_stats) directly. Previously this SUM-ed network_content_daily and
+    -- COUNT(DISTINCT author_id)-scanned the whole network_author_daily membership on every
+    -- request - fine at the 30-day daily default but several seconds on wide week/month
+    -- ranges, past the Wax 2s client timeout. unique_authors is non-additive across days, so
+    -- it is materialised per period in the rollup; a wide range is now a single indexed range
+    -- scan. Every period overlapping [_from, _to] is returned at its FULL-period value (a
+    -- from/to landing mid-period yields that period's full count), matching
+    -- get_network_vote_stats and get_daily_active_users and what a time-series chart expects.
     SELECT
-        TO_CHAR(c.period, 'YYYY-MM-DD'),
-        c.posts::BIGINT,
-        c.comments::BIGINT,
-        COALESCE(a.unique_authors, 0)::BIGINT
-    FROM counts c
-    LEFT JOIN authors a ON a.period = c.period
+        TO_CHAR(pc.period, 'YYYY-MM-DD'),
+        pc.posts::BIGINT,
+        pc.comments::BIGINT,
+        pc.unique_authors::BIGINT
+    FROM haf_stats_backend.network_content_period_counts pc
+    WHERE pc.period_type = "granularity"
+      AND pc.period >= DATE_TRUNC("granularity", _from)::DATE
+      AND pc.period <= _to
     ORDER BY 1;
 END;
 $$;
@@ -3512,16 +3434,28 @@ BEGIN
     END IF;
 
     RETURN QUERY
+    -- Read the per-period rollup (engagement_period_counts, maintained by process_content_stats)
+    -- directly. Previously this COUNT/AVG/FILTER-ed haf_stats_backend.post_engagement (one row
+    -- per root post, tens of millions of rows) on every request - fine at the 30-day daily
+    -- default but multiple seconds on wide week/month ranges, past the Wax 2s client timeout. The
+    -- five additive metrics are materialised per period in the rollup; averages and zero-
+    -- engagement percentages are reconstructed here (byte-identical to the old AVG/FILTER output:
+    -- AVG(x) = SUM(x)/COUNT(*) and the FILTER counts are pre-summed), so a wide range is a single
+    -- indexed range scan. Every period overlapping [_from, _to] is returned at its FULL-period
+    -- value, matching get_network_content_volume / get_network_vote_stats. The lifetime-count /
+    -- right-censored-recent-periods semantics are unchanged: the rollup stores the same lifetime
+    -- sums the per-request query computed.
     SELECT
-        TO_CHAR(DATE_TRUNC("granularity", pe.post_day), 'YYYY-MM-DD'),
-        COUNT(*)::BIGINT,
-        ROUND(AVG(pe.vote_count), 2),
-        ROUND(AVG(pe.reply_count), 2),
-        ROUND(COUNT(*) FILTER (WHERE pe.vote_count = 0) * 100.0 / NULLIF(COUNT(*), 0), 2),
-        ROUND(COUNT(*) FILTER (WHERE pe.reply_count = 0) * 100.0 / NULLIF(COUNT(*), 0), 2)
-    FROM haf_stats_backend.post_engagement pe
-    WHERE pe.post_day BETWEEN _from AND _to
-    GROUP BY DATE_TRUNC("granularity", pe.post_day)
+        TO_CHAR(pc.period, 'YYYY-MM-DD'),
+        pc.total_posts::BIGINT,
+        ROUND(pc.sum_votes::NUMERIC   / NULLIF(pc.total_posts, 0), 2),
+        ROUND(pc.sum_replies::NUMERIC / NULLIF(pc.total_posts, 0), 2),
+        ROUND(pc.zero_vote_posts    * 100.0 / NULLIF(pc.total_posts, 0), 2),
+        ROUND(pc.zero_comment_posts * 100.0 / NULLIF(pc.total_posts, 0), 2)
+    FROM haf_stats_backend.engagement_period_counts pc
+    WHERE pc.period_type = "granularity"
+      AND pc.period >= DATE_TRUNC("granularity", _from)::DATE
+      AND pc.period <= _to
     ORDER BY 1;
 END;
 $$;
