@@ -46,6 +46,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_top_accounts_alltime.sql"
 
 # 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
 #     unavailable (e.g. CI), so it never fails the install. Scheduling is a deploy step.
@@ -123,6 +124,14 @@ psql_cmd -c "
 log "Computing initial governance concentration + HP distribution snapshots (if a balance tracker is readable)..."
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_governance_concentration(); RESET ROLE;"
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_hp_distribution_snapshot(); RESET ROLE;"
+
+# 8c. Compute the all-time top-accounts aggregates once (#38) so get_network_top_accounts' no-filter
+#     leaderboard is populated immediately. Derived from the monthly rollups backfilled in step 8
+#     above, so it must run after them. Recurring refresh is a pg_cron deploy step (daily; see the
+#     header in db/process_top_accounts_alltime.sql). Empty-safe on a fresh genesis node (the
+#     monthly rollups are empty until sync; cron fills the all-time tables once they populate).
+log "Computing initial all-time top-accounts aggregates..."
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_top_accounts_alltime(); RESET ROLE;"
 
 log "Installation complete."
 

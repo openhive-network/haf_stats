@@ -1,0 +1,70 @@
+---
+test_name: Network top-accounts no-date default serves the all-time leaderboard (issue #38)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #38 / #35: with no from_date the endpoint must default to chain genesis and
+# serve the leaderboard from the pre-aggregated all-time tables (account_txn_alltime /
+# account_financial_alltime), NOT re-sum the monthly rollups. ci_setup seeds those all-time
+# tables for accounts 1 (hiveio) / 2001 (dapptester) / 3001 (rctester); the no-date call hits the
+# _alltime fast path and ranks them.
+stages:
+  - name: transaction_count no-date default ranks accounts by all-time op count
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transaction_count"
+    response:
+      status_code: 200
+      json:
+        - rank: 1
+          account: "dapptester"
+          value_hive_nai: 0
+          value_hbd_nai: 0
+          value_vests_nai: 0
+          op_count: 250
+        - rank: 2
+          account: "hiveio"
+          value_hive_nai: 0
+          value_hbd_nai: 0
+          value_vests_nai: 0
+          op_count: 100
+        - rank: 3
+          account: "rctester"
+          value_hive_nai: 0
+          value_hbd_nai: 0
+          value_vests_nai: 0
+          op_count: 50
+
+  - name: author_rewards no-date default ranks accounts by all-time VESTS
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "author_rewards"
+    response:
+      status_code: 200
+      json:
+        - rank: 1
+          account: "rctester"
+          value_hive_nai: 0
+          value_hbd_nai: 300
+          value_vests_nai: 8000
+          op_count: 30
+        - rank: 2
+          account: "hiveio"
+          value_hive_nai: 0
+          value_hbd_nai: 100
+          value_vests_nai: 5000
+          op_count: 10
+        - rank: 3
+          account: "dapptester"
+          value_hive_nai: 0
+          value_hbd_nai: 200
+          value_vests_nai: 3000
+          op_count: 20

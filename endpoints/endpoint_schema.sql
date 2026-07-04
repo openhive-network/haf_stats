@@ -1434,7 +1434,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis); ignored for hp_balance"
           },
           {
             "in": "query",
@@ -3517,7 +3517,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago; ignored for hp_balance
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis); ignored for hp_balance
       - in: query
         name: to_date
         required: false
@@ -3592,9 +3592,23 @@ DECLARE
     _trail_to DATE;
     _mm_from DATE;          -- monthly full-month range (month-start keys)
     _mm_to DATE;
+    -- TRUE when the request is the whole history up to now (the no-filter default): from omitted
+    -- (⇒ genesis) and to omitted (⇒ today). Then the leaderboard is served from the pre-aggregated
+    -- all-time per-account tables (account_txn_alltime / account_financial_alltime) instead of a
+    -- genesis→now re-sum of the monthly rollups (#38). Any bounded range keeps the exact hybrid.
+    _alltime BOOLEAN;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    -- No date filter ⇒ full history, consistent with the sibling network endpoints (#35). Omitting
+    -- from_date previously defaulted to the last 30 days; default to chain genesis (2016-03-24,
+    -- block 1) so block_explorer_ui's "No Filter" returns the all-time leaderboard, served cheaply
+    -- from the all-time aggregates below.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- All-time fast path only when the window spans genesis..today; the all-time tables are
+    -- refreshed daily, so the result is as-of the last refresh (≤1 day stale, acceptable for an
+    -- all-time ranking — same contract as hp_balance). Bounded ranges stay exact via the hybrid.
+    _alltime := (_from <= '2016-03-24'::DATE AND _to >= NOW()::DATE);
 
     SELECT w.lead_from, w.lead_to, w.trail_from, w.trail_to, w.mm_from, w.mm_to
       INTO _lead_from, _lead_to, _trail_from, _trail_to, _mm_from, _mm_to
@@ -3631,19 +3645,26 @@ BEGIN
         -- interior months (rollup) with the partial leading/trailing days (daily);
         -- unused pieces match nothing via their inverted bounds (issue #37).
         WITH src AS (
+            -- all-time fast path (no-filter default): one pre-summed row per account, so no
+            -- month/day re-aggregation. _alltime is Var-free, so the planner runs this as a
+            -- one-time filter — exactly one of the four arms scans (#38).
+            SELECT a.account_id, a.hive_nai, a.hbd_nai, a.vests_nai, a.op_count
+            FROM haf_stats_backend.account_financial_alltime a
+            WHERE _alltime AND a.category = _category AND a.direction = 'incoming'
+            UNION ALL
             SELECT m.account_id, m.hive_nai, m.hbd_nai, m.vests_nai, m.op_count
             FROM haf_stats_backend.account_financial_monthly m
-            WHERE m.category = _category AND m.direction = 'incoming'
+            WHERE NOT _alltime AND m.category = _category AND m.direction = 'incoming'
               AND m.month BETWEEN _mm_from AND _mm_to
             UNION ALL
             SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = _category AND f.direction = 'incoming'
+            WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
               AND f.day BETWEEN _lead_from AND _lead_to
             UNION ALL
             SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = _category AND f.direction = 'incoming'
+            WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
               AND f.day BETWEEN _trail_from AND _trail_to
         ),
         top AS (
@@ -3681,19 +3702,24 @@ BEGIN
         -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
         -- leads the sort key. Same daily/monthly hybrid as the reward branch (#37).
         WITH src AS (
+            -- all-time fast path (no-filter default): one pre-summed row per account (#38).
+            SELECT a.account_id, a.hive_nai, a.hbd_nai, a.op_count
+            FROM haf_stats_backend.account_financial_alltime a
+            WHERE _alltime AND a.category = 'transfer_operation' AND a.direction = _direction
+            UNION ALL
             SELECT m.account_id, m.hive_nai, m.hbd_nai, m.op_count
             FROM haf_stats_backend.account_financial_monthly m
-            WHERE m.category = 'transfer_operation' AND m.direction = _direction
+            WHERE NOT _alltime AND m.category = 'transfer_operation' AND m.direction = _direction
               AND m.month BETWEEN _mm_from AND _mm_to
             UNION ALL
             SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = 'transfer_operation' AND f.direction = _direction
+            WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
               AND f.day BETWEEN _lead_from AND _lead_to
             UNION ALL
             SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
             FROM haf_stats_backend.account_financial_daily f
-            WHERE f.category = 'transfer_operation' AND f.direction = _direction
+            WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
               AND f.day BETWEEN _trail_from AND _trail_to
         ),
         top AS (
@@ -3725,19 +3751,24 @@ BEGIN
         -- distinct signer (see process_active_users.sql). Same daily/monthly hybrid
         -- as the reward branch, over the per-account monthly ops rollup (#37).
         WITH src AS (
+            -- all-time fast path (no-filter default): pre-summed op count per account (#38).
+            SELECT a.account_id, a.ops
+            FROM haf_stats_backend.account_txn_alltime a
+            WHERE _alltime
+            UNION ALL
             SELECT m.account_id, m.ops
             FROM haf_stats_backend.active_users_account_monthly m
-            WHERE m.op_class = -1
+            WHERE NOT _alltime AND m.op_class = -1
               AND m.month BETWEEN _mm_from AND _mm_to
             UNION ALL
             SELECT au.account_id, au.ops
             FROM haf_stats_backend.active_users_daily au
-            WHERE au.op_class = -1
+            WHERE NOT _alltime AND au.op_class = -1
               AND au.day BETWEEN _lead_from AND _lead_to
             UNION ALL
             SELECT au.account_id, au.ops
             FROM haf_stats_backend.active_users_daily au
-            WHERE au.op_class = -1
+            WHERE NOT _alltime AND au.op_class = -1
               AND au.day BETWEEN _trail_from AND _trail_to
         ),
         top AS (

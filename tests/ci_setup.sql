@@ -369,6 +369,60 @@ VALUES
     ('2020-02-10', 1, 1), ('2020-02-10', 3, 1), ('2020-02-20', 1, 1), ('2020-02-20', 3, 1)
 ON CONFLICT DO NOTHING;
 
+-- get_network_top_accounts source tables (mirror db/process_*.sql + process_top_accounts_alltime.sql,
+-- not loaded by the stub). The monthly rollups are created EMPTY: they must exist so the endpoint's
+-- bounded-range (NOT _alltime) arms plan, but the no-date default test hits the all-time fast path,
+-- which reads the two all-time tables seeded below. Value tests for bounded ranges are patterntest-
+-- only (real replay); the synthetic gate exercises only the no-filter all-time path (#38).
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_monthly (
+    account_id INT NOT NULL,
+    month DATE NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, month, category, direction)
+);
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_account_monthly (
+    month DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    account_id INT NOT NULL,
+    ops BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, op_class, account_id)
+);
+
+-- All-time per-account aggregates (#38): the no-filter (genesis..today) leaderboard reads these
+-- pre-summed tables. Seeded as refresh_top_accounts_alltime() would produce, over accounts that
+-- exist in hafd.accounts above (1 hiveio, 2001 dapptester, 3001 rctester).
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_txn_alltime (
+    account_id INT NOT NULL PRIMARY KEY,
+    ops BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO haf_stats_backend.account_txn_alltime (account_id, ops)
+VALUES (1, 100), (2001, 250), (3001, 50)
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_alltime (
+    account_id INT NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, category, direction)
+);
+INSERT INTO haf_stats_backend.account_financial_alltime
+    (account_id, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
+VALUES
+    (1,    'author_reward_operation', 'incoming', 0, 100, 5000, 10),
+    (2001, 'author_reward_operation', 'incoming', 0, 200, 3000, 20),
+    (3001, 'author_reward_operation', 'incoming', 0, 300, 8000, 30)
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
