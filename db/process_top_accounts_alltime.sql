@@ -32,8 +32,8 @@ SET ROLE haf_stats_owner;
 -- All-time op count per account (op_class = -1, the "every authored op once per signer" rollup),
 -- one row per account. Feeds the transaction_count leaderboard.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_txn_alltime (
-    account_id INT    NOT NULL PRIMARY KEY,
-    ops        BIGINT NOT NULL DEFAULT 0
+    account_id INT NOT NULL PRIMARY KEY,
+    ops BIGINT NOT NULL DEFAULT 0
 );
 
 -- Index the leaderboard sort so top-N is an index scan, not a sort of ~2M rows.
@@ -45,13 +45,13 @@ GRANT SELECT ON haf_stats_backend.account_txn_alltime TO haf_stats_user;
 -- All-time financial totals per account, one row per (account, category, direction). Feeds the
 -- author_rewards / curation_rewards (direction 'incoming') and transfer_volume_in/out leaderboards.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_alltime (
-    account_id INT    NOT NULL,
-    category   TEXT   NOT NULL,
-    direction  TEXT   NOT NULL,
-    hive_nai   BIGINT NOT NULL DEFAULT 0,
-    hbd_nai    BIGINT NOT NULL DEFAULT 0,
-    vests_nai  BIGINT NOT NULL DEFAULT 0,
-    op_count   BIGINT NOT NULL DEFAULT 0,
+    account_id INT NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, category, direction)
 );
 
@@ -59,11 +59,11 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_alltime (
 -- each slice's top-N is served from an index prefixed by (category, direction).
 CREATE INDEX IF NOT EXISTS idx_afa_reward_rank
 ON haf_stats_backend.account_financial_alltime
-    (category, direction, vests_nai DESC, hbd_nai DESC, hive_nai DESC, account_id);
+(category, direction, vests_nai DESC, hbd_nai DESC, hive_nai DESC, account_id);
 
 CREATE INDEX IF NOT EXISTS idx_afa_transfer_rank
 ON haf_stats_backend.account_financial_alltime
-    (category, direction, hive_nai DESC, hbd_nai DESC, account_id);
+(category, direction, hive_nai DESC, hbd_nai DESC, account_id);
 
 GRANT SELECT ON haf_stats_backend.account_financial_alltime TO haf_stats_user;
 
