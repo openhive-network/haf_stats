@@ -133,6 +133,42 @@ psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_hp_distribut
 log "Computing initial all-time top-accounts aggregates..."
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.refresh_top_accounts_alltime(); RESET ROLE;"
 
+# 8d. Schedule the recurring daily refresh of every current-state snapshot via pg_cron. These used
+#     to be manual, header-documented deploy steps, which is fragile: hp_distribution's cron was
+#     never scheduled after its deploy, so that snapshot silently froze at its install-time values.
+#     Self-guarded — a no-op where pg_cron is unavailable (e.g. CI), so it never fails the install.
+#     Idempotent: cron.schedule upserts by jobname, so re-installs just refresh the schedule. Job
+#     names match the cron.schedule examples in each db/process_*.sql header. The one-shot refreshes
+#     above still populate the snapshots immediately at install; this only keeps them fresh after.
+log "Scheduling daily snapshot refreshes via pg_cron (if available)..."
+psql_cmd -c "
+    DO \$do\$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+            RAISE NOTICE 'pg_cron not installed; skipping snapshot-refresh scheduling';
+            RETURN;
+        END IF;
+        -- Best-effort: cron.schedule is only callable from the database pg_cron is installed in and
+        -- may need elevated rights, which varies by deployment (and is absent in CI). Never fail
+        -- the install over scheduling — where it cannot run, the one-shot refreshes above still
+        -- populated the snapshots and the schedule can be added manually (see the process_*.sql
+        -- headers). Where it can (e.g. the app DB has pg_cron), the daily refresh is wired up.
+        BEGIN
+            PERFORM cron.schedule('haf_stats_governance_concentration', '0 3 * * *',
+                'SELECT haf_stats_app.refresh_governance_concentration()');
+            PERFORM cron.schedule('haf_stats_hp_distribution', '0 3 * * *',
+                'SELECT haf_stats_app.refresh_hp_distribution_snapshot()');
+            PERFORM cron.schedule('haf_stats_rc_rates', '30 3 * * *',
+                'SELECT haf_stats_app.refresh_rc_op_stats()');
+            PERFORM cron.schedule('haf_stats_top_accounts_alltime', '30 3 * * *',
+                'SELECT haf_stats_app.refresh_top_accounts_alltime()');
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'snapshot-refresh cron scheduling skipped (%): schedule manually per the db/process_*.sql headers', SQLERRM;
+        END;
+    END
+    \$do\$;
+"
+
 log "Installation complete."
 
 # PREREQUISITE (run by the balance_tracker schema owner, not this script):
