@@ -1,0 +1,29 @@
+---
+test_name: Network content volume no-date default returns full history (issue #35)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #35: with no from_date the endpoint must default to chain genesis (full
+# history), consistent with get_network_vote_stats / get_daily_active_users /
+# get_network_rc_utilization — NOT the last 30 days. ci_setup seeds
+# network_content_period_counts only in 2016-03; a genesis default rolls that into the single
+# 2016-03 month period, whereas the old NOW()-30d default would return [] (2016-03 is far
+# outside the last month).
+stages:
+  - name: GET /rpc/get_network_content_volume with no date params returns the historical month
+    request:
+      url: "{api_url}/rpc/get_network_content_volume"
+      method: GET
+      params:
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2016-03-01"
+          posts: 3
+          comments: 5
+          unique_authors: 1

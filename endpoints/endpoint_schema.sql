@@ -1249,7 +1249,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
           },
           {
             "in": "query",
@@ -1329,7 +1329,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
           },
           {
             "in": "query",
@@ -3238,7 +3238,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
       - in: query
         name: to_date
         required: false
@@ -3294,7 +3294,14 @@ DECLARE
     _from DATE;
     _to DATE;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    -- No date filter ⇒ full history, consistent with get_network_vote_stats /
+    -- get_daily_active_users / get_network_rc_utilization (issue #35). Omitting from_date
+    -- previously defaulted to the last 30 days, so block_explorer_ui's "No Filter / all
+    -- history" option silently returned only a month. This endpoint now reads the
+    -- pre-aggregated network_content_period_counts rollup (a single indexed range scan, ~0.1s
+    -- server-side at genesis for both day and month grain), so full history is cheap;
+    -- default to chain genesis (2016-03-24, block 1).
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
@@ -3364,7 +3371,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
       - in: query
         name: to_date
         required: false
@@ -3422,7 +3429,14 @@ DECLARE
     _from DATE;
     _to DATE;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    -- No date filter ⇒ full history, consistent with get_network_vote_stats /
+    -- get_daily_active_users / get_network_rc_utilization (issue #35). Omitting from_date
+    -- previously defaulted to the last 30 days, so block_explorer_ui's "No Filter / all
+    -- history" option silently returned only a month. This endpoint now reads the
+    -- pre-aggregated engagement_period_counts rollup (a single indexed range scan, ~0.1s
+    -- server-side at genesis for both day and month grain), so full history is cheap;
+    -- default to chain genesis (2016-03-24, block 1).
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
