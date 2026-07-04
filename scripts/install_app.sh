@@ -144,7 +144,16 @@ log "Scheduling daily snapshot refreshes via pg_cron (if available)..."
 psql_cmd -c "
     DO \$do\$
     BEGIN
-        IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+            RAISE NOTICE 'pg_cron not installed; skipping snapshot-refresh scheduling';
+            RETURN;
+        END IF;
+        -- Best-effort: cron.schedule is only callable from the database pg_cron is installed in and
+        -- may need elevated rights, which varies by deployment (and is absent in CI). Never fail
+        -- the install over scheduling — where it cannot run, the one-shot refreshes above still
+        -- populated the snapshots and the schedule can be added manually (see the process_*.sql
+        -- headers). Where it can (e.g. the app DB has pg_cron), the daily refresh is wired up.
+        BEGIN
             PERFORM cron.schedule('haf_stats_governance_concentration', '0 3 * * *',
                 'SELECT haf_stats_app.refresh_governance_concentration()');
             PERFORM cron.schedule('haf_stats_hp_distribution', '0 3 * * *',
@@ -153,9 +162,9 @@ psql_cmd -c "
                 'SELECT haf_stats_app.refresh_rc_op_stats()');
             PERFORM cron.schedule('haf_stats_top_accounts_alltime', '30 3 * * *',
                 'SELECT haf_stats_app.refresh_top_accounts_alltime()');
-        ELSE
-            RAISE NOTICE 'pg_cron not installed; skipping snapshot-refresh scheduling';
-        END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'snapshot-refresh cron scheduling skipped (%): schedule manually per the db/process_*.sql headers', SQLERRM;
+        END;
     END
     \$do\$;
 "
