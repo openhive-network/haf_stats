@@ -3644,41 +3644,50 @@ BEGIN
         -- always-present component, so it leads the sort key. src UNIONs the full
         -- interior months (rollup) with the partial leading/trailing days (daily);
         -- unused pieces match nothing via their inverted bounds (issue #37).
-        WITH src AS (
-            -- all-time fast path (no-filter default): one pre-summed row per account, so no
-            -- month/day re-aggregation. _alltime is Var-free, so the planner runs this as a
-            -- one-time filter — exactly one of the four arms scans (#38).
-            SELECT a.account_id, a.hive_nai, a.hbd_nai, a.vests_nai, a.op_count
-            FROM haf_stats_backend.account_financial_alltime a
-            WHERE _alltime AND a.category = _category AND a.direction = 'incoming'
+        WITH top AS (
+            -- all-time fast path (no-filter default): a DIRECT index-ordered read of the
+            -- pre-summed per-account rollup — no re-aggregation, so top-N is an Index-Only Scan
+            -- on idx_afa_reward_rank (~0.1ms) rather than a GroupAggregate over ~2M rows. _alltime
+            -- is Var-free ⇒ a one-time filter, so exactly one of these two arms scans (#38).
+            (
+                SELECT a.account_id,
+                       a.hive_nai AS hive, a.hbd_nai AS hbd, a.vests_nai AS vests, a.op_count AS ops
+                FROM haf_stats_backend.account_financial_alltime a
+                WHERE _alltime AND a.category = _category AND a.direction = 'incoming'
+                ORDER BY a.vests_nai DESC, a.hbd_nai DESC, a.hive_nai DESC, a.account_id ASC
+                LIMIT "limit_count"
+            )
             UNION ALL
-            SELECT m.account_id, m.hive_nai, m.hbd_nai, m.vests_nai, m.op_count
-            FROM haf_stats_backend.account_financial_monthly m
-            WHERE NOT _alltime AND m.category = _category AND m.direction = 'incoming'
-              AND m.month BETWEEN _mm_from AND _mm_to
-            UNION ALL
-            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
-            FROM haf_stats_backend.account_financial_daily f
-            WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
-              AND f.day BETWEEN _lead_from AND _lead_to
-            UNION ALL
-            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
-            FROM haf_stats_backend.account_financial_daily f
-            WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
-              AND f.day BETWEEN _trail_from AND _trail_to
-        ),
-        top AS (
-            SELECT
-                s.account_id,
-                SUM(s.hive_nai)  AS hive,
-                SUM(s.hbd_nai)   AS hbd,
-                SUM(s.vests_nai) AS vests,
-                SUM(s.op_count)  AS ops
-            FROM src s
-            GROUP BY s.account_id
-            ORDER BY SUM(s.vests_nai) DESC, SUM(s.hbd_nai) DESC,
-                SUM(s.hive_nai) DESC, s.account_id ASC
-            LIMIT "limit_count"
+            -- bounded-range hybrid: full interior months (rollup) + partial leading/trailing days
+            -- (daily), aggregated per account (issue #37). VESTS (the HP part) leads the sort.
+            (
+                SELECT
+                    s.account_id,
+                    SUM(s.hive_nai)  AS hive,
+                    SUM(s.hbd_nai)   AS hbd,
+                    SUM(s.vests_nai) AS vests,
+                    SUM(s.op_count)  AS ops
+                FROM (
+                    SELECT m.account_id, m.hive_nai, m.hbd_nai, m.vests_nai, m.op_count
+                    FROM haf_stats_backend.account_financial_monthly m
+                    WHERE NOT _alltime AND m.category = _category AND m.direction = 'incoming'
+                      AND m.month BETWEEN _mm_from AND _mm_to
+                    UNION ALL
+                    SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
+                    FROM haf_stats_backend.account_financial_daily f
+                    WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
+                      AND f.day BETWEEN _lead_from AND _lead_to
+                    UNION ALL
+                    SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
+                    FROM haf_stats_backend.account_financial_daily f
+                    WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
+                      AND f.day BETWEEN _trail_from AND _trail_to
+                ) s
+                GROUP BY s.account_id
+                ORDER BY SUM(s.vests_nai) DESC, SUM(s.hbd_nai) DESC,
+                    SUM(s.hive_nai) DESC, s.account_id ASC
+                LIMIT "limit_count"
+            )
         )
         SELECT
             (ROW_NUMBER() OVER (ORDER BY t.vests DESC, t.hbd DESC, t.hive DESC,
@@ -3701,37 +3710,45 @@ BEGIN
         RETURN QUERY
         -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
         -- leads the sort key. Same daily/monthly hybrid as the reward branch (#37).
-        WITH src AS (
-            -- all-time fast path (no-filter default): one pre-summed row per account (#38).
-            SELECT a.account_id, a.hive_nai, a.hbd_nai, a.op_count
-            FROM haf_stats_backend.account_financial_alltime a
-            WHERE _alltime AND a.category = 'transfer_operation' AND a.direction = _direction
+        WITH top AS (
+            -- all-time fast path: DIRECT index-ordered read (Index-Only Scan on
+            -- idx_afa_transfer_rank), no re-aggregation (#38). One-time filter picks one arm.
+            (
+                SELECT a.account_id, a.hive_nai AS hive, a.hbd_nai AS hbd, a.op_count AS ops
+                FROM haf_stats_backend.account_financial_alltime a
+                WHERE _alltime AND a.category = 'transfer_operation' AND a.direction = _direction
+                ORDER BY a.hive_nai DESC, a.hbd_nai DESC, a.account_id ASC
+                LIMIT "limit_count"
+            )
             UNION ALL
-            SELECT m.account_id, m.hive_nai, m.hbd_nai, m.op_count
-            FROM haf_stats_backend.account_financial_monthly m
-            WHERE NOT _alltime AND m.category = 'transfer_operation' AND m.direction = _direction
-              AND m.month BETWEEN _mm_from AND _mm_to
-            UNION ALL
-            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
-            FROM haf_stats_backend.account_financial_daily f
-            WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
-              AND f.day BETWEEN _lead_from AND _lead_to
-            UNION ALL
-            SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
-            FROM haf_stats_backend.account_financial_daily f
-            WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
-              AND f.day BETWEEN _trail_from AND _trail_to
-        ),
-        top AS (
-            SELECT
-                s.account_id,
-                SUM(s.hive_nai) AS hive,
-                SUM(s.hbd_nai)  AS hbd,
-                SUM(s.op_count) AS ops
-            FROM src s
-            GROUP BY s.account_id
-            ORDER BY SUM(s.hive_nai) DESC, SUM(s.hbd_nai) DESC, s.account_id ASC
-            LIMIT "limit_count"
+            -- bounded-range hybrid (issue #37). Transfers carry HIVE or HBD (never VESTS); HIVE
+            -- is the native unit and leads the sort key.
+            (
+                SELECT
+                    s.account_id,
+                    SUM(s.hive_nai) AS hive,
+                    SUM(s.hbd_nai)  AS hbd,
+                    SUM(s.op_count) AS ops
+                FROM (
+                    SELECT m.account_id, m.hive_nai, m.hbd_nai, m.op_count
+                    FROM haf_stats_backend.account_financial_monthly m
+                    WHERE NOT _alltime AND m.category = 'transfer_operation' AND m.direction = _direction
+                      AND m.month BETWEEN _mm_from AND _mm_to
+                    UNION ALL
+                    SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
+                    FROM haf_stats_backend.account_financial_daily f
+                    WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
+                      AND f.day BETWEEN _lead_from AND _lead_to
+                    UNION ALL
+                    SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
+                    FROM haf_stats_backend.account_financial_daily f
+                    WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
+                      AND f.day BETWEEN _trail_from AND _trail_to
+                ) s
+                GROUP BY s.account_id
+                ORDER BY SUM(s.hive_nai) DESC, SUM(s.hbd_nai) DESC, s.account_id ASC
+                LIMIT "limit_count"
+            )
         )
         SELECT
             (ROW_NUMBER() OVER (ORDER BY t.hive DESC, t.hbd DESC,
@@ -3750,33 +3767,40 @@ BEGIN
         -- op_class -1 is the ALL rollup: every authored op, counted once per
         -- distinct signer (see process_active_users.sql). Same daily/monthly hybrid
         -- as the reward branch, over the per-account monthly ops rollup (#37).
-        WITH src AS (
-            -- all-time fast path (no-filter default): pre-summed op count per account (#38).
-            SELECT a.account_id, a.ops
-            FROM haf_stats_backend.account_txn_alltime a
-            WHERE _alltime
+        WITH top AS (
+            -- all-time fast path: DIRECT index-ordered read (Index-Only Scan on
+            -- idx_account_txn_alltime_ops), no re-aggregation (#38). One-time filter picks one arm.
+            (
+                SELECT a.account_id, a.ops
+                FROM haf_stats_backend.account_txn_alltime a
+                WHERE _alltime
+                ORDER BY a.ops DESC, a.account_id ASC
+                LIMIT "limit_count"
+            )
             UNION ALL
-            SELECT m.account_id, m.ops
-            FROM haf_stats_backend.active_users_account_monthly m
-            WHERE NOT _alltime AND m.op_class = -1
-              AND m.month BETWEEN _mm_from AND _mm_to
-            UNION ALL
-            SELECT au.account_id, au.ops
-            FROM haf_stats_backend.active_users_daily au
-            WHERE NOT _alltime AND au.op_class = -1
-              AND au.day BETWEEN _lead_from AND _lead_to
-            UNION ALL
-            SELECT au.account_id, au.ops
-            FROM haf_stats_backend.active_users_daily au
-            WHERE NOT _alltime AND au.op_class = -1
-              AND au.day BETWEEN _trail_from AND _trail_to
-        ),
-        top AS (
-            SELECT s.account_id, SUM(s.ops) AS ops
-            FROM src s
-            GROUP BY s.account_id
-            ORDER BY SUM(s.ops) DESC, s.account_id ASC
-            LIMIT "limit_count"
+            -- bounded-range hybrid over the per-account monthly ops rollup (issue #37).
+            (
+                SELECT s.account_id, SUM(s.ops) AS ops
+                FROM (
+                    SELECT m.account_id, m.ops
+                    FROM haf_stats_backend.active_users_account_monthly m
+                    WHERE NOT _alltime AND m.op_class = -1
+                      AND m.month BETWEEN _mm_from AND _mm_to
+                    UNION ALL
+                    SELECT au.account_id, au.ops
+                    FROM haf_stats_backend.active_users_daily au
+                    WHERE NOT _alltime AND au.op_class = -1
+                      AND au.day BETWEEN _lead_from AND _lead_to
+                    UNION ALL
+                    SELECT au.account_id, au.ops
+                    FROM haf_stats_backend.active_users_daily au
+                    WHERE NOT _alltime AND au.op_class = -1
+                      AND au.day BETWEEN _trail_from AND _trail_to
+                ) s
+                GROUP BY s.account_id
+                ORDER BY SUM(s.ops) DESC, s.account_id ASC
+                LIMIT "limit_count"
+            )
         )
         SELECT
             (ROW_NUMBER() OVER (ORDER BY t.ops DESC, t.account_id ASC))::INT,
