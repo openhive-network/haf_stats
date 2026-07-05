@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be >= 0",
+  "message": "invalid offset_start: -1"
+}

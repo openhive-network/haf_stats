@@ -1,0 +1,96 @@
+---
+test_name: Account RC footprint timeline lists priced signed ops most-recent-first
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Per-event drill-down over the same on-demand estimate as get_account_rc_footprint (ci_setup
+# rctester fixture). One row per op the account SIGNED (account_id = transacting_account_id) and
+# non-virtual; the received vote and the virtual producer_reward are excluded. Ordered by
+# block_num DESC (= timestamp DESC) then account_op_seq_no DESC, so within block 5000 the two
+# custom_json ops (seq 6,5) precede the two votes (seq 2,1). rc_cost is the per-op estimate
+# rc_avg_cost(op_type, day): vote 97,278,897, custom_json 167,828,015 (2020-06-08 rate, effective
+# on/before 2021-03). SUM(rc_cost) = 4*97278897 + 2*167828015 = 724,771,618 = the group_by=op_type
+# aggregate total for the same window. app is the custom_json id from the op body (sm_claim_daily),
+# null for votes.
+stages:
+  - name: full window returns every signed non-virtual event, newest first, with app + estimate
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+    response:
+      status_code: 200
+      json:
+        - timestamp: "2021-03-10T00:00:00"
+          block_num: 6000
+          op_type: "vote_operation"
+          app: null
+          rc_cost: 97278897
+        - timestamp: "2021-03-01T00:01:00"
+          block_num: 5001
+          op_type: "vote_operation"
+          app: null
+          rc_cost: 97278897
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "sm_claim_daily"
+          rc_cost: 167828015
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "sm_claim_daily"
+          rc_cost: 167828015
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "vote_operation"
+          app: null
+          rc_cost: 97278897
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "vote_operation"
+          app: null
+          rc_cost: 97278897
+
+  - name: limit_count + offset_start page into the middle of the ordered timeline
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        limit_count: 2
+        offset_start: 2
+    response:
+      status_code: 200
+      json:
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "sm_claim_daily"
+          rc_cost: 167828015
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "sm_claim_daily"
+          rc_cost: 167828015
+
+  - name: unknown account returns an empty timeline
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "nosuchaccount"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+    response:
+      status_code: 200
+      json: []

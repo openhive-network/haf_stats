@@ -550,6 +550,111 @@ DECLARE
         }
       }
     },
+    "/account/{account}/rc-footprint-timeline": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account RC footprint timeline",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, custom_json app id, block, timestamp and estimated RC cost. rc_cost is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_cost over a window therefore reconciles with the rc-footprint op_type total. Supports limit_count/offset_start paging.",
+        "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "limit_count",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "description": "Maximum number of events to return (1-1000)"
+          },
+          {
+            "in": "query",
+            "name": "offset_start",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0
+            },
+            "description": "Number of events to skip (pagination offset)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "RC-spending events, most recent first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Block timestamp of the operation"
+                      },
+                      "block_num": {
+                        "type": "integer"
+                      },
+                      "op_type": {
+                        "type": "string",
+                        "description": "Operation type name"
+                      },
+                      "app": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "custom_json app id (null for non-custom_json ops)"
+                      },
+                      "rc_cost": {
+                        "type": "integer",
+                        "description": "Estimated RC consumed by this operation"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/account/{account}/dapp-footprint": {
       "get": {
         "tags": [
@@ -2091,6 +2196,189 @@ BEGIN
         FROM combined, tot t
         ORDER BY combined.rc_consumed DESC, combined.label;
     END IF;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: account RC footprint timeline (per-event drill-down, issue #10)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/account/{account}/rc-footprint-timeline:
+  get:
+    tags:
+      - Account
+    summary: Account RC footprint timeline
+    description: >-
+      Per-event drill-down companion to rc-footprint: one row per RC-spending operation the
+      account signed, most recent first, with the op type, custom_json app id, block, timestamp
+      and estimated RC cost. rc_cost is an ESTIMATE (op_count model priced from the calibrated
+      rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing
+      rc_cost over a window therefore reconciles with the rc-footprint op_type total. Supports
+      limit_count/offset_start paging.
+    operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
+    parameters:
+      - in: path
+        name: account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: limit_count
+        required: false
+        schema:
+          type: integer
+          default: 100
+          minimum: 1
+          maximum: 1000
+        description: Maximum number of events to return (1-1000)
+      - in: query
+        name: offset_start
+        required: false
+        schema:
+          type: integer
+          default: 0
+          minimum: 0
+        description: Number of events to skip (pagination offset)
+    responses:
+      '200':
+        description: RC-spending events, most recent first
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)'
+              type: array
+              items:
+                type: object
+                properties:
+                  timestamp:
+                    type: string
+                    format: date-time
+                    description: Block timestamp of the operation
+                  block_num:
+                    type: integer
+                  op_type:
+                    type: string
+                    description: Operation type name
+                  app:
+                    type: string
+                    nullable: true
+                    description: custom_json app id (null for non-custom_json ops)
+                  rc_cost:
+                    type: integer
+                    description: Estimated RC consumed by this operation
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint_timeline;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint_timeline(
+    "account" TEXT,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "limit_count" INT = 100,
+    "offset_start" INT = 0
+)
+RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _account_id INT;
+    _from_block INT;
+    _to_block INT;
+    _lo_seq BIGINT;
+    _hi_seq BIGINT;
+BEGIN
+    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    IF "limit_count" IS NULL OR "limit_count" < 1 OR "limit_count" > 1000 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid limit_count: ' || COALESCE("limit_count"::TEXT, '(null)'),
+            HINT = 'Must be between 1 and 1000';
+    END IF;
+    IF "offset_start" IS NULL OR "offset_start" < 0 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid offset_start: ' || COALESCE("offset_start"::TEXT, '(null)'),
+            HINT = 'Must be >= 0';
+    END IF;
+
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
+    IF _account_id IS NULL THEN
+        RETURN;   -- unknown account -> empty result
+    END IF;
+
+    -- Per-event drill-down over the same estimated-RC model as get_account_rc_footprint. There
+    -- is no per-op RC log on this node (issue #33: the rc vop never reaches HAF), so each event's
+    -- rc_cost is the read-time ESTIMATE rc_avg_cost(op_type, day); summing rc_cost over a window
+    -- reconciles with the aggregate's op_type total. Window bounding mirrors the aggregate: the
+    -- date range -> block range -> this account's account_op_seq_no range (binary search), so a
+    -- narrow window rides the indexed (account_id, seq) scan instead of the whole history.
+    SELECT num INTO _from_block FROM hafd.blocks
+        WHERE created_at >= _from::timestamp ORDER BY created_at ASC LIMIT 1;
+    SELECT num INTO _to_block FROM hafd.blocks
+        WHERE created_at < (_to + 1)::timestamp ORDER BY created_at DESC LIMIT 1;
+    IF _from_block IS NULL OR _to_block IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT lo_seq, hi_seq INTO _lo_seq, _hi_seq
+    FROM haf_stats_app.account_op_seq_range(_account_id, _from_block, _to_block);
+    IF _lo_seq IS NULL OR _hi_seq IS NULL OR _lo_seq > _hi_seq THEN
+        RETURN;   -- no ops in the window
+    END IF;
+
+    -- One row per signed, non-virtual op (account_id = transacting_account_id = the RC payer).
+    -- Order by account_op_seq_no DESC alone: within an account this column is dense and MONOTONIC
+    -- with block_num (the invariant account_op_seq_range's binary search already relies on), so it
+    -- equals timestamp DESC while being served directly by the (account_id, seq) index - an Index
+    -- Scan Backward that stops at OFFSET+LIMIT. Adding the computed block_num to the ORDER BY would
+    -- instead force a full-window Sort (operation_id_to_block_num is not indexable) before LIMIT,
+    -- i.e. O(window) work per page. The page CTE carries ot.name (its is_virtual join already
+    -- matched a row, so the name is non-null), avoiding a second operation_types join. The op body
+    -- is joined only for the paged rows and only for custom_json (op 18), to read the app id
+    -- without the whole-history body join the aggregate deliberately avoids.
+    RETURN QUERY
+    WITH page AS (
+        SELECT ao.operation_id, ao.op_type_id, ao.block_num, ao.account_op_seq_no,
+               ot.name AS op_name
+        FROM hive.account_operations_view ao
+        JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
+        WHERE ao.account_id = _account_id
+          AND ao.transacting_account_id = ao.account_id
+          AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
+          AND ao.block_num BETWEEN _from_block AND _to_block
+        ORDER BY ao.account_op_seq_no DESC
+        LIMIT "limit_count" OFFSET "offset_start"
+    )
+    SELECT
+        bv.created_at::TIMESTAMP,
+        page.block_num,
+        replace(page.op_name, 'hive::protocol::', '')                    AS op_type,
+        CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END AS app,
+        haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT AS rc_cost
+    FROM page
+    JOIN hafd.blocks bv ON bv.num = page.block_num
+    LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
+    ORDER BY page.account_op_seq_no DESC;
 END;
 $$;
 
