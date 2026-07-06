@@ -150,10 +150,10 @@ ON CONFLICT DO NOTHING;
 -- Signed window totals (unchanged; only the seq numbering changed): 4 votes -> 4*97278897 =
 -- 389115588, 2 custom_json -> 2*167828015 = 335656030.
 
--- Operation bodies for rctester's two custom_json events, so get_account_rc_footprint_timeline's
--- app field resolves via hive.operations_view (body -> 'value' ->> 'id') to the RAW json id
--- 'sm_claim_daily'. (The timeline reports raw custom_json ids; the aggregate group_by=app instead
--- resolves that same id to its DApp name 'Splinterlands' via custom_json_app_registry.)
+-- Operation bodies for rctester's two custom_json events, so get_account_rc_footprint_timeline can
+-- read their json id from hive.operations_view (body -> 'value' ->> 'id') = 'sm_claim_daily'. The
+-- timeline exposes both the resolved DApp name (app: 'sm_' -> 'Splinterlands' via seed_data's
+-- custom_json_app_registry, matching the aggregate group_by=app) and the raw id (custom_json_id).
 INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
 (5000000003, 18, '{"id": "sm_claim_daily"}'),
 (5000000004, 18, '{"id": "sm_claim_daily"}')

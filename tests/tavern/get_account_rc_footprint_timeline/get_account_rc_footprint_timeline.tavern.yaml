@@ -10,14 +10,15 @@ includes:
 # Per-event drill-down over the same on-demand estimate as get_account_rc_footprint (ci_setup
 # rctester fixture). One row per op the account SIGNED (account_id = transacting_account_id) and
 # non-virtual; the received vote and the virtual producer_reward are excluded. Ordered by
-# block_num DESC (= timestamp DESC) then account_op_seq_no DESC, so within block 5000 the two
-# custom_json ops (seq 6,5) precede the two votes (seq 2,1). rc_cost is the per-op estimate
-# rc_avg_cost(op_type, day): vote 97,278,897, custom_json 167,828,015 (2020-06-08 rate, effective
-# on/before 2021-03). SUM(rc_cost) = 4*97278897 + 2*167828015 = 724,771,618 = the group_by=op_type
-# aggregate total for the same window. app is the custom_json id from the op body (sm_claim_daily),
-# null for votes.
+# account_op_seq_no DESC (dense + monotonic with block within an account = timestamp DESC), so the
+# block-6000 vote (seq 8) leads and within block 5000 the two custom_json ops (seq 4,3) precede the
+# two votes (seq 2,1). rc_consumed is the per-op estimate rc_avg_cost(op_type, day): vote
+# 97,278,897, custom_json 167,828,015 (2020-06-08 rate, effective on/before 2021-03). SUM over the
+# window = 4*97278897 + 2*167828015 = 724,771,618 = the group_by=op_type aggregate total. app is
+# the registry-resolved DApp name (sm_claim_daily starts_with 'sm_' -> "Splinterlands", matching
+# get_account_rc_footprint group_by=app); custom_json_id keeps the raw id. Both are null for votes.
 stages:
-  - name: full window returns every signed non-virtual event, newest first, with app + estimate
+  - name: full window returns every signed non-virtual event, newest first, with resolved app
     request:
       url: "{api_url}/rpc/get_account_rc_footprint_timeline"
       method: GET
@@ -32,32 +33,38 @@ stages:
           block_num: 6000
           op_type: "vote_operation"
           app: null
-          rc_cost: 97278897
+          custom_json_id: null
+          rc_consumed: 97278897
         - timestamp: "2021-03-01T00:01:00"
           block_num: 5001
           op_type: "vote_operation"
           app: null
-          rc_cost: 97278897
+          custom_json_id: null
+          rc_consumed: 97278897
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "custom_json_operation"
-          app: "sm_claim_daily"
-          rc_cost: 167828015
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "custom_json_operation"
-          app: "sm_claim_daily"
-          rc_cost: 167828015
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "vote_operation"
           app: null
-          rc_cost: 97278897
+          custom_json_id: null
+          rc_consumed: 97278897
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "vote_operation"
           app: null
-          rc_cost: 97278897
+          custom_json_id: null
+          rc_consumed: 97278897
 
   - name: limit_count + offset_start page into the middle of the ordered timeline
     request:
@@ -75,13 +82,90 @@ stages:
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "custom_json_operation"
-          app: "sm_claim_daily"
-          rc_cost: 167828015
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
         - timestamp: "2021-03-01T00:00:00"
           block_num: 5000
           op_type: "custom_json_operation"
-          app: "sm_claim_daily"
-          rc_cost: 167828015
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
+
+  - name: op_type_filter drills into a single op-type bucket (the 4 signed votes)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        op_type_filter: "vote_operation"
+    response:
+      status_code: 200
+      json:
+        - timestamp: "2021-03-10T00:00:00"
+          block_num: 6000
+          op_type: "vote_operation"
+          app: null
+          custom_json_id: null
+          rc_consumed: 97278897
+        - timestamp: "2021-03-01T00:01:00"
+          block_num: 5001
+          op_type: "vote_operation"
+          app: null
+          custom_json_id: null
+          rc_consumed: 97278897
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "vote_operation"
+          app: null
+          custom_json_id: null
+          rc_consumed: 97278897
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "vote_operation"
+          app: null
+          custom_json_id: null
+          rc_consumed: 97278897
+
+  - name: app_filter drills into a single DApp bucket by resolved name (Splinterlands)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        app_filter: "Splinterlands"
+    response:
+      status_code: 200
+      json:
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
+        - timestamp: "2021-03-01T00:00:00"
+          block_num: 5000
+          op_type: "custom_json_operation"
+          app: "Splinterlands"
+          custom_json_id: "sm_claim_daily"
+          rc_consumed: 167828015
+
+  - name: op_type_filter for a type the account has no events of returns empty
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        op_type_filter: "transfer_operation"
+    response:
+      status_code: 200
+      json: []
 
   - name: unknown account returns an empty timeline
     request:

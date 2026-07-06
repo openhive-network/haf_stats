@@ -556,7 +556,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, custom_json app id, block, timestamp and estimated RC cost. rc_cost is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_cost over a window therefore reconciles with the rc-footprint op_type total. Supports limit_count/offset_start paging.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint op_type total. Optional op_type_filter / app_filter drill into a single rc-footprint bucket. Supports limit_count/offset_start paging.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -592,6 +592,28 @@ DECLARE
           },
           {
             "in": "query",
+            "name": "op_type_filter",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Only return events of this operation type, e.g. vote_operation (matches the op_type label). Named *_filter because a query param cannot share a name with a response column."
+          },
+          {
+            "in": "query",
+            "name": "app_filter",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Only return custom_json events whose resolved DApp name equals this value, e.g. Splinterlands (matches the rc-footprint group_by=app label)."
+          },
+          {
+            "in": "query",
             "name": "limit_count",
             "required": false,
             "schema": {
@@ -620,7 +642,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)",
+                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -640,9 +662,14 @@ DECLARE
                       "app": {
                         "type": "string",
                         "nullable": true,
-                        "description": "custom_json app id (null for non-custom_json ops)"
+                        "description": "Resolved DApp name for custom_json ops (custom_json_app_registry match, falling back to the raw id); null for non-custom_json ops"
                       },
-                      "rc_cost": {
+                      "custom_json_id": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Raw custom_json id (null for non-custom_json ops)"
+                      },
+                      "rc_consumed": {
                         "type": "integer",
                         "description": "Estimated RC consumed by this operation"
                       }
@@ -2211,10 +2238,11 @@ $$;
     summary: Account RC footprint timeline
     description: >-
       Per-event drill-down companion to rc-footprint: one row per RC-spending operation the
-      account signed, most recent first, with the op type, custom_json app id, block, timestamp
-      and estimated RC cost. rc_cost is an ESTIMATE (op_count model priced from the calibrated
-      rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing
-      rc_cost over a window therefore reconciles with the rc-footprint op_type total. Supports
+      account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json
+      id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model
+      priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable
+      on this node; summing rc_consumed over a window reconciles with the rc-footprint op_type
+      total. Optional op_type_filter / app_filter drill into a single rc-footprint bucket. Supports
       limit_count/offset_start paging.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
     parameters:
@@ -2241,6 +2269,26 @@ $$;
           type: string
         description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
       - in: query
+        name: op_type_filter
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: >-
+          Only return events of this operation type, e.g. vote_operation (matches the op_type
+          label). Named *_filter because a query param cannot share a name with a response column.
+      - in: query
+        name: app_filter
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: >-
+          Only return custom_json events whose resolved DApp name equals this value, e.g.
+          Splinterlands (matches the rc-footprint group_by=app label).
+      - in: query
         name: limit_count
         required: false
         schema:
@@ -2263,7 +2311,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)'
+              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)'
               type: array
               items:
                 type: object
@@ -2280,8 +2328,14 @@ $$;
                   app:
                     type: string
                     nullable: true
-                    description: custom_json app id (null for non-custom_json ops)
-                  rc_cost:
+                    description: >-
+                      Resolved DApp name for custom_json ops (custom_json_app_registry match,
+                      falling back to the raw id); null for non-custom_json ops
+                  custom_json_id:
+                    type: string
+                    nullable: true
+                    description: Raw custom_json id (null for non-custom_json ops)
+                  rc_consumed:
                     type: integer
                     description: Estimated RC consumed by this operation
  */
@@ -2291,10 +2345,12 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint_timeline
     "account" TEXT,
     "from_date" TEXT = NULL,
     "to_date" TEXT = NULL,
+    "op_type_filter" TEXT = NULL,
+    "app_filter" TEXT = NULL,
     "limit_count" INT = 100,
     "offset_start" INT = 0
 )
-RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, rc_cost BIGINT)
+RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -2306,6 +2362,10 @@ DECLARE
     _to_block INT;
     _lo_seq BIGINT;
     _hi_seq BIGINT;
+    _op_type_filter TEXT;
+    _app_filter TEXT;
+    _filter_op_type_id INT;
+    _virtual_ids SMALLINT[];
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -2321,17 +2381,39 @@ BEGIN
             HINT = 'Must be >= 0';
     END IF;
 
+    -- Normalize the optional drill-down filters: tolerate Wax's JSON-encoded quoting (issue #22)
+    -- and treat '' as absent. op_type_filter matches the op_type label (e.g. vote_operation);
+    -- app_filter matches the RESOLVED DApp name (e.g. Splinterlands), so the caller can drill into
+    -- the exact get_account_rc_footprint group_by=op_type / group_by=app bucket it clicked.
+    _op_type_filter := NULLIF(TRIM('"' FROM COALESCE("op_type_filter", '')), '');
+    _app_filter := NULLIF(TRIM('"' FROM COALESCE("app_filter", '')), '');
+
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
     IF _account_id IS NULL THEN
         RETURN;   -- unknown account -> empty result
     END IF;
 
-    -- Per-event drill-down over the same estimated-RC model as get_account_rc_footprint. There
-    -- is no per-op RC log on this node (issue #33: the rc vop never reaches HAF), so each event's
-    -- rc_cost is the read-time ESTIMATE rc_avg_cost(op_type, day); summing rc_cost over a window
-    -- reconciles with the aggregate's op_type total. Window bounding mirrors the aggregate: the
-    -- date range -> block range -> this account's account_op_seq_no range (binary search), so a
-    -- narrow window rides the indexed (account_id, seq) scan instead of the whole history.
+    -- Resolve op_type_filter to a non-virtual op_type_id; an unknown or virtual type matches no
+    -- RC-spending event, so short-circuit to empty.
+    IF _op_type_filter IS NOT NULL THEN
+        SELECT ot.id INTO _filter_op_type_id
+        FROM hafd.operation_types ot
+        WHERE replace(ot.name, 'hive::protocol::', '') = _op_type_filter
+          AND ot.is_virtual = FALSE;
+        IF _filter_op_type_id IS NULL THEN
+            RETURN;
+        END IF;
+    END IF;
+
+    -- app_filter selects only custom_json (op 18) events; pairing it with an op_type_filter for a
+    -- different type is contradictory -> empty.
+    IF _app_filter IS NOT NULL AND _filter_op_type_id IS NOT NULL AND _filter_op_type_id <> 18 THEN
+        RETURN;
+    END IF;
+
+    -- Window bounding (same as get_account_rc_footprint): date range -> block range -> this
+    -- account's account_op_seq_no range (binary search), so a narrow window rides the indexed
+    -- (account_id, seq) scan instead of the whole history.
     SELECT num INTO _from_block FROM hafd.blocks
         WHERE created_at >= _from::timestamp ORDER BY created_at ASC LIMIT 1;
     SELECT num INTO _to_block FROM hafd.blocks
@@ -2346,39 +2428,97 @@ BEGIN
         RETURN;   -- no ops in the window
     END IF;
 
-    -- One row per signed, non-virtual op (account_id = transacting_account_id = the RC payer).
-    -- Order by account_op_seq_no DESC alone: within an account this column is dense and MONOTONIC
-    -- with block_num (the invariant account_op_seq_range's binary search already relies on), so it
-    -- equals timestamp DESC while being served directly by the (account_id, seq) index - an Index
-    -- Scan Backward that stops at OFFSET+LIMIT. Adding the computed block_num to the ORDER BY would
-    -- instead force a full-window Sort (operation_id_to_block_num is not indexable) before LIMIT,
-    -- i.e. O(window) work per page. The page CTE carries ot.name (its is_virtual join already
-    -- matched a row, so the name is non-null), avoiding a second operation_types join. The op body
-    -- is joined only for the paged rows and only for custom_json (op 18), to read the app id
-    -- without the whole-history body join the aggregate deliberately avoids.
-    RETURN QUERY
-    WITH page AS (
-        SELECT ao.operation_id, ao.op_type_id, ao.block_num, ao.account_op_seq_no,
-               ot.name AS op_name
-        FROM hive.account_operations_view ao
-        JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
-        WHERE ao.account_id = _account_id
-          AND ao.transacting_account_id = ao.account_id
-          AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
-          AND ao.block_num BETWEEN _from_block AND _to_block
-        ORDER BY ao.account_op_seq_no DESC
-        LIMIT "limit_count" OFFSET "offset_start"
-    )
-    SELECT
-        bv.created_at::TIMESTAMP,
-        page.block_num,
-        replace(page.op_name, 'hive::protocol::', '')                    AS op_type,
-        CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END AS app,
-        haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT AS rc_cost
-    FROM page
-    JOIN hafd.blocks bv ON bv.num = page.block_num
-    LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
-    ORDER BY page.account_op_seq_no DESC;
+    -- Virtual op ids, excluded INSIDE the index-scan filter below rather than via an
+    -- operation_types join above the LIMIT driver: for reward-heavy accounts (e.g. witnesses)
+    -- almost every scanned row is a virtual reward op, and an inline op_type_id <> ALL(...)
+    -- predicate drops them during the scan without a per-row join.
+    _virtual_ids := ARRAY(SELECT id FROM hafd.operation_types WHERE is_virtual);
+
+    -- One row per signed op (account_id = transacting_account_id = the RC payer). rc_consumed is
+    -- the read-time ESTIMATE rc_avg_cost(op_type, day) (issue #33: no per-op RC log exists), so
+    -- SUM(rc_consumed) over a window reconciles with the aggregate's op_type total. Order by
+    -- account_op_seq_no DESC alone: within an account it is dense and MONOTONIC with block_num
+    -- (the invariant account_op_seq_range relies on), so it equals timestamp DESC while being
+    -- served by the (account_id, seq) index - an Index Scan Backward that stops at OFFSET+LIMIT.
+    -- Adding the computed block_num to the ORDER BY would instead force a full-window Sort. app is
+    -- the registry-resolved DApp name (COALESCE to the raw id), matching get_account_rc_footprint
+    -- group_by=app; custom_json_id keeps the raw id.
+    IF _app_filter IS NULL THEN
+        -- No app filter: page first, then join the body + registry only for the returned page
+        -- (custom_json only), avoiding a whole-history body scan.
+        RETURN QUERY
+        WITH page AS (
+            SELECT ao.operation_id, ao.op_type_id, ao.block_num, ao.account_op_seq_no
+            FROM hive.account_operations_view ao
+            WHERE ao.account_id = _account_id
+              AND ao.transacting_account_id = ao.account_id
+              AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
+              AND ao.block_num BETWEEN _from_block AND _to_block
+              AND ao.op_type_id <> ALL(_virtual_ids)
+              AND (_filter_op_type_id IS NULL OR ao.op_type_id = _filter_op_type_id)
+            ORDER BY ao.account_op_seq_no DESC
+            LIMIT "limit_count" OFFSET "offset_start"
+        )
+        SELECT
+            bv.created_at::TIMESTAMP,
+            page.block_num,
+            replace(ot.name, 'hive::protocol::', ''),
+            CASE WHEN page.op_type_id = 18
+                 THEN COALESCE(reg.app_name, ov.body -> 'value' ->> 'id') END,
+            CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END,
+            haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT
+        FROM page
+        JOIN hafd.blocks bv ON bv.num = page.block_num
+        JOIN hafd.operation_types ot ON ot.id = page.op_type_id
+        LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
+        LEFT JOIN LATERAL (
+            SELECT r.app_name
+            FROM haf_stats_backend.custom_json_app_registry r
+            WHERE starts_with(ov.body -> 'value' ->> 'id', r.app_id_pattern)
+            -- Longest-prefix wins; secondary sort by pattern makes ties deterministic.
+            ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
+            LIMIT 1
+        ) reg ON page.op_type_id = 18
+        ORDER BY page.account_op_seq_no DESC;
+    ELSE
+        -- app filter set: the resolved DApp name is only known after reading each custom_json op's
+        -- body, so the body + registry are joined for every op-18 candidate in the window (not
+        -- just a page) before filtering and paging. Bounded by the account's op-18 count in the
+        -- window - a targeted drill-down into one app.
+        RETURN QUERY
+        WITH resolved AS (
+            SELECT ao.block_num,
+                   ao.account_op_seq_no,
+                   ov.body -> 'value' ->> 'id'                          AS json_id,
+                   COALESCE(reg.app_name, ov.body -> 'value' ->> 'id')  AS app_name
+            FROM hive.account_operations_view ao
+            JOIN hive.operations_view ov ON ov.id = ao.operation_id
+            LEFT JOIN LATERAL (
+                SELECT r.app_name
+                FROM haf_stats_backend.custom_json_app_registry r
+                WHERE starts_with(ov.body -> 'value' ->> 'id', r.app_id_pattern)
+                ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
+                LIMIT 1
+            ) reg ON TRUE
+            WHERE ao.account_id = _account_id
+              AND ao.transacting_account_id = ao.account_id
+              AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
+              AND ao.block_num BETWEEN _from_block AND _to_block
+              AND ao.op_type_id = 18
+        )
+        SELECT
+            bv.created_at::TIMESTAMP,
+            resolved.block_num,
+            'custom_json_operation'::TEXT,
+            resolved.app_name,
+            resolved.json_id,
+            haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT
+        FROM resolved
+        JOIN hafd.blocks bv ON bv.num = resolved.block_num
+        WHERE resolved.app_name = _app_filter
+        ORDER BY resolved.account_op_seq_no DESC
+        LIMIT "limit_count" OFFSET "offset_start";
+    END IF;
 END;
 $$;
 
