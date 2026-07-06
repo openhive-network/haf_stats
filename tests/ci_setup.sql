@@ -98,9 +98,13 @@ INSERT INTO hafd.accounts (id, name) VALUES (3001, 'rctester') ON CONFLICT DO NO
 -- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
 -- by that role). vote_operation uses id 1 to match cohort_fixture.sql (which also seeds it);
 -- ON CONFLICT (id) keeps both inserts idempotent regardless of load order. Op 64 is a virtual
--- op, present so the rc-footprint test proves virtual ops are excluded.
+-- op, present so the rc-footprint test proves virtual ops are excluded. transfer_operation (2) is
+-- a NON-virtual type that no fixture account signs, so get_account_rc_footprint_timeline's
+-- op_type_filter test can exercise the resolved-op-type + zero-rows path (a valid type the
+-- account has no events of) rather than the unknown-type short-circuit.
 INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
 (1, 'hive::protocol::vote_operation', FALSE),
+(2, 'hive::protocol::transfer_operation', FALSE),
 (18, 'hive::protocol::custom_json_operation', FALSE),
 (64, 'hive::protocol::producer_reward_operation', TRUE)
 ON CONFLICT (id) DO NOTHING;

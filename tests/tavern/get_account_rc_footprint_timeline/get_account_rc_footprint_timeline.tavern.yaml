@@ -154,7 +154,10 @@ stages:
           custom_json_id: "sm_claim_daily"
           rc_consumed: 167828015
 
-  - name: op_type_filter for a type the account has no events of returns empty
+  # transfer_operation is a valid non-virtual op type in the stub that rctester never signs, so this
+  # exercises the resolved-op-type + zero-match scan predicate (ao.op_type_id = _filter_op_type_id),
+  # not the unknown-op-type short-circuit.
+  - name: op_type_filter for a valid type the account has no events of returns empty
     request:
       url: "{api_url}/rpc/get_account_rc_footprint_timeline"
       method: GET

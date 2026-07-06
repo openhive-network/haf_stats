@@ -52,6 +52,34 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
 
+-- ---------------------------------------------------------------------------
+-- custom_json id -> DApp name resolution (single source of truth).
+-- Longest registered app_id_pattern that is a prefix of the id wins; a secondary
+-- sort by pattern makes equal-length ties deterministic; unmatched ids fall back
+-- to the raw id. Shared by every endpoint that labels a custom_json app
+-- (get_account_rc_footprint group_by=app, get_account_rc_footprint_timeline), so
+-- the resolved label is identical across them by construction. Co-located here (not
+-- db/) so it installs with the endpoints, including the stub endpoint-test stack.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp_name(_json_id TEXT)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(
+        (
+            SELECT r.app_name
+            FROM haf_stats_backend.custom_json_app_registry r
+            WHERE starts_with(_json_id, r.app_id_pattern)
+            ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
+            LIMIT 1
+        ),
+        _json_id
+    )
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_name(TEXT) TO haf_stats_user;
+
 -- get_network_top_accounts window decomposition (issue #37). Splits [_from, _to]
 -- into the full interior months served from the *_monthly rollups plus the partial
 -- leading/trailing months served from the daily tables. Extracted from the endpoint
@@ -556,7 +584,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint op_type total. Optional op_type_filter / app_filter drill into a single rc-footprint bucket. Supports limit_count/offset_start paging.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Supports limit_count/offset_start paging.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -2178,22 +2206,14 @@ BEGIN
         -- roll up into a single labelled bucket.
         RETURN QUERY
         WITH cj AS (
-            SELECT COALESCE(reg.app_name, acj.json_id)  AS label,
+            SELECT haf_stats_app.resolve_dapp_name(acj.json_id)  AS label,
                    SUM(acj.op_count)::BIGINT     AS op_count,
                    SUM(acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)::BIGINT AS rc_consumed
             FROM haf_stats_backend.account_custom_json_daily acj
             CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
-            LEFT JOIN LATERAL (
-                SELECT r.app_name
-                FROM haf_stats_backend.custom_json_app_registry r
-                WHERE starts_with(acj.json_id, r.app_id_pattern)
-                -- Secondary sort by pattern makes equal-length-prefix ties deterministic.
-                ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
-                LIMIT 1
-            ) reg ON TRUE
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
-            GROUP BY COALESCE(reg.app_name, acj.json_id)
+            GROUP BY haf_stats_app.resolve_dapp_name(acj.json_id)
         ),
         noncj AS (
             SELECT 'non-custom_json'::TEXT       AS label,
@@ -2241,9 +2261,12 @@ $$;
       account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json
       id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model
       priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable
-      on this node; summing rc_consumed over a window reconciles with the rc-footprint op_type
-      total. Optional op_type_filter / app_filter drill into a single rc-footprint bucket. Supports
-      limit_count/offset_start paging.
+      on this node; summing rc_consumed over a window reconciles with the rc-footprint
+      group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the
+      timeline to the events of one op type or DApp (the same events as the matching rc-footprint
+      bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the
+      op_type total, not the byte-aware group_by=app figure). Supports limit_count/offset_start
+      paging.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
     parameters:
       - in: path
@@ -2428,24 +2451,28 @@ BEGIN
         RETURN;   -- no ops in the window
     END IF;
 
-    -- Virtual op ids, excluded INSIDE the index-scan filter below rather than via an
-    -- operation_types join above the LIMIT driver: for reward-heavy accounts (e.g. witnesses)
-    -- almost every scanned row is a virtual reward op, and an inline op_type_id <> ALL(...)
-    -- predicate drops them during the scan without a per-row join.
-    _virtual_ids := ARRAY(SELECT id FROM hafd.operation_types WHERE is_virtual);
-
     -- One row per signed op (account_id = transacting_account_id = the RC payer). rc_consumed is
     -- the read-time ESTIMATE rc_avg_cost(op_type, day) (issue #33: no per-op RC log exists), so
-    -- SUM(rc_consumed) over a window reconciles with the aggregate's op_type total. Order by
-    -- account_op_seq_no DESC alone: within an account it is dense and MONOTONIC with block_num
-    -- (the invariant account_op_seq_range relies on), so it equals timestamp DESC while being
-    -- served by the (account_id, seq) index - an Index Scan Backward that stops at OFFSET+LIMIT.
-    -- Adding the computed block_num to the ORDER BY would instead force a full-window Sort. app is
-    -- the registry-resolved DApp name (COALESCE to the raw id), matching get_account_rc_footprint
-    -- group_by=app; custom_json_id keeps the raw id.
+    -- SUM(rc_consumed) over a window reconciles with the aggregate's group_by=op_type total (the
+    -- op-count model). Order by account_op_seq_no DESC alone: within an account it is dense and
+    -- MONOTONIC with block_num (the invariant account_op_seq_range relies on), so it equals
+    -- timestamp DESC while being served by the (account_id, seq) index - an Index Scan Backward
+    -- that stops at OFFSET+LIMIT. Adding the computed block_num to the ORDER BY would instead force
+    -- a full-window Sort. app is the resolved DApp name via haf_stats_app.resolve_dapp_name (the
+    -- SAME resolver group_by=app uses, so the labels match by construction); custom_json_id keeps
+    -- the raw id.
+    -- NOTE on app_filter reconciliation: app_filter selects the SET of events in a group_by=app
+    -- bucket, but each event's rc_consumed stays the op-count estimate, so SUM over an app_filter
+    -- drill-down reconciles with the group_by=op_type custom_json total, NOT the byte-aware
+    -- group_by=app bucket figure (the aggregate prices custom_json two ways - flat for op_type,
+    -- size-aware for app; the timeline follows the op_type model end to end).
     IF _app_filter IS NULL THEN
-        -- No app filter: page first, then join the body + registry only for the returned page
-        -- (custom_json only), avoiding a whole-history body scan.
+        -- No app filter: page first, then resolve the app for the returned page only (custom_json),
+        -- avoiding a whole-history body scan. Virtual ops are dropped INSIDE the index-scan filter
+        -- (op_type_id <> ALL(_virtual_ids)) rather than via an operation_types join above the LIMIT
+        -- driver, so reward-heavy accounts (e.g. witnesses) don't pay a per-row join for rows the
+        -- scan discards. (_virtual_ids is only needed here, so it is materialized inside this branch.)
+        _virtual_ids := ARRAY(SELECT id FROM hafd.operation_types WHERE is_virtual);
         RETURN QUERY
         WITH page AS (
             SELECT ao.operation_id, ao.op_type_id, ao.block_num, ao.account_op_seq_no
@@ -2464,42 +2491,28 @@ BEGIN
             page.block_num,
             replace(ot.name, 'hive::protocol::', ''),
             CASE WHEN page.op_type_id = 18
-                 THEN COALESCE(reg.app_name, ov.body -> 'value' ->> 'id') END,
+                 THEN haf_stats_app.resolve_dapp_name(ov.body -> 'value' ->> 'id') END,
             CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END,
             haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
         JOIN hafd.operation_types ot ON ot.id = page.op_type_id
         LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
-        LEFT JOIN LATERAL (
-            SELECT r.app_name
-            FROM haf_stats_backend.custom_json_app_registry r
-            WHERE starts_with(ov.body -> 'value' ->> 'id', r.app_id_pattern)
-            -- Longest-prefix wins; secondary sort by pattern makes ties deterministic.
-            ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
-            LIMIT 1
-        ) reg ON page.op_type_id = 18
         ORDER BY page.account_op_seq_no DESC;
     ELSE
         -- app filter set: the resolved DApp name is only known after reading each custom_json op's
-        -- body, so the body + registry are joined for every op-18 candidate in the window (not
-        -- just a page) before filtering and paging. Bounded by the account's op-18 count in the
-        -- window - a targeted drill-down into one app.
+        -- body, so bodies are resolved for op-18 candidates before filtering by name and paging.
+        -- The outer ORDER BY account_op_seq_no DESC + LIMIT rides the same (account_id, seq) index,
+        -- so for a well-populated app the scan early-stops at OFFSET+LIMIT matches; a rare app on a
+        -- high-volume account is the worst case (bounded by the op-18 count in the window).
         RETURN QUERY
         WITH resolved AS (
             SELECT ao.block_num,
                    ao.account_op_seq_no,
-                   ov.body -> 'value' ->> 'id'                          AS json_id,
-                   COALESCE(reg.app_name, ov.body -> 'value' ->> 'id')  AS app_name
+                   ov.body -> 'value' ->> 'id'                            AS json_id,
+                   haf_stats_app.resolve_dapp_name(ov.body -> 'value' ->> 'id') AS app_name
             FROM hive.account_operations_view ao
             JOIN hive.operations_view ov ON ov.id = ao.operation_id
-            LEFT JOIN LATERAL (
-                SELECT r.app_name
-                FROM haf_stats_backend.custom_json_app_registry r
-                WHERE starts_with(ov.body -> 'value' ->> 'id', r.app_id_pattern)
-                ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
-                LIMIT 1
-            ) reg ON TRUE
             WHERE ao.account_id = _account_id
               AND ao.transacting_account_id = ao.account_id
               AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
