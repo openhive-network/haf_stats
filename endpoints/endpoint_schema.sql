@@ -584,7 +584,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Supports limit_count/offset_start paging.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -661,7 +661,18 @@ DECLARE
               "default": 0,
               "minimum": 0
             },
-            "description": "Number of events to skip (pagination offset)"
+            "description": "Number of events to skip (offset pagination; O(depth), prefer before_seq)"
+          },
+          {
+            "in": "query",
+            "name": "before_seq",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "BIGINT",
+              "x-sql-default-value": "NULL",
+              "type": "integer"
+            },
+            "description": "Keyset cursor: return only events with op_seq strictly less than this (i.e. older). Pass the previous page's last op_seq for O(1) deep paging that rides the seq index."
           }
         ],
         "responses": {
@@ -670,7 +681,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)",
+                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -700,6 +711,10 @@ DECLARE
                       "rc_consumed": {
                         "type": "integer",
                         "description": "Estimated RC consumed by this operation"
+                      },
+                      "op_seq": {
+                        "type": "integer",
+                        "description": "Per-account operation sequence number (dense, monotonic with time); pass the last row's value as before_seq to fetch the next page"
                       }
                     }
                   }
@@ -2265,8 +2280,8 @@ $$;
       group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the
       timeline to the events of one op type or DApp (the same events as the matching rc-footprint
       bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the
-      op_type total, not the byte-aware group_by=app figure). Supports limit_count/offset_start
-      paging.
+      op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start,
+      or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
     parameters:
       - in: path
@@ -2327,14 +2342,24 @@ $$;
           type: integer
           default: 0
           minimum: 0
-        description: Number of events to skip (pagination offset)
+        description: Number of events to skip (offset pagination; O(depth), prefer before_seq)
+      - in: query
+        name: before_seq
+        required: false
+        schema:
+          x-sql-datatype: BIGINT
+          x-sql-default-value: "NULL"
+          type: integer
+        description: >-
+          Keyset cursor: return only events with op_seq strictly less than this (i.e. older).
+          Pass the previous page's last op_seq for O(1) deep paging that rides the seq index.
     responses:
       '200':
         description: RC-spending events, most recent first
         content:
           application/json:
             schema:
-              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)'
+              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)'
               type: array
               items:
                 type: object
@@ -2361,6 +2386,11 @@ $$;
                   rc_consumed:
                     type: integer
                     description: Estimated RC consumed by this operation
+                  op_seq:
+                    type: integer
+                    description: >-
+                      Per-account operation sequence number (dense, monotonic with time); pass the
+                      last row's value as before_seq to fetch the next page
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint_timeline;
@@ -2371,9 +2401,10 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint_timeline
     "op_type_filter" TEXT = NULL,
     "app_filter" TEXT = NULL,
     "limit_count" INT = 100,
-    "offset_start" INT = 0
+    "offset_start" INT = 0,
+    "before_seq" BIGINT = NULL
 )
-RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT)
+RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -2389,6 +2420,7 @@ DECLARE
     _app_filter TEXT;
     _filter_op_type_id INT;
     _virtual_ids SMALLINT[];
+    _matching_ids TEXT[];
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -2466,6 +2498,8 @@ BEGIN
     -- drill-down reconciles with the group_by=op_type custom_json total, NOT the byte-aware
     -- group_by=app bucket figure (the aggregate prices custom_json two ways - flat for op_type,
     -- size-aware for app; the timeline follows the op_type model end to end).
+    -- before_seq is the keyset cursor: ORDER BY account_op_seq_no DESC means "seq < before_seq" is
+    -- served by the same (account_id, seq) index with no offset walk, so deep paging stays O(1).
     IF _app_filter IS NULL THEN
         -- No app filter: page first, then resolve the app for the returned page only (custom_json),
         -- avoiding a whole-history body scan. Virtual ops are dropped INSIDE the index-scan filter
@@ -2483,6 +2517,7 @@ BEGIN
               AND ao.block_num BETWEEN _from_block AND _to_block
               AND ao.op_type_id <> ALL(_virtual_ids)
               AND (_filter_op_type_id IS NULL OR ao.op_type_id = _filter_op_type_id)
+              AND ("before_seq" IS NULL OR ao.account_op_seq_no < "before_seq")
             ORDER BY ao.account_op_seq_no DESC
             LIMIT "limit_count" OFFSET "offset_start"
         )
@@ -2493,24 +2528,43 @@ BEGIN
             CASE WHEN page.op_type_id = 18
                  THEN haf_stats_app.resolve_dapp_name(ov.body -> 'value' ->> 'id') END,
             CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END,
-            haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT
+            haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT,
+            page.account_op_seq_no::BIGINT
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
         JOIN hafd.operation_types ot ON ot.id = page.op_type_id
         LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
         ORDER BY page.account_op_seq_no DESC;
     ELSE
-        -- app filter set: the resolved DApp name is only known after reading each custom_json op's
-        -- body, so bodies are resolved for op-18 candidates before filtering by name and paging.
-        -- The outer ORDER BY account_op_seq_no DESC + LIMIT rides the same (account_id, seq) index,
-        -- so for a well-populated app the scan early-stops at OFFSET+LIMIT matches; a rare app on a
-        -- high-volume account is the worst case (bounded by the op-18 count in the window).
+        -- app filter set. The resolved DApp name is a body-derived value, so filtering on it via a
+        -- raw op-18 body scan is O(op-18 count in the window) and can't early-terminate for a rare
+        -- or absent app (a heavy game account -> tens of seconds). Instead resolve the candidate
+        -- json_ids from the per-account custom_json rollup (account_custom_json_daily, the same
+        -- table + signer attribution get_account_rc_footprint group_by=app trusts): the resolver
+        -- runs once per DISTINCT id the account used (~dozens), not per event. If none resolve to
+        -- app_filter, the account never signed that DApp in the window -> return empty WITHOUT
+        -- touching the raw op stream (the op-volume-independent fast path). Otherwise scan the raw
+        -- op-18 rows filtered by the exact json_id set (a plain = ANY match, no per-row resolver),
+        -- which the (account_id, seq) index still serves backward and early-terminates at
+        -- OFFSET+LIMIT / before_seq. NOTE: this ties app_filter to the rollup's freshness the same
+        -- way group_by=app already is; per-event rc_consumed stays the op-count estimate.
+        SELECT ARRAY(
+            SELECT acj.json_id
+            FROM haf_stats_backend.account_custom_json_daily acj
+            WHERE acj.account_id = _account_id
+              AND acj.day BETWEEN _from AND _to
+            GROUP BY acj.json_id
+            HAVING haf_stats_app.resolve_dapp_name(acj.json_id) = _app_filter
+        ) INTO _matching_ids;
+        IF _matching_ids IS NULL OR cardinality(_matching_ids) = 0 THEN
+            RETURN;
+        END IF;
+
         RETURN QUERY
-        WITH resolved AS (
+        WITH page AS (
             SELECT ao.block_num,
                    ao.account_op_seq_no,
-                   ov.body -> 'value' ->> 'id'                            AS json_id,
-                   haf_stats_app.resolve_dapp_name(ov.body -> 'value' ->> 'id') AS app_name
+                   ov.body -> 'value' ->> 'id' AS json_id
             FROM hive.account_operations_view ao
             JOIN hive.operations_view ov ON ov.id = ao.operation_id
             WHERE ao.account_id = _account_id
@@ -2518,19 +2572,22 @@ BEGIN
               AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
               AND ao.block_num BETWEEN _from_block AND _to_block
               AND ao.op_type_id = 18
+              AND (ov.body -> 'value' ->> 'id') = ANY(_matching_ids)
+              AND ("before_seq" IS NULL OR ao.account_op_seq_no < "before_seq")
+            ORDER BY ao.account_op_seq_no DESC
+            LIMIT "limit_count" OFFSET "offset_start"
         )
         SELECT
             bv.created_at::TIMESTAMP,
-            resolved.block_num,
+            page.block_num,
             'custom_json_operation'::TEXT,
-            resolved.app_name,
-            resolved.json_id,
-            haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT
-        FROM resolved
-        JOIN hafd.blocks bv ON bv.num = resolved.block_num
-        WHERE resolved.app_name = _app_filter
-        ORDER BY resolved.account_op_seq_no DESC
-        LIMIT "limit_count" OFFSET "offset_start";
+            _app_filter,
+            page.json_id,
+            haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT,
+            page.account_op_seq_no::BIGINT
+        FROM page
+        JOIN hafd.blocks bv ON bv.num = page.block_num
+        ORDER BY page.account_op_seq_no DESC;
     END IF;
 END;
 $$;
