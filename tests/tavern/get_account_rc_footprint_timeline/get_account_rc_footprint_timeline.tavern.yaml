@@ -1,0 +1,147 @@
+---
+test_name: Account RC footprint timeline lists priced signed ops most-recent-first
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Per-event drill-down over the same on-demand estimate as get_account_rc_footprint (ci_setup
+# rctester fixture). One row per op the account SIGNED (account_id = transacting_account_id) and
+# non-virtual; the received vote and the virtual producer_reward are excluded. Ordered by
+# account_op_seq_no DESC (dense + monotonic with block within an account = timestamp DESC), exposed
+# as op_seq for keyset paging: block-6000 vote (seq 8) leads, and within block 5000 the two
+# custom_json ops (seq 4,3) precede the two votes (seq 2,1). rc_consumed is the per-op estimate
+# rc_avg_cost(op_type, day): vote 97,278,897, custom_json 167,828,015 (2020-06-08 rate, on/before
+# 2021-03); SUM = 4*97278897 + 2*167828015 = 724,771,618 = the group_by=op_type aggregate total.
+# app is the registry-resolved DApp name (sm_claim_daily starts_with 'sm_' -> "Splinterlands", same
+# resolver as group_by=app); custom_json_id keeps the raw id. Both null for votes.
+stages:
+  - name: full window returns every signed non-virtual event, newest first, with resolved app + op_seq
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8}
+        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+
+  - name: limit_count + offset_start page into the middle of the ordered timeline
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        limit_count: 2
+        offset_start: 2
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+
+  # Keyset cursor: before_seq=4 returns only events with op_seq < 4 (the same rows offset_start=3
+  # would reach), served by the index with no offset walk.
+  - name: before_seq keyset cursor returns events older than the cursor
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        before_seq: 4
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+
+  - name: op_type_filter drills into a single op-type bucket (the 4 signed votes)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        op_type_filter: "vote_operation"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8}
+        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+
+  # app_filter resolves the account's json_ids from account_custom_json_daily (rctester seeded with
+  # sm_claim_daily -> Splinterlands), then scans the raw op-18 rows for that id set.
+  - name: app_filter drills into a single DApp bucket by resolved name (Splinterlands)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        app_filter: "Splinterlands"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+
+  # app_filter for a DApp the account never signed short-circuits via the rollup (no raw op scan).
+  - name: app_filter for an app the account never used returns empty (rollup fast-reject)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        app_filter: "Rising Star"
+    response:
+      status_code: 200
+      json: []
+
+  # transfer_operation is a valid non-virtual op type in the stub that rctester never signs, so this
+  # exercises the resolved-op-type + zero-match scan predicate (ao.op_type_id = _filter_op_type_id),
+  # not the unknown-op-type short-circuit.
+  - name: op_type_filter for a valid type the account has no events of returns empty
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        op_type_filter: "transfer_operation"
+    response:
+      status_code: 200
+      json: []
+
+  - name: unknown account returns an empty timeline
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "nosuchaccount"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+    response:
+      status_code: 200
+      json: []

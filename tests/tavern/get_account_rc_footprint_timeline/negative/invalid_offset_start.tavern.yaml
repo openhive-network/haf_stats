@@ -1,0 +1,24 @@
+---
+test_name: Account RC footprint timeline rejects negative offset_start
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject offset_start below 0
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "hiveio"
+        offset_start: -1
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

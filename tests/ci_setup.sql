@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS hive.account_operations_view (
     transacting_account_id INT NOT NULL,
     block_num INT NOT NULL,
     op_type_id SMALLINT NOT NULL,   -- SMALLINT in real HAF; rc_avg_cost(SMALLINT, DATE) needs it
-    account_op_seq_no BIGINT   -- nullable: existing stub rows (cohort/content) do not set it
+    account_op_seq_no BIGINT,   -- nullable: existing stub rows (cohort/content) do not set it
+    operation_id BIGINT   -- links to hive.operations_view.id; set only where a test needs the
+                          -- op body (get_account_rc_footprint_timeline reads the custom_json id)
 );
 
 -- Stubs of the HAF helpers process_account_cohorts (Step 2) and
@@ -96,9 +98,13 @@ INSERT INTO hafd.accounts (id, name) VALUES (3001, 'rctester') ON CONFLICT DO NO
 -- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
 -- by that role). vote_operation uses id 1 to match cohort_fixture.sql (which also seeds it);
 -- ON CONFLICT (id) keeps both inserts idempotent regardless of load order. Op 64 is a virtual
--- op, present so the rc-footprint test proves virtual ops are excluded.
+-- op, present so the rc-footprint test proves virtual ops are excluded. transfer_operation (2) is
+-- a NON-virtual type that no fixture account signs, so get_account_rc_footprint_timeline's
+-- op_type_filter test can exercise the resolved-op-type + zero-rows path (a valid type the
+-- account has no events of) rather than the unknown-type short-circuit.
 INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
 (1, 'hive::protocol::vote_operation', FALSE),
+(2, 'hive::protocol::transfer_operation', FALSE),
 (18, 'hive::protocol::custom_json_operation', FALSE),
 (64, 'hive::protocol::producer_reward_operation', TRUE)
 ON CONFLICT (id) DO NOTHING;
@@ -117,29 +123,45 @@ INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fu
 (6000, '2021-03-10 00:00:00', 1000000000, 1000000000)
 ON CONFLICT (num) DO NOTHING;
 
--- Account-operations fixtures for get_account_rc_footprint (rctester, id 3001), in
--- hive.account_operations_view (the global view the endpoint reads). The endpoint counts ops
--- the account SIGNED (account_id = transacting_account_id). vote (op 1) avg_cost = 97,278,897,
--- custom_json (op 18) avg_cost = 167,828,015 (latest rate on/before 2021-03 = the 2020-06-08
--- row). Blocks 5000-6000 sit well outside the cohort fixture's 1000-1005 range, so
--- process_account_cohorts does not see them. account_op_seq_no must be dense (1..8) per account
--- for the binary-search helper.
+-- Account-operations fixtures for get_account_rc_footprint + get_account_rc_footprint_timeline
+-- (rctester, id 3001), in hive.account_operations_view (the global view the endpoints read). They
+-- count ops the account SIGNED (account_id = transacting_account_id). vote (op 1) avg_cost =
+-- 97,278,897, custom_json (op 18) avg_cost = 167,828,015 (latest rate on/before 2021-03 = the
+-- 2020-06-08 row). Blocks 5000-6000 sit well outside the cohort fixture's 1000-1005 range, so
+-- process_account_cohorts does not see them. account_op_seq_no must be dense AND monotonic with
+-- block_num per account (real HAF assigns it in chain order): account_op_seq_range's binary search
+-- and the timeline's seq-ordered paging both depend on that. operation_id is set on the two
+-- custom_json rows so get_account_rc_footprint_timeline can resolve their app id from
+-- hive.operations_view (see the hafd.operations seed below); it encodes block 5000 as
+-- hafd.operation_id(5000, seq) = 5000*1e6 + seq. Other rows leave it NULL (the timeline only
+-- body-joins op 18).
 INSERT INTO hive.account_operations_view
-(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no)
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no, operation_id)
 VALUES
--- signed votes (op 1): 3 on 2021-03-01, 1 on 2021-03-10 = 4 -> 4 * 97278897 = 389115588
-(3001, 3001, 5000, 1, 1),
-(3001, 3001, 5000, 1, 2),
-(3001, 3001, 5001, 1, 3),
-(3001, 3001, 6000, 1, 4),
--- signed custom_json (op 18): 2 on 2021-03-01 -> 2 * 167828015 = 335656030
-(3001, 3001, 5000, 18, 5),
-(3001, 3001, 5000, 18, 6),
--- received vote (transacting_account_id <> account_id) -> EXCLUDED (rctester is not the payer)
-(3001, 9999, 5000, 1, 7),
--- virtual producer_reward (op 64) -> EXCLUDED (is_virtual, consumes no RC)
-(3001, 3001, 5000, 64, 8)
+-- block 5000 (2021-03-01 00:00), in chain order: 2 signed votes, 2 signed custom_json,
+-- then 1 received vote and 1 virtual producer_reward (both EXCLUDED by the endpoints)
+(3001, 3001, 5000, 1, 1, NULL),
+(3001, 3001, 5000, 1, 2, NULL),
+(3001, 3001, 5000, 18, 3, 5000000003),
+(3001, 3001, 5000, 18, 4, 5000000004),
+(3001, 9999, 5000, 1, 5, NULL),    -- received vote (transacting <> account) -> EXCLUDED
+(3001, 3001, 5000, 64, 6, NULL),   -- virtual producer_reward (op 64) -> EXCLUDED
+-- block 5001 (2021-03-01 00:01): 1 signed vote
+(3001, 3001, 5001, 1, 7, NULL),
+-- block 6000 (2021-03-10): 1 signed vote
+(3001, 3001, 6000, 1, 8, NULL)
 ON CONFLICT DO NOTHING;
+-- Signed window totals (unchanged; only the seq numbering changed): 4 votes -> 4*97278897 =
+-- 389115588, 2 custom_json -> 2*167828015 = 335656030.
+
+-- Operation bodies for rctester's two custom_json events, so get_account_rc_footprint_timeline can
+-- read their json id from hive.operations_view (body -> 'value' ->> 'id') = 'sm_claim_daily'. The
+-- timeline exposes both the resolved DApp name (app: 'sm_' -> 'Splinterlands' via seed_data's
+-- custom_json_app_registry, matching the aggregate group_by=app) and the raw id (custom_json_id).
+INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
+(5000000003, 18, '{"id": "sm_claim_daily"}'),
+(5000000004, 18, '{"id": "sm_claim_daily"}')
+ON CONFLICT (id) DO NOTHING;
 
 -- dapptester (2001) needs a valid signed-op window or get_account_rc_footprint short-circuits
 -- to [] (it RETURNs early when the account has no ops in account_operations_view). Two op-18
@@ -181,9 +203,13 @@ GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
 GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_owner;
--- get_account_rc_footprint reads hive.account_operations_view on-demand as haf_stats_user.
+-- get_account_rc_footprint reads hive.account_operations_view on-demand as haf_stats_user;
+-- get_account_rc_footprint_timeline additionally body-joins hive.operations_view for the
+-- custom_json app id. In production HAF grants haf_stats_user SELECT on these hive views; the
+-- stub has no HAF framework, so grant them here (the aggregate needed only the first).
 GRANT USAGE ON SCHEMA hive TO haf_stats_user;
 GRANT SELECT ON hive.account_operations_view TO haf_stats_user;
+GRANT SELECT ON hive.operations_view TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Schemas
