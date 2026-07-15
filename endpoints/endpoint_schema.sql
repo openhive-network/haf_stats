@@ -389,7 +389,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account content stats",
-        "description": "Per-account posting and engagement summary \u00e2\u20ac\u201d posts, comments, votes cast, votes received, replies received, and author rewards \u00e2\u20ac\u201d aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
+        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
         "operationId": "haf_stats_endpoints.get_account_content_stats",
         "parameters": [
           {
@@ -1492,7 +1492,7 @@ DECLARE
           "Network"
         ],
         "summary": "Content engagement quality metrics",
-        "description": "Average votes and comments per post, and the share of posts with zero engagement, per period. Posts are grouped by their CREATION period and the counts are lifetime totals \u00e2\u20ac\u201d a post created in period P contributes every vote and reply it has ever received to P, including ones that arrived in a later period. This is a cohort-by-creation view, not a count of activity that happened within the period. Because counts are lifetime, the most recent periods are right-censored: posts created near the end of the range have had little time to accrue votes/replies, so their zero_vote_post_pct / zero_comment_post_pct read artificially high \u00e2\u20ac\u201d treat the latest buckets as provisional until they mature. zero_vote_post_pct and zero_comment_post_pct are ghost-posting health signals unique to Hive. vote_count includes upvotes and downvotes (weight != 0); unvotes (weight = 0) are excluded. reply_count counts only direct replies to root posts.",
+        "description": "Average votes and comments per post, and the share of posts with zero engagement, per period. Posts are grouped by their CREATION period and the counts are lifetime totals \u2014 a post created in period P contributes every vote and reply it has ever received to P, including ones that arrived in a later period. This is a cohort-by-creation view, not a count of activity that happened within the period. Because counts are lifetime, the most recent periods are right-censored: posts created near the end of the range have had little time to accrue votes/replies, so their zero_vote_post_pct / zero_comment_post_pct read artificially high \u2014 treat the latest buckets as provisional until they mature. zero_vote_post_pct and zero_comment_post_pct are ghost-posting health signals unique to Hive. vote_count includes upvotes and downvotes (weight != 0); unvotes (weight = 0) are excluded. reply_count counts only direct replies to root posts.",
         "operationId": "haf_stats_endpoints.get_network_engagement",
         "parameters": [
           {
@@ -1650,7 +1650,7 @@ DECLARE
                 "account"
               ]
             },
-            "description": "Column to rank by before truncating; omit to use the metric's default sort. Must be a column the metric populates (else 400): author/curation rewards allow all five; transfers exclude value_vests; transaction_count allows op_count/account; hp_balance allows value_vests/account. 'account' sorts alphabetically by name."
+            "description": "Column to rank by before truncating; omit to use the metric's default sort. Must be a column the metric populates (else 400): author/curation rewards allow all five; transfers exclude value_vests; transaction_count allows op_count/account; hp_balance allows value_vests/account. 'account' sorts alphabetically by name. Requesting the metric's own default column with order_direction=desc reproduces the default ranking exactly, i.e. its full multi-key tiebreak (e.g. author_rewards: vests, then hbd, then hive, then account id); any other column ranks by that single column, then account id."
           },
           {
             "in": "query",
@@ -4088,7 +4088,10 @@ $$;
           Column to rank by before truncating; omit to use the metric's default sort. Must be a
           column the metric populates (else 400): author/curation rewards allow all five; transfers
           exclude value_vests; transaction_count allows op_count/account; hp_balance allows
-          value_vests/account. 'account' sorts alphabetically by name.
+          value_vests/account. 'account' sorts alphabetically by name. Requesting the metric's own
+          default column with order_direction=desc reproduces the default ranking exactly, i.e. its
+          full multi-key tiebreak (e.g. author_rewards: vests, then hbd, then hive, then account id);
+          any other column ranks by that single column, then account id.
       - in: query
         name: order_direction
         required: false
@@ -4620,24 +4623,46 @@ BEGIN
         $pop$, _balance_rel);
     END IF;
 
-    -- Join names, rank the full population by the requested order, then truncate.
-    -- ROW_NUMBER over the same order makes rank match the row order; %2$s is the fixed,
-    -- validated ORDER BY tail and %3$s the range-checked integer limit — both safe.
-    _sql := format($ob$
-        WITH pop AS ( %1$s ),
-        j AS (
-            SELECT p.account_id, a.name, p.hive, p.hbd, p.vests, p.ops
-              FROM pop p
-              JOIN hafd.accounts a ON a.id = p.account_id
-        ),
-        ranked AS (
-            SELECT * FROM j ORDER BY %2$s LIMIT %3$s
-        )
-        SELECT (ROW_NUMBER() OVER (ORDER BY %2$s))::INT,
-               name::TEXT, hive::BIGINT, hbd::BIGINT, vests::BIGINT, ops::BIGINT
-          FROM ranked
-         ORDER BY 1
-    $ob$, _pop_select, _order_clause, "limit_count");
+    -- Rank the full population by the requested order, truncate, then resolve names.
+    -- ROW_NUMBER re-applies the same ORDER BY so rank matches row order without relying on
+    -- CTE row-order preservation; %2$s is the fixed validated ORDER BY tail and %3$s the
+    -- range-checked integer limit — both safe.
+    --
+    -- Two shapes by whether the sort needs the account name. For value/op orderings the
+    -- name is only needed for the final N rows, so we sort+LIMIT the population first and
+    -- join hafd.accounts to just those N (mirrors the fast paths, which also resolve names
+    -- after LIMIT). Only order_by=account sorts BY the name, so there the join must precede
+    -- LIMIT — its cost is inherent to alphabetical ordering over the whole population.
+    IF _ob = 'account' THEN
+        _sql := format($ob$
+            WITH pop AS ( %1$s ),
+            j AS (
+                SELECT p.account_id, a.name, p.hive, p.hbd, p.vests, p.ops
+                  FROM pop p
+                  JOIN hafd.accounts a ON a.id = p.account_id
+            ),
+            ranked AS (
+                SELECT * FROM j ORDER BY %2$s LIMIT %3$s
+            )
+            SELECT (ROW_NUMBER() OVER (ORDER BY %2$s))::INT,
+                   name::TEXT, hive::BIGINT, hbd::BIGINT, vests::BIGINT, ops::BIGINT
+              FROM ranked
+             ORDER BY 1
+        $ob$, _pop_select, _order_clause, "limit_count");
+    ELSE
+        _sql := format($ob$
+            WITH pop AS ( %1$s ),
+            ranked AS (
+                SELECT * FROM pop ORDER BY %2$s LIMIT %3$s
+            )
+            SELECT (ROW_NUMBER() OVER (ORDER BY %2$s))::INT,
+                   a.name::TEXT, ranked.hive::BIGINT, ranked.hbd::BIGINT,
+                   ranked.vests::BIGINT, ranked.ops::BIGINT
+              FROM ranked
+              JOIN hafd.accounts a ON a.id = ranked.account_id
+             ORDER BY 1
+        $ob$, _pop_select, _order_clause, "limit_count");
+    END IF;
 
     RETURN QUERY EXECUTE _sql;
 END;
