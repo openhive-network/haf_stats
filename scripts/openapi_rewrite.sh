@@ -29,7 +29,12 @@ echo "Running process_openapi.py..."
 # path, passing an absolute input would make it open (and truncate) the source
 # file itself. A relative path keeps the output inside OUTPUT_DIR. The generator
 # also writes rewrite_rules.conf into the CWD, hence the repo-root cd.
-( cd "${SCRIPTDIR}/.." && python3 "${PROCESS_OPENAPI}" "${OUTPUT_DIR}" "endpoints/endpoint_schema.sql" )
+# PYTHONUTF8=1 forces UTF-8 for all file I/O regardless of the host locale. Without it,
+# process_openapi.py reads the UTF-8 source under the platform default (e.g. cp1252 on
+# Windows) and mangles non-ASCII in the regenerated JSON blob — em-dashes become mojibake
+# (â€”) in unrelated endpoint descriptions. No effect where UTF-8 is already
+# the default (Linux/CI).
+( cd "${SCRIPTDIR}/.." && PYTHONUTF8=1 python3 "${PROCESS_OPENAPI}" "${OUTPUT_DIR}" "endpoints/endpoint_schema.sql" )
 
 # Copy generated endpoint_schema.sql back (contains the embedded JSON blob), then
 # strip trailing whitespace the generator leaves on "RETURNS <type> " lines so the
