@@ -389,7 +389,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account content stats",
-        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
+        "description": "Per-account posting and engagement summary \u00e2\u20ac\u201d posts, comments, votes cast, votes received, replies received, and author rewards \u00e2\u20ac\u201d aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
         "operationId": "haf_stats_endpoints.get_account_content_stats",
         "parameters": [
           {
@@ -1492,7 +1492,7 @@ DECLARE
           "Network"
         ],
         "summary": "Content engagement quality metrics",
-        "description": "Average votes and comments per post, and the share of posts with zero engagement, per period. Posts are grouped by their CREATION period and the counts are lifetime totals \u2014 a post created in period P contributes every vote and reply it has ever received to P, including ones that arrived in a later period. This is a cohort-by-creation view, not a count of activity that happened within the period. Because counts are lifetime, the most recent periods are right-censored: posts created near the end of the range have had little time to accrue votes/replies, so their zero_vote_post_pct / zero_comment_post_pct read artificially high \u2014 treat the latest buckets as provisional until they mature. zero_vote_post_pct and zero_comment_post_pct are ghost-posting health signals unique to Hive. vote_count includes upvotes and downvotes (weight != 0); unvotes (weight = 0) are excluded. reply_count counts only direct replies to root posts.",
+        "description": "Average votes and comments per post, and the share of posts with zero engagement, per period. Posts are grouped by their CREATION period and the counts are lifetime totals \u00e2\u20ac\u201d a post created in period P contributes every vote and reply it has ever received to P, including ones that arrived in a later period. This is a cohort-by-creation view, not a count of activity that happened within the period. Because counts are lifetime, the most recent periods are right-censored: posts created near the end of the range have had little time to accrue votes/replies, so their zero_vote_post_pct / zero_comment_post_pct read artificially high \u00e2\u20ac\u201d treat the latest buckets as provisional until they mature. zero_vote_post_pct and zero_comment_post_pct are ghost-posting health signals unique to Hive. vote_count includes upvotes and downvotes (weight != 0); unvotes (weight = 0) are excluded. reply_count counts only direct replies to root posts.",
         "operationId": "haf_stats_endpoints.get_network_engagement",
         "parameters": [
           {
@@ -1579,7 +1579,7 @@ DECLARE
           "Network"
         ],
         "summary": "Top accounts per metric",
-        "description": "Top N accounts ranked by the chosen metric. Reward and transfer metrics sum haf_stats financial data over [from_date, to_date]; transaction_count sums authored (signed) operations over the same range; hp_balance ranks the CURRENT own vesting balance from balance_tracker and ignores from_date/to_date (empty result if no balance_tracker schema is readable on the deployment). Sort keys - author_rewards and curation_rewards: vests, then hbd, then hive sums; transfer_volume_in/out: hive, then hbd sums; transaction_count: op count; hp_balance: vesting balance. Ties broken by account id (creation order). Value fields not applicable to a metric are 0.",
+        "description": "Top N accounts ranked by the chosen metric. Reward and transfer metrics sum haf_stats financial data over [from_date, to_date]; transaction_count sums authored (signed) operations over the same range; hp_balance ranks the CURRENT own vesting balance from balance_tracker and ignores from_date/to_date (empty result if no balance_tracker schema is readable on the deployment). Default sort keys - author_rewards and curation_rewards: vests, then hbd, then hive sums; transfer_volume_in/out: hive, then hbd sums; transaction_count: op count; hp_balance: vesting balance. Ties broken by account id (creation order). Value fields not applicable to a metric are 0. Optional order_by/order_direction re-rank the FULL population before truncating (a true top/bottom-N by any displayed column, not a client-side re-sort of a biased top-N): order_by must be a column the metric populates (author/curation rewards: value_vests|value_hive|value_hbd|op_count|account; transfers: value_hive|value_hbd|op_count|account; transaction_count: op_count|account; hp_balance: value_vests|account) - other combos return 400. order_direction asc yields a true bottom-N. Omitting both reproduces the default ranking exactly.",
         "operationId": "haf_stats_endpoints.get_network_top_accounts",
         "parameters": [
           {
@@ -1633,6 +1633,38 @@ DECLARE
               "maximum": 100
             },
             "description": "Number of rows to return (1-100)"
+          },
+          {
+            "in": "query",
+            "name": "order_by",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string",
+              "enum": [
+                "value_vests",
+                "value_hive",
+                "value_hbd",
+                "op_count",
+                "account"
+              ]
+            },
+            "description": "Column to rank by before truncating; omit to use the metric's default sort. Must be a column the metric populates (else 400): author/curation rewards allow all five; transfers exclude value_vests; transaction_count allows op_count/account; hp_balance allows value_vests/account. 'account' sorts alphabetically by name."
+          },
+          {
+            "in": "query",
+            "name": "order_direction",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "desc",
+              "enum": [
+                "desc",
+                "asc"
+              ]
+            },
+            "description": "Sort direction applied to order_by (or the metric's default column when order_by is omitted). asc yields a true bottom-N."
           }
         ],
         "responses": {
@@ -3987,11 +4019,17 @@ $$;
       haf_stats financial data over [from_date, to_date]; transaction_count sums authored
       (signed) operations over the same range; hp_balance ranks the CURRENT own
       vesting balance from balance_tracker and ignores from_date/to_date (empty result if
-      no balance_tracker schema is readable on the deployment). Sort keys -
+      no balance_tracker schema is readable on the deployment). Default sort keys -
       author_rewards and curation_rewards: vests, then hbd, then hive sums;
       transfer_volume_in/out: hive, then hbd sums; transaction_count: op count;
       hp_balance: vesting balance. Ties broken by account id (creation order).
-      Value fields not applicable to a metric are 0.
+      Value fields not applicable to a metric are 0. Optional order_by/order_direction
+      re-rank the FULL population before truncating (a true top/bottom-N by any displayed
+      column, not a client-side re-sort of a biased top-N): order_by must be a column the
+      metric populates (author/curation rewards: value_vests|value_hive|value_hbd|op_count|account;
+      transfers: value_hive|value_hbd|op_count|account; transaction_count: op_count|account;
+      hp_balance: value_vests|account) - other combos return 400. order_direction asc yields
+      a true bottom-N. Omitting both reproduces the default ranking exactly.
     operationId: haf_stats_endpoints.get_network_top_accounts
     parameters:
       - in: query
@@ -4033,6 +4071,36 @@ $$;
           minimum: 1
           maximum: 100
         description: Number of rows to return (1-100)
+      - in: query
+        name: order_by
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+          enum:
+            - value_vests
+            - value_hive
+            - value_hbd
+            - op_count
+            - account
+        description: >-
+          Column to rank by before truncating; omit to use the metric's default sort. Must be a
+          column the metric populates (else 400): author/curation rewards allow all five; transfers
+          exclude value_vests; transaction_count allows op_count/account; hp_balance allows
+          value_vests/account. 'account' sorts alphabetically by name.
+      - in: query
+        name: order_direction
+        required: false
+        schema:
+          type: string
+          default: desc
+          enum:
+            - desc
+            - asc
+        description: >-
+          Sort direction applied to order_by (or the metric's default column when order_by is
+          omitted). asc yields a true bottom-N.
     responses:
       '200':
         description: Ranked accounts, rank 1 is the top account
@@ -4065,7 +4133,9 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_top_accounts(
     "metric" TEXT = 'author_rewards',
     "from_date" TEXT = NULL,
     "to_date" TEXT = NULL,
-    "limit_count" INT = 25
+    "limit_count" INT = 25,
+    "order_by" TEXT = NULL,
+    "order_direction" TEXT = 'desc'
 )
 RETURNS TABLE(rank INT, account TEXT, value_hive_nai BIGINT, value_hbd_nai BIGINT, value_vests_nai BIGINT, op_count BIGINT)
 -- openapi-generated-code-end
@@ -4095,6 +4165,18 @@ DECLARE
     -- all-time per-account tables (account_txn_alltime / account_financial_alltime) instead of a
     -- genesis→now re-sum of the monthly rollups (#38). Any bounded range keeps the exact hybrid.
     _alltime BOOLEAN;
+    -- Ordering (issue #39). order_by/order_direction let the UI rank the FULL population
+    -- by any displayed column before truncating, instead of only the metric's default
+    -- sort. _natural is the metric's default primary column; when the request resolves to
+    -- (natural column, desc) we keep the existing covering-index fast paths byte-for-byte.
+    _natural TEXT;         -- metric's default primary order_by token
+    _ob TEXT;              -- resolved order_by = COALESCE(order_by, _natural)
+    _asc BOOLEAN;          -- order_direction = 'asc'
+    _use_fast BOOLEAN;     -- (natural col, desc) ⇒ existing fast paths, byte-identical
+    _col TEXT;             -- physical sort column for the ordered path (from a fixed map)
+    _order_clause TEXT;    -- built ORDER BY tail for the ordered path
+    _pop_select TEXT;      -- per-metric full-population SELECT for the ordered path
+    _sql TEXT;
 BEGIN
     -- No date filter ⇒ full history, consistent with the sibling network endpoints (#35). Omitting
     -- from_date previously defaulted to the last 30 days; default to chain genesis (2016-03-24,
@@ -4128,6 +4210,54 @@ BEGIN
             HINT = 'Must be between 1 and 100';
     END IF;
 
+    -- Ordering params (issue #39). order_direction defaults to 'desc'; tolerate Wax's
+    -- JSON-encoded strings like "asc" (issue #22), same as metric above.
+    "order_direction" := LOWER(TRIM('"' FROM COALESCE("order_direction", 'desc')));
+    IF "order_direction" NOT IN ('asc', 'desc') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid order_direction: ' || COALESCE("order_direction", '(null)'),
+            HINT = 'Must be one of: asc, desc';
+    END IF;
+    _asc := ("order_direction" = 'asc');
+
+    -- order_by must name a column the metric actually populates: a metric only fills its
+    -- own value columns (transaction_count only op_count; hp_balance only vesting balance;
+    -- transfers never carry VESTS), so ordering by a structurally-zero column is a client
+    -- bug, not a valid request — reject it clearly rather than return a meaningless order.
+    IF "order_by" IS NOT NULL THEN
+        "order_by" := LOWER(TRIM('"' FROM "order_by"));
+        IF NOT (
+               ("metric" IN ('author_rewards', 'curation_rewards')
+                    AND "order_by" IN ('value_vests', 'value_hbd', 'value_hive', 'op_count', 'account'))
+            OR ("metric" IN ('transfer_volume_in', 'transfer_volume_out')
+                    AND "order_by" IN ('value_hive', 'value_hbd', 'op_count', 'account'))
+            OR ("metric" = 'transaction_count'
+                    AND "order_by" IN ('op_count', 'account'))
+            OR ("metric" = 'hp_balance'
+                    AND "order_by" IN ('value_vests', 'account'))
+        ) THEN
+            RAISE SQLSTATE '22023' USING
+                MESSAGE = format('invalid order_by %L for metric %L', "order_by", "metric"),
+                HINT = 'order_by must be a column this metric populates (value_vests, '
+                    || 'value_hive, value_hbd, op_count, or account); e.g. transaction_count '
+                    || 'supports only op_count/account, hp_balance only value_vests/account.';
+        END IF;
+    END IF;
+
+    -- Metric's default primary sort column. When the request resolves to (natural, desc)
+    -- we fall through to the existing covering-index fast paths below (byte-identical to
+    -- the pre-#39 response); any other column or asc uses the ordered path after them.
+    _natural := CASE
+        WHEN "metric" IN ('author_rewards', 'curation_rewards')       THEN 'value_vests'
+        WHEN "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN 'value_hive'
+        WHEN "metric" = 'transaction_count'                            THEN 'op_count'
+        ELSE 'value_vests'  -- hp_balance
+    END;
+    _ob := COALESCE("order_by", _natural);
+    _use_fast := (NOT _asc) AND (_ob = _natural);
+
+    IF _use_fast THEN
+    -- ===================== fast paths (unchanged, pre-#39) =====================
     -- Reward + transfer metrics share account_financial_daily; the
     -- (category, direction, day) index makes each branch a targeted range scan.
     -- Accounts are resolved AFTER aggregation + LIMIT (top N names only).
@@ -4355,6 +4485,161 @@ BEGIN
             ORDER BY 1
         $q$, _balance_rel) USING "limit_count";
     END IF;
+    RETURN;
+    END IF;  -- _use_fast
+
+    -- ======================= ordered path (issue #39) =========================
+    -- Reached only when order_by names a non-default column or order_direction = asc.
+    -- The requested ordering has no covering index, so — unlike the fast paths — this
+    -- ranks the metric's FULL per-account population before truncating. That is the
+    -- whole point of the feature: re-sorting a truncated top-N client-side reorders a
+    -- biased sample, so the true top/bottom-N by another column is a different set and
+    -- must be selected server-side. Cost is a scan + top-N sort over the population (up
+    -- to ~2M accounts, tens–hundreds of ms; order_by=account also joins names pre-LIMIT).
+
+    -- Physical sort column, resolved from a fixed map — never raw user text, so the
+    -- string is injection-safe. order_by was validated against the metric above.
+    _col := CASE _ob
+        WHEN 'value_vests' THEN 'vests'
+        WHEN 'value_hive'  THEN 'hive'
+        WHEN 'value_hbd'   THEN 'hbd'
+        WHEN 'op_count'    THEN 'ops'
+        WHEN 'account'     THEN 'name'
+    END;
+    -- account_id is the deterministic final tiebreak (creation order), matching the
+    -- fast paths. NULLS LAST is defensive; population values are always non-null.
+    _order_clause := format('%s %s NULLS LAST, account_id ASC',
+        _col, CASE WHEN _asc THEN 'ASC' ELSE 'DESC' END);
+
+    -- Per-metric full population (account_id, hive, hbd, vests, ops), NO per-arm LIMIT.
+    -- _alltime is injected as a literal so exactly one arm scans (constant-folded, #38):
+    -- the all-time table for the no-filter default, else the daily/monthly hybrid (#37).
+    -- Metrics zero-fill the value columns they do not carry (same contract as the output).
+    IF "metric" IN ('author_rewards', 'curation_rewards') THEN
+        _category := CASE "metric"
+            WHEN 'author_rewards' THEN 'author_reward_operation'
+            ELSE 'curation_reward_operation'
+        END;
+        _pop_select := format($pop$
+            SELECT a.account_id, a.hive_nai AS hive, a.hbd_nai AS hbd, a.vests_nai AS vests, a.op_count AS ops
+              FROM haf_stats_backend.account_financial_alltime a
+             WHERE %1$L::boolean AND a.category = %2$L AND a.direction = 'incoming'
+            UNION ALL
+            SELECT s.account_id, SUM(s.hive_nai) AS hive, SUM(s.hbd_nai) AS hbd,
+                   SUM(s.vests_nai) AS vests, SUM(s.op_count) AS ops
+              FROM (
+                SELECT m.account_id, m.hive_nai, m.hbd_nai, m.vests_nai, m.op_count
+                  FROM haf_stats_backend.account_financial_monthly m
+                 WHERE NOT %1$L::boolean AND m.category = %2$L AND m.direction = 'incoming'
+                   AND m.month BETWEEN %3$L AND %4$L
+                UNION ALL
+                SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
+                  FROM haf_stats_backend.account_financial_daily f
+                 WHERE NOT %1$L::boolean AND f.category = %2$L AND f.direction = 'incoming'
+                   AND f.day BETWEEN %5$L AND %6$L
+                UNION ALL
+                SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
+                  FROM haf_stats_backend.account_financial_daily f
+                 WHERE NOT %1$L::boolean AND f.category = %2$L AND f.direction = 'incoming'
+                   AND f.day BETWEEN %7$L AND %8$L
+              ) s GROUP BY s.account_id
+        $pop$, _alltime, _category, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to);
+
+    ELSIF "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN
+        _direction := CASE "metric"
+            WHEN 'transfer_volume_in' THEN 'incoming'
+            ELSE 'outgoing'
+        END;
+        _pop_select := format($pop$
+            SELECT a.account_id, a.hive_nai AS hive, a.hbd_nai AS hbd, 0::bigint AS vests, a.op_count AS ops
+              FROM haf_stats_backend.account_financial_alltime a
+             WHERE %1$L::boolean AND a.category = 'transfer_operation' AND a.direction = %2$L
+            UNION ALL
+            SELECT s.account_id, SUM(s.hive_nai) AS hive, SUM(s.hbd_nai) AS hbd,
+                   0::bigint AS vests, SUM(s.op_count) AS ops
+              FROM (
+                SELECT m.account_id, m.hive_nai, m.hbd_nai, m.op_count
+                  FROM haf_stats_backend.account_financial_monthly m
+                 WHERE NOT %1$L::boolean AND m.category = 'transfer_operation' AND m.direction = %2$L
+                   AND m.month BETWEEN %3$L AND %4$L
+                UNION ALL
+                SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
+                  FROM haf_stats_backend.account_financial_daily f
+                 WHERE NOT %1$L::boolean AND f.category = 'transfer_operation' AND f.direction = %2$L
+                   AND f.day BETWEEN %5$L AND %6$L
+                UNION ALL
+                SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
+                  FROM haf_stats_backend.account_financial_daily f
+                 WHERE NOT %1$L::boolean AND f.category = 'transfer_operation' AND f.direction = %2$L
+                   AND f.day BETWEEN %7$L AND %8$L
+              ) s GROUP BY s.account_id
+        $pop$, _alltime, _direction, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to);
+
+    ELSIF "metric" = 'transaction_count' THEN
+        _pop_select := format($pop$
+            SELECT a.account_id, 0::bigint AS hive, 0::bigint AS hbd, 0::bigint AS vests, a.ops AS ops
+              FROM haf_stats_backend.account_txn_alltime a
+             WHERE %1$L::boolean
+            UNION ALL
+            SELECT s.account_id, 0::bigint AS hive, 0::bigint AS hbd, 0::bigint AS vests, SUM(s.ops) AS ops
+              FROM (
+                SELECT m.account_id, m.ops
+                  FROM haf_stats_backend.active_users_account_monthly m
+                 WHERE NOT %1$L::boolean AND m.op_class = -1 AND m.month BETWEEN %2$L AND %3$L
+                UNION ALL
+                SELECT au.account_id, au.ops
+                  FROM haf_stats_backend.active_users_daily au
+                 WHERE NOT %1$L::boolean AND au.op_class = -1 AND au.day BETWEEN %4$L AND %5$L
+                UNION ALL
+                SELECT au.account_id, au.ops
+                  FROM haf_stats_backend.active_users_daily au
+                 WHERE NOT %1$L::boolean AND au.op_class = -1 AND au.day BETWEEN %6$L AND %7$L
+              ) s GROUP BY s.account_id
+        $pop$, _alltime, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to);
+
+    ELSE  -- hp_balance (ordered only by value_vests asc or account; same balance-rel pick as above)
+        SELECT format('%I.%I', t.table_schema, t.table_name)
+          INTO _balance_rel
+          FROM (VALUES
+                    ('btracker_app',     'current_account_balances',      1),
+                    ('btracker_backend', 'current_account_balances_view', 2),
+                    ('hafbe_bal',        'current_account_balances',      3)
+               ) AS cand (sch, rel, prio)
+          JOIN information_schema.tables t
+            ON t.table_schema = cand.sch AND t.table_name = cand.rel
+         ORDER BY cand.prio
+         LIMIT 1;
+        IF _balance_rel IS NULL THEN
+            RETURN;  -- no readable balance relation on this deployment
+        END IF;
+        _pop_select := format($pop$
+            SELECT b.account AS account_id, 0::bigint AS hive, 0::bigint AS hbd,
+                   b.balance AS vests, 0::bigint AS ops
+              FROM %s b
+             WHERE b.nai = 37 AND b.balance > 0
+        $pop$, _balance_rel);
+    END IF;
+
+    -- Join names, rank the full population by the requested order, then truncate.
+    -- ROW_NUMBER over the same order makes rank match the row order; %2$s is the fixed,
+    -- validated ORDER BY tail and %3$s the range-checked integer limit — both safe.
+    _sql := format($ob$
+        WITH pop AS ( %1$s ),
+        j AS (
+            SELECT p.account_id, a.name, p.hive, p.hbd, p.vests, p.ops
+              FROM pop p
+              JOIN hafd.accounts a ON a.id = p.account_id
+        ),
+        ranked AS (
+            SELECT * FROM j ORDER BY %2$s LIMIT %3$s
+        )
+        SELECT (ROW_NUMBER() OVER (ORDER BY %2$s))::INT,
+               name::TEXT, hive::BIGINT, hbd::BIGINT, vests::BIGINT, ops::BIGINT
+          FROM ranked
+         ORDER BY 1
+    $ob$, _pop_select, _order_clause, "limit_count");
+
+    RETURN QUERY EXECUTE _sql;
 END;
 $$;
 

@@ -147,6 +147,50 @@ INSERT INTO _parity VALUES
    WHERE o.op_type_id=2 AND body_value->>'to'='bittrex' AND body_value->'amount'->>'nai'='@@000000021'
      AND b.created_at>='2016-04-15' AND b.created_at<'2016-06-21'));
 
+-- 4c) get_network_top_accounts ORDERING (issue #39). Self-validating invariants that hold on
+--     ANY data, so no hardcoded leaderboard values: the ordered path must (a) reproduce the
+--     default ranking byte-for-byte when order_by is the metric's natural column + desc (the
+--     backward-compat / fast-path guard), and (b) actually order by the requested column.
+--     Uses transfer_volume_in / transaction_count over 2016-04 (both densely populated in the
+--     5M replay), covering the two population shapes the ordered path builds.
+INSERT INTO _parity VALUES
+-- (a) natural column + desc == omitting the order params entirely (symmetric-difference = 0)
+('top_accounts.orderby_bytecompat.transfer_in','differing_rows',
+ (SELECT COUNT(*) FROM (
+     (SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',10,'value_hive','desc')
+      EXCEPT SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',10))
+     UNION ALL
+     (SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',10)
+      EXCEPT SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',10,'value_hive','desc'))
+ ) d), 0),
+('top_accounts.orderby_bytecompat.transaction_count','differing_rows',
+ (SELECT COUNT(*) FROM (
+     (SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transaction_count','2016-04-01','2016-04-30',10,'op_count','desc')
+      EXCEPT SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transaction_count','2016-04-01','2016-04-30',10))
+     UNION ALL
+     (SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transaction_count','2016-04-01','2016-04-30',10)
+      EXCEPT SELECT * FROM haf_stats_endpoints.get_network_top_accounts('transaction_count','2016-04-01','2016-04-30',10,'op_count','desc'))
+ ) d), 0),
+-- (b) order_by op_count DESC ⇒ non-increasing op_count down the ranks (count violations)
+('top_accounts.orderby_monotone.op_count_desc','violations',
+ (SELECT COUNT(*) FROM (
+     SELECT op_count, LEAD(op_count) OVER (ORDER BY rank) AS nxt
+       FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',20,'op_count','desc')
+  ) t WHERE nxt IS NOT NULL AND op_count < nxt), 0),
+-- (b) order_by op_count ASC ⇒ non-decreasing (a true bottom-N, impossible client-side)
+('top_accounts.orderby_monotone.op_count_asc','violations',
+ (SELECT COUNT(*) FROM (
+     SELECT op_count, LEAD(op_count) OVER (ORDER BY rank) AS nxt
+       FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',20,'op_count','asc')
+  ) t WHERE nxt IS NOT NULL AND op_count > nxt), 0),
+-- (b) asc (bottom) and desc (top) surface a DIFFERENT rank-1 (population exceeds the limit),
+--     proving the truncation happens after ordering the full population, not before
+('top_accounts.orderby_bottom_ne_top','same_rank1',
+ (SELECT CASE WHEN
+     (SELECT account FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',5,'value_hive','asc')  WHERE rank=1)
+   = (SELECT account FROM haf_stats_endpoints.get_network_top_accounts('transfer_volume_in','2016-04-01','2016-04-30',5,'value_hive','desc') WHERE rank=1)
+   THEN 1 ELSE 0 END), 0);
+
 -- 5) get_account_content_stats (tuck-fheman, 2016-04 month)
 INSERT INTO _parity VALUES
 ('account_content_stats.tuck-fheman','posts',

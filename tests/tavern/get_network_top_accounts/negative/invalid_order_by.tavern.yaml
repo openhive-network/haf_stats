@@ -1,0 +1,24 @@
+---
+test_name: Network top accounts rejects order_by not valid for the metric
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject order_by on a column the metric does not populate
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transaction_count"
+        order_by: "value_hive"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

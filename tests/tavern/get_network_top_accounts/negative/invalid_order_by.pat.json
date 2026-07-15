@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "order_by must be a column this metric populates (value_vests, value_hive, value_hbd, op_count, or account); e.g. transaction_count supports only op_count/account, hp_balance only value_vests/account.",
+  "message": "invalid order_by 'value_hive' for metric 'transaction_count'"
+}
