@@ -645,7 +645,26 @@ DECLARE
     _first_day DATE;
     _last_day DATE;
     _refresh_lo_block INT;
+    _high_water INT;
 BEGIN
+
+-- Recurrence guard for issue #42. Every counter below accumulates additively
+-- (network_content_daily, account_content_daily, network_vote_daily), so replaying
+-- an already-counted block range silently doubles it — that is exactly how #42
+-- happened. The haf_stats HAF context is NON-FORKING (hive.app_context_set_non_forking,
+-- haf_stats_app.sql), so blocks are delivered strictly forward and never re-delivered
+-- by a reorg: the live loop is the sole caller (process_block_range <- main) and always
+-- passes _first_block = last_processed_block + 1. Any range overlapping the high-water
+-- mark is therefore an out-of-band reprocess, and reprocessing is never what the caller
+-- wants here. Refuse it instead of silently double-counting.
+SELECT COALESCE(MAX(last_processed_block), 0) INTO _high_water
+FROM haf_stats_app.app_status;
+
+IF _first_block <= _high_water THEN
+    RAISE EXCEPTION 'process_content_stats: refusing to reprocess blocks %..% (already counted through %). Its counters are additive, so this would double-count them (issue #42).',
+        _first_block, _last_block, _high_water
+        USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
+END IF;
 
 -- Comment ops: ONE scan, five outputs.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
@@ -1037,6 +1056,185 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     -- the rollup permanently empty, so the drain must run unconditionally.)
     PERFORM haf_stats_app.refresh_engagement_touched();
 END IF;
+
+END;
+$$;
+
+-- Drop the orphaned function that caused issue #42. process_content_volume_backfill
+-- was never in this repo (git has no record of it) but existed as DB-only drift on at
+-- least one deployment: an owner-only, unguarded, additive upsert into exactly
+-- comment_registry / network_content_daily / network_author_daily — the three tables
+-- issue #42 found doubled, and nothing else. That match (posts/comments 2x, authors
+-- untouched because their upsert is idempotent, siblings clean) makes it the
+-- near-certain cause: someone called it over an already-counted range and it silently
+-- added those counts a second time. Drop it on every install/migration, not just by
+-- hand on the affected node, so the loaded gun cannot be reloaded or reused elsewhere.
+DROP FUNCTION IF EXISTS haf_stats_app.process_content_volume_backfill(INT, INT);
+
+-- Content-volume-only rebuild path for get_network_content_volume. This is a
+-- NARROW DUPLICATE of the comment-op classification in process_content_stats
+-- (the comment_ops … network_authors CTEs above): same scan, same create-vs-edit
+-- rule, but it writes ONLY the three content-volume outputs — comment_registry,
+-- network_content_daily, network_author_daily — and nothing else (no
+-- account_content_daily, no post_engagement, no vote scan, no boundary rollup
+-- refresh). process_content_stats cannot be reused for a rebuild because its
+-- shared scan also feeds those siblings and re-running it would re-double them.
+--
+-- IMPORTANT: the classification below MUST stay in lockstep with the matching
+-- block in process_content_stats. tests/parity/content_volume_rebuild_consistency.sql
+-- runs both over the same blocks and fails CI on any drift.
+--
+-- Used by scripts/rebuild_content_volume.sh, which TRUNCATEs the three tables and
+-- then calls this for ascending, non-overlapping batches from block 1. The
+-- network_counts upsert stays additive (a calendar day spans many batches); that
+-- is correct as long as the rebuild starts from truncated tables and never
+-- reprocesses a block range. The script reseals network_content_period_counts
+-- afterward (the endpoint reads only that rollup).
+--
+-- This function is itself additive and just as unguarded as the one dropped above —
+-- it is safe ONLY by the convention that rebuild_content_volume.sh always TRUNCATEs
+-- the three tables before calling it. It is owner-only and reachable solely through
+-- that script, so this is accepted as a second "loaded gun" rather than fixed here;
+-- do not call it directly outside the script.
+CREATE OR REPLACE FUNCTION haf_stats_app.process_content_volume(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+
+WITH comment_ops AS MATERIALIZED (
+    SELECT
+        ov.id,
+        ov.body_value ->> 'author'          AS author,
+        ov.body_value ->> 'permlink'        AS permlink,
+        ov.body_value ->> 'parent_author'   AS parent_author,
+        ov.body_value ->> 'parent_permlink' AS parent_permlink,
+        b.created_at::DATE                  AS day
+    FROM hive.operations_view ov
+    JOIN hafd.blocks b ON b.num = ov.block_num
+    WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
+      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND ov.id >= hafd.operation_id(_first_block, 0)
+      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
+),
+-- delete_comment ops (17) interleaved with ineffective_delete_comment vops (73).
+-- The vop is emitted while the failed delete applies, so its id is the very next
+-- event for that comment; a delete immediately followed by its vop did nothing.
+delete_events AS (
+    SELECT
+        ov.body_value ->> 'author'   AS author,
+        ov.body_value ->> 'permlink' AS permlink,
+        ov.id,
+        ov.op_type_id = 73           AS is_vop
+    FROM hive.operations_view ov
+    WHERE ov.op_type_id IN (17, 73)
+      AND ov.block_num BETWEEN _first_block AND _last_block
+      AND ov.id >= hafd.operation_id(_first_block, 0)
+      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
+),
+effective_deletes AS (
+    SELECT author, permlink, id
+    FROM (
+        SELECT
+            author,
+            permlink,
+            id,
+            is_vop,
+            LEAD(is_vop) OVER (PARTITION BY author, permlink ORDER BY id) AS next_is_vop
+        FROM delete_events
+    ) d
+    WHERE NOT is_vop AND next_is_vop IS DISTINCT FROM TRUE
+),
+-- Interleave comment + effective-delete events per comment in op order: after a
+-- comment op the comment exists (created or edited), after an effective delete
+-- it does not. So a comment op is a CREATE iff the previous event is a delete —
+-- or it has no previous event in the batch and no registry row from earlier ones.
+seq AS (
+    SELECT
+        author,
+        permlink,
+        parent_author,
+        parent_permlink,
+        day,
+        is_comment,
+        LAG(is_comment) OVER w  AS prev_is_comment,
+        LEAD(id) OVER w IS NULL AS is_last
+    FROM (
+        SELECT id, author, permlink, parent_author, parent_permlink, day, TRUE AS is_comment
+        FROM comment_ops
+        UNION ALL
+        SELECT id, author, permlink, NULL, NULL, NULL, FALSE
+        FROM effective_deletes
+    ) e
+    WINDOW w AS (PARTITION BY author, permlink ORDER BY id)
+),
+-- One accounts resolution + registry probe per distinct comment, not per op.
+comment_keys AS (
+    SELECT
+        k.author,
+        k.permlink,
+        a.id AS author_id,
+        r.author_id IS NOT NULL AS pre_exists
+    FROM (SELECT DISTINCT author, permlink FROM seq) k
+    JOIN hafd.accounts a ON a.name = k.author
+    LEFT JOIN haf_stats_backend.comment_registry r
+        ON r.author_id = a.id AND r.permlink = k.permlink
+),
+classified AS (
+    SELECT
+        s.parent_author,
+        s.parent_permlink,
+        s.day,
+        s.is_comment,
+        s.is_last,
+        k.author_id,
+        k.permlink,
+        s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create
+    FROM seq s
+    JOIN comment_keys k ON k.author = s.author AND k.permlink = s.permlink
+),
+-- End-of-batch registry state: a comment is present iff its last event is a
+-- comment op. The add/remove key sets are disjoint (is_last is unique per key),
+-- so the two data-modifying CTEs cannot touch the same row.
+registry_add AS (
+    INSERT INTO haf_stats_backend.comment_registry (author_id, permlink)
+    SELECT author_id, permlink
+    FROM classified
+    WHERE is_last AND is_comment
+    ON CONFLICT (author_id, permlink) DO NOTHING
+),
+registry_remove AS (
+    DELETE FROM haf_stats_backend.comment_registry r
+    USING classified c
+    WHERE c.is_last AND NOT c.is_comment
+      AND r.author_id = c.author_id AND r.permlink = c.permlink
+),
+network_counts AS (
+    INSERT INTO haf_stats_backend.network_content_daily AS ncd (day, posts, comments, edits)
+    SELECT
+        day,
+        COUNT(*) FILTER (WHERE is_create AND parent_author = ''),
+        COUNT(*) FILTER (WHERE is_create AND parent_author <> ''),
+        COUNT(*) FILTER (WHERE NOT is_create)
+    FROM classified
+    WHERE is_comment
+    GROUP BY day
+    ON CONFLICT (day) DO UPDATE SET
+        posts    = ncd.posts    + EXCLUDED.posts,
+        comments = ncd.comments + EXCLUDED.comments,
+        edits    = ncd.edits    + EXCLUDED.edits
+)
+-- network_author_daily promoted to the main statement so the data-modifying CTEs
+-- above (registry_add/remove, network_counts) all execute exactly once.
+INSERT INTO haf_stats_backend.network_author_daily (day, author_id)
+SELECT DISTINCT day, author_id
+FROM classified
+WHERE is_create
+ON CONFLICT (day, author_id) DO NOTHING;
 
 END;
 $$;

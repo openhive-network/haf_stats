@@ -85,6 +85,8 @@ scripts/
                             Rebuilds account cohorts after definition changes
   rebuild_content_cohorts.sh
                             Rebuilds content-creator cohorts (required on already-synced nodes)
+  rebuild_content_volume.sh
+                            Rebuilds network content-volume tables (repairs double-counts)
   rebuild_financial.sh      Rebuilds account financial aggregates after category changes
 
 docker/
@@ -167,6 +169,76 @@ variables. By default `TO_BLOCK` is the app's recorded `last_processed_block`,
 not the HAF head; values beyond `last_processed_block` are rejected so restarting
 the processor cannot process rebuilt blocks a second time. Restart the processor
 after the rebuild completes.
+
+### Rebuilding content volume
+
+`get_network_content_volume`'s daily counters (`network_content_daily`) are
+accumulated with an **additive** upsert (`posts = posts + EXCLUDED.posts`), because
+a calendar day is assembled from many block-range batches. That makes the counters
+non-idempotent: any out-of-band reprocess of an already-counted block range
+double-counts posts/comments (issue #42). Author counts are a membership set and
+stay correct. **Do not** repair by hand-running `SELECT process_content_stats(...)`
+— that reintroduces the double-count (and re-doubles votes/engagement, which share
+that scan). Use this script, which drives the content-volume-only
+`process_content_volume` and starts from a clean `TRUNCATE`:
+
+```bash
+./scripts/rebuild_content_volume.sh
+```
+
+The rebuild covers exactly `[1, last_processed_block]`, clears the three content
+tables, replays ascending batches, then reseals the endpoint rollup
+`network_content_period_counts` in one transaction. Because the endpoint reads only
+that rollup — refreshed last — it keeps serving the previous series until the reseal
+commits, so it never returns partial history.
+
+The range is fixed at both ends, not merely defaulted, because content volume carries
+cross-batch state (`comment_registry`) that the other rebuild scripts do not:
+
+* The start block is always `1` and is not configurable — create-vs-edit classification
+  replays the registry from genesis, so a partial-range rebuild misclassifies.
+* `TO_BLOCK` must equal `last_processed_block` (its default). A **short** rebuild
+  strands the registry at `TO_BLOCK` while the processor resumes at
+  `last_processed_block + 1` and never revisits the gap: the gap's days stay missing
+  from `network_content_daily` forever, and later edits of comments created there are
+  miscounted as new posts. A **long** one double-counts after restart.
+
+> **If the rebuild fails or is interrupted part-way, do not start the processor.** The
+> `TRUNCATE` and every completed batch have already committed, so the tables describe
+> only a prefix of history while `last_processed_block` still points at the tip.
+> Restarting the processor would resume past the gap with a stranded registry and
+> corrupt the counts permanently. Re-run the script to completion first — each run
+> starts from a clean `TRUNCATE`, so re-running is always safe, and after a failure it
+> is mandatory.
+
+`BATCH_SIZE` defaults to `1000000`: content volume is heavy per block and each batch is
+its own `psql` process, so full mainnet history (~107.6M blocks) is ~108 batches rather
+than the ~10,760 the old `10000` default would have cost. Measured read-only against a
+~108M-block mainnet node: ~1.5h for the scan/classify pipeline alone (throughput tracks
+comment-op density, not block count — 2019 is the heaviest era, not 2023), plus the three
+`INSERT`s (`network_author_daily` alone ends up ~21M rows) and per-batch connect/plan
+overhead on top. **Budget ~2–4h wall-clock for a full genesis rebuild on a mainnet-sized
+node.** The processor must stay stopped for the entire run — not just for the duration,
+but because `haf_stats` falls behind on votes/engagement/account stats while it's down and
+needs time to catch up afterward. Plan the maintenance window accordingly.
+
+The script refuses to start while a `haf_stats_app.main` backend is live, and re-checks
+before the reseal in case one started mid-rebuild — stop the processor first
+(`SELECT haf_stats_app.stop_processing();` or stop the `haf-stats-process` container)
+and restart it after the rebuild completes.
+
+Recurrence is also blocked at the database level: `process_content_stats` now refuses any
+block range at or below `app_status.last_processed_block`, so the out-of-band reprocess
+that caused #42 raises instead of silently double-counting. The HAF context is
+non-forking, so the live loop only ever moves strictly forward and is unaffected.
+
+The likely proximate cause of #42 — `process_content_volume_backfill`, an unguarded
+additive-upsert function that was never committed to this repo but existed as drift on at
+least one deployment, writing exactly the three tables found doubled — is dropped by
+`install_app.sh` on every install/migration, not just by hand on the affected node.
+`process_content_volume` (above) is itself additive and unguarded in the same way; it is
+safe only because `rebuild_content_volume.sh` always `TRUNCATE`s first. Do not call either
+function directly outside that script.
 
 ## API Endpoints
 
