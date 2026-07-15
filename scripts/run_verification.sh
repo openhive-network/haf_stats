@@ -9,6 +9,10 @@
 #   2. tests/regression/run_test.sh (vs external hived snapshot)
 #        Loads account_metrics_dump.json.gz (captured from a canonical hived node)
 #        and compares the account-scoped endpoints against it.
+#   3. tests/parity/content_volume_rebuild_consistency.sql (issue #42)
+#        Replays the rebuild path (process_content_volume) and asserts it
+#        reproduces the live processor's content-volume tables exactly. Rolls
+#        back, so the data tables are left untouched.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -59,10 +63,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/2: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/3: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/2: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/3: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
@@ -86,4 +90,7 @@ else
   fi
 fi
 
-echo "===== Correctness guards PASSED (parity + external regression) ====="
+echo "===== Guard 3/3: content-volume rebuild consistency (issue #42) ====="
+run_sql_file tests/parity/content_volume_rebuild_consistency.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency) ====="
