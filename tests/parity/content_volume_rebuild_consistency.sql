@@ -32,16 +32,19 @@ SET LOCAL lock_timeout = '60s';
 
 -- Exact fingerprint of every table process_content_volume must NOT touch. The whole
 -- reason the narrow function exists is that the live process_content_stats shares one
--- scan with votes/engagement/account stats, so re-running IT to rebuild would re-double
--- them. md5 over the ordered rows (not COUNT/SUM, which an offsetting swap could evade)
--- so any insert, delete, or update anywhere in these tables is caught.
+-- scan with votes/engagement, so re-running IT to rebuild would re-double them. md5 over
+-- the ordered rows (not COUNT/SUM, which an offsetting swap could evade) so any insert,
+-- delete, or update anywhere in these tables is caught.
+--
+-- account_content_daily is deliberately NOT fingerprinted here: process_content_volume now
+-- rebuilds its content columns (posts/comments/replies_received) too, so it is an EXPECTED
+-- write. Its correctness — content reproduced, votes preserved — is asserted separately
+-- below (see _live_account snapshot + the account drift checks).
 CREATE OR REPLACE FUNCTION pg_temp.sibling_fingerprint()
 RETURNS TEXT LANGUAGE sql STABLE AS $fn$
     SELECT concat_ws('|',
         (SELECT md5(COALESCE(string_agg(t::TEXT, E'\n' ORDER BY t::TEXT), ''))
            FROM haf_stats_backend.post_engagement t),
-        (SELECT md5(COALESCE(string_agg(t::TEXT, E'\n' ORDER BY t::TEXT), ''))
-           FROM haf_stats_backend.account_content_daily t),
         (SELECT md5(COALESCE(string_agg(t::TEXT, E'\n' ORDER BY t::TEXT), ''))
            FROM haf_stats_backend.network_vote_daily t),
         (SELECT md5(COALESCE(string_agg(t::TEXT, E'\n' ORDER BY t::TEXT), ''))
@@ -65,6 +68,11 @@ DECLARE
     _author_diff   BIGINT;
     _registry_diff BIGINT;
     _period_diff   BIGINT;
+    _account_diff       BIGINT;
+    _acct_posts_delta   BIGINT;
+    _acct_comments_delta BIGINT;
+    _acct_replies_gap   BIGINT;
+    _dead_deleted       BIGINT;
     _siblings_before TEXT;
     _siblings_after  TEXT;
 BEGIN
@@ -80,7 +88,8 @@ BEGIN
     BEGIN
         LOCK TABLE haf_stats_backend.network_content_daily,
                    haf_stats_backend.network_author_daily,
-                   haf_stats_backend.comment_registry
+                   haf_stats_backend.comment_registry,
+                   haf_stats_backend.account_content_daily
               IN ACCESS EXCLUSIVE MODE;
     EXCEPTION WHEN lock_not_available THEN
         RAISE EXCEPTION 'content_volume rebuild consistency: could not lock the content tables within lock_timeout — the haf_stats processor is still actively writing them.'
@@ -99,13 +108,29 @@ BEGIN
         SELECT * FROM haf_stats_backend.network_author_daily;
     CREATE TEMP TABLE _live_registry ON COMMIT DROP AS
         SELECT * FROM haf_stats_backend.comment_registry;
+    -- All columns, so the post-rebuild comparison proves BOTH that the content columns are
+    -- reproduced AND that votes_cast/votes_received survive the zero+rebuild untouched.
+    CREATE TEMP TABLE _live_account ON COMMIT DROP AS
+        SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
+        FROM haf_stats_backend.account_content_daily;
 
-    -- Rebuild via the content-volume-only path, exactly as rebuild_content_volume.sh
-    -- does: clear the three tables, then replay ascending non-overlapping batches from
-    -- block 1 (comment_registry carries create/edit state across batches).
+    -- Corrupt the content columns first (simulate the stale raw-op over-report this rebuild
+    -- exists to repair). The zeroing below must wipe it and the additive replay must restore
+    -- the snapshot exactly: this proves the rebuild REPLACES pre-existing content rather than
+    -- adding to it, so an over-reported deployment is genuinely repaired, not just reproduced.
+    -- Votes are left alone so their preservation is still verified against the untouched snapshot.
+    UPDATE haf_stats_backend.account_content_daily
+       SET posts = posts * 2 + 13, comments = comments * 2 + 13, replies_received = replies_received * 2 + 13;
+
+    -- Rebuild via the content-only path, exactly as rebuild_content_volume.sh does: clear
+    -- the three network tables and zero account_content_daily's content columns (votes are
+    -- preserved, not truncated), then replay ascending non-overlapping batches from block 1
+    -- (comment_registry carries create/edit state across batches).
     TRUNCATE haf_stats_backend.network_content_daily;
     TRUNCATE haf_stats_backend.network_author_daily;
     TRUNCATE haf_stats_backend.comment_registry;
+    UPDATE haf_stats_backend.account_content_daily
+       SET posts = 0, comments = 0, replies_received = 0;
 
     _first := 1;
     WHILE _first <= _to_block LOOP
@@ -151,6 +176,63 @@ BEGIN
     IF _daily_diff <> 0 OR _author_diff <> 0 OR _registry_diff <> 0 THEN
         RAISE EXCEPTION 'content_volume rebuild drift: % differing network_content_daily row(s), % differing network_author_daily row(s), % differing comment_registry row(s) through block %. process_content_volume has diverged from process_content_stats.',
             _daily_diff, _author_diff, _registry_diff, _to_block;
+    END IF;
+
+    -- account_content_daily: process_content_volume now rebuilds its content columns.
+    -- (1) The whole table must be byte-identical to the pre-corruption live snapshot. In CI the
+    -- live processor IS the current creates-only code, so the rebuild reproduces the content
+    -- columns exactly (the same classified/registry guarantee that makes network_content_daily
+    -- byte-identical), the injected over-report is wiped by the zeroing and replaced (proving
+    -- repair, not just reproduction), and the vote columns — never corrupted — must be
+    -- untouched. A differing, missing, or extra row all register. This comparison runs BEFORE
+    -- the script's dead-row DELETE (exercised separately below), so an unexpected all-zero row
+    -- the rebuild might produce surfaces as drift here instead of being silently swept.
+    SELECT COUNT(*) INTO _account_diff FROM (
+        (SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
+           FROM haf_stats_backend.account_content_daily
+         EXCEPT
+         SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
+           FROM _live_account)
+        UNION ALL
+        (SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
+           FROM _live_account
+         EXCEPT
+         SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
+           FROM haf_stats_backend.account_content_daily)
+    ) x;
+
+    -- (2) Structural invariant, independent of the snapshot: account posts/comments regroup
+    -- the SAME classified rows network_counts counts (author_id is never NULL — comment_keys
+    -- INNER-JOINs accounts), so summing per-account back over all authors reproduces the
+    -- per-day network total exactly. replies_received credits the parent author via a further
+    -- INNER join, so it can only be <= network.comments (equality holds while every reply's
+    -- parent resolves, which is not structurally guaranteed) — assert that bound, not equality.
+    SELECT
+        (SELECT COALESCE(SUM(posts), 0)    FROM haf_stats_backend.account_content_daily)
+      - (SELECT COALESCE(SUM(posts), 0)    FROM haf_stats_backend.network_content_daily),
+        (SELECT COALESCE(SUM(comments), 0) FROM haf_stats_backend.account_content_daily)
+      - (SELECT COALESCE(SUM(comments), 0) FROM haf_stats_backend.network_content_daily),
+        (SELECT COALESCE(SUM(replies_received), 0) FROM haf_stats_backend.account_content_daily)
+      - (SELECT COALESCE(SUM(comments), 0)         FROM haf_stats_backend.network_content_daily)
+    INTO _acct_posts_delta, _acct_comments_delta, _acct_replies_gap;
+
+    IF _account_diff <> 0 OR _acct_posts_delta <> 0 OR _acct_comments_delta <> 0 OR _acct_replies_gap > 0 THEN
+        RAISE EXCEPTION 'account_content_daily rebuild drift: % row(s) differ from the live snapshot (content not reproduced or votes not preserved); SUM(posts)-network=%, SUM(comments)-network=%, SUM(replies_received)-network.comments=% (must be <= 0). process_content_volume account path has diverged from process_content_stats.',
+            _account_diff, _acct_posts_delta, _acct_comments_delta, _acct_replies_gap;
+    END IF;
+
+    -- (3) Exercise rebuild_content_volume.sh's final dead-row DELETE and prove it is not
+    -- over-broad. The live processor never writes an all-zero row and the rebuild above
+    -- reproduced the live table, so this must remove exactly zero rows. If a metric column is
+    -- ever added and the DELETE predicate is not updated to match, a row non-zero only in that
+    -- new column matches this predicate and is removed → _dead_deleted > 0 → CI fails here.
+    DELETE FROM haf_stats_backend.account_content_daily
+     WHERE posts = 0 AND comments = 0 AND replies_received = 0
+       AND votes_cast = 0 AND votes_received = 0;
+    GET DIAGNOSTICS _dead_deleted = ROW_COUNT;
+    IF _dead_deleted <> 0 THEN
+        RAISE EXCEPTION 'content_volume dead-row DELETE removed % account_content_daily row(s); the live processor never writes all-zero rows, so the predicate in rebuild_content_volume.sh is too broad (a metric column it does not account for?).',
+            _dead_deleted;
     END IF;
 
     -- Reseal the rollup exactly as rebuild_content_volume.sh does. This is the step that
@@ -214,20 +296,22 @@ BEGIN
             _period_diff;
     END IF;
 
-    -- process_content_volume must be NARROW: it may not write votes, engagement, or
-    -- account content stats (re-running the shared processor would have re-doubled them).
+    -- process_content_volume must stay NARROW: it may write the content tables (network +
+    -- account content) but NOT votes or engagement (re-running the shared processor would
+    -- have re-doubled those). account_content_daily is verified above, not fingerprinted here.
     _siblings_after := pg_temp.sibling_fingerprint();
     IF _siblings_after IS DISTINCT FROM _siblings_before THEN
-        RAISE EXCEPTION 'content_volume rebuild touched sibling tables it must not write (votes/engagement/account_content_daily). before=[%] after=[%]',
+        RAISE EXCEPTION 'content_volume rebuild touched sibling tables it must not write (votes/engagement). before=[%] after=[%]',
             _siblings_before, _siblings_after;
     END IF;
 
-    RAISE NOTICE 'content_volume rebuild consistency OK through block %: % day rows / % author rows / % registry rows / % rollup rows reproduced exactly; sibling tables untouched',
+    RAISE NOTICE 'content_volume rebuild consistency OK through block %: % day rows / % author rows / % registry rows / % rollup rows / % account rows reproduced exactly (SUM(account.posts)==network, votes preserved); sibling vote/engagement tables untouched',
         _to_block,
         (SELECT COUNT(*) FROM haf_stats_backend.network_content_daily),
         (SELECT COUNT(*) FROM haf_stats_backend.network_author_daily),
         (SELECT COUNT(*) FROM haf_stats_backend.comment_registry),
-        (SELECT COUNT(*) FROM haf_stats_backend.network_content_period_counts);
+        (SELECT COUNT(*) FROM haf_stats_backend.network_content_period_counts),
+        (SELECT COUNT(*) FROM haf_stats_backend.account_content_daily);
 END;
 $$;
 

@@ -11,8 +11,10 @@
 #        and compares the account-scoped endpoints against it.
 #   3. tests/parity/content_volume_rebuild_consistency.sql (issue #42)
 #        Replays the rebuild path (process_content_volume) and asserts it
-#        reproduces the live processor's content-volume tables exactly. Rolls
-#        back, so the data tables are left untouched.
+#        reproduces the live processor's content-volume tables exactly, plus
+#        rebuilds account_content_daily's content columns correctly (SUM==network)
+#        while preserving its vote columns. Rolls back, so the data tables are
+#        left untouched.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used

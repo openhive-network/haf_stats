@@ -86,7 +86,8 @@ scripts/
   rebuild_content_cohorts.sh
                             Rebuilds content-creator cohorts (required on already-synced nodes)
   rebuild_content_volume.sh
-                            Rebuilds network content-volume tables (repairs double-counts)
+                            Rebuilds network content-volume tables and per-account content
+                            columns (repairs double-counts / stale post over-reporting)
   rebuild_financial.sh      Rebuilds account financial aggregates after category changes
 
 docker/
@@ -179,18 +180,31 @@ non-idempotent: any out-of-band reprocess of an already-counted block range
 double-counts posts/comments (issue #42). Author counts are a membership set and
 stay correct. **Do not** repair by hand-running `SELECT process_content_stats(...)`
 — that reintroduces the double-count (and re-doubles votes/engagement, which share
-that scan). Use this script, which drives the content-volume-only
-`process_content_volume` and starts from a clean `TRUNCATE`:
+that scan). Use this script, which drives the narrow `process_content_volume` and
+starts from a clean slate:
 
 ```bash
 ./scripts/rebuild_content_volume.sh
 ```
 
-The rebuild covers exactly `[1, last_processed_block]`, clears the three content
-tables, replays ascending batches, then reseals the endpoint rollup
-`network_content_period_counts` in one transaction. Because the endpoint reads only
-that rollup — refreshed last — it keeps serving the previous series until the reseal
-commits, so it never returns partial history.
+This same script also repairs a stale over-report in **`account_content_daily`**'s
+content columns (`get_account_content_stats`): before the create/edit dedup landed
+(#13) the per-account path counted raw comment ops — edits included — as posts, and
+unlike the network tables `account_content_daily` had no rebuild path, so affected
+deployments kept the inflation permanently. `process_content_volume` now rebuilds its
+`posts`/`comments`/`replies_received` creates-only from the same genesis registry
+replay (so `SUM(account.posts) == network.posts` by construction). It **zeroes** those
+three columns rather than truncating the table, because `votes_cast`/`votes_received`
+come from a separate vote scan this path does not reproduce and are already correct —
+they are preserved untouched. One rebuild therefore fixes both defects at once.
+
+The rebuild covers exactly `[1, last_processed_block]`, clears the three network content
+tables (and zeroes the account content columns), replays ascending batches, then reseals
+the endpoint rollup `network_content_period_counts` in one transaction. Because the
+network endpoint reads only that rollup — refreshed last — it keeps serving the previous
+series until the reseal commits, so it never returns partial history. `account_content_daily`
+is read directly (no rollup), so `get_account_content_stats` shows low/growing counts
+during the offline rebuild window — the same accepted behavior as `rebuild_financial.sh`.
 
 The range is fixed at both ends, not merely defaulted, because content volume carries
 cross-batch state (`comment_registry`) that the other rebuild scripts do not:
@@ -204,12 +218,13 @@ cross-batch state (`comment_registry`) that the other rebuild scripts do not:
   miscounted as new posts. A **long** one double-counts after restart.
 
 > **If the rebuild fails or is interrupted part-way, do not start the processor.** The
-> `TRUNCATE` and every completed batch have already committed, so the tables describe
-> only a prefix of history while `last_processed_block` still points at the tip.
-> Restarting the processor would resume past the gap with a stranded registry and
-> corrupt the counts permanently. Re-run the script to completion first — each run
-> starts from a clean `TRUNCATE`, so re-running is always safe, and after a failure it
-> is mandatory.
+> `TRUNCATE`/zeroing and every completed batch have already committed, so the tables
+> describe only a prefix of history while `last_processed_block` still points at the tip
+> (`account_content_daily`'s content columns are likewise zeroed-then-partially-rebuilt
+> and under-report). Restarting the processor would resume past the gap with a stranded
+> registry and corrupt the counts permanently. Re-run the script to completion first —
+> each run re-`TRUNCATE`s the network tables and re-zeroes the account content columns
+> from a clean slate, so re-running is always safe, and after a failure it is mandatory.
 
 `BATCH_SIZE` defaults to `1000000`: content volume is heavy per block and each batch is
 its own `psql` process, so full mainnet history (~107.6M blocks) is ~108 batches rather
