@@ -1071,31 +1071,44 @@ $$;
 -- hand on the affected node, so the loaded gun cannot be reloaded or reused elsewhere.
 DROP FUNCTION IF EXISTS haf_stats_app.process_content_volume_backfill(INT, INT);
 
--- Content-volume-only rebuild path for get_network_content_volume. This is a
--- NARROW DUPLICATE of the comment-op classification in process_content_stats
--- (the comment_ops … network_authors CTEs above): same scan, same create-vs-edit
--- rule, but it writes ONLY the three content-volume outputs — comment_registry,
--- network_content_daily, network_author_daily — and nothing else (no
--- account_content_daily, no post_engagement, no vote scan, no boundary rollup
--- refresh). process_content_stats cannot be reused for a rebuild because its
--- shared scan also feeds those siblings and re-running it would re-double them.
+-- Content rebuild path for get_network_content_volume AND get_account_content_stats.
+-- This is a NARROW DUPLICATE of the comment-op classification in process_content_stats
+-- (the comment_ops … network_authors CTEs above): same scan, same create-vs-edit rule.
+-- It writes the three network content-volume outputs — comment_registry,
+-- network_content_daily, network_author_daily — plus the CONTENT columns of
+-- account_content_daily (posts, comments, replies_received), all from the one shared
+-- `classified` CTE. It writes nothing else: no votes_cast/votes_received (a separate
+-- vote scan the script preserves — see below), no post_engagement, no boundary rollup
+-- refresh. process_content_stats cannot be reused for a rebuild because its shared scan
+-- also feeds votes/engagement and re-running it would re-double them.
 --
--- IMPORTANT: the classification below MUST stay in lockstep with the matching
--- block in process_content_stats. tests/parity/content_volume_rebuild_consistency.sql
--- runs both over the same blocks and fails CI on any drift.
+-- account_content_daily's content columns were added here to repair a stale over-report
+-- (issue: account posts counted raw comment ops, incl. edits, before the create/edit
+-- dedup landed in #13 — and account_content_daily had no rebuild path). The account
+-- upsert MUST share this same genesis registry replay: is_create is comment_registry-
+-- stateful, so a separate pass run after the network rebuild would see a fully-populated
+-- registry and misclassify every op as an edit. Because both the network and account
+-- counts read the identical `classified` rows, SUM(account.posts) == network.posts by
+-- construction (the parity guard asserts it).
 --
--- Used by scripts/rebuild_content_volume.sh, which TRUNCATEs the three tables and
--- then calls this for ascending, non-overlapping batches from block 1. The
--- network_counts upsert stays additive (a calendar day spans many batches); that
--- is correct as long as the rebuild starts from truncated tables and never
--- reprocesses a block range. The script reseals network_content_period_counts
--- afterward (the endpoint reads only that rollup).
+-- IMPORTANT: the classification below MUST stay in lockstep with the matching block in
+-- process_content_stats. tests/parity/content_volume_rebuild_consistency.sql runs both
+-- over the same blocks and fails CI on any drift.
+--
+-- Used by scripts/rebuild_content_volume.sh, which TRUNCATEs the three network tables
+-- and ZEROES account_content_daily's content columns (it cannot TRUNCATE that table —
+-- votes_cast/votes_received come from a scan this path does not reproduce), then calls
+-- this for ascending, non-overlapping batches from block 1. All the counters stay
+-- additive (a calendar day spans many batches); that is correct as long as the rebuild
+-- starts from a truncated/zeroed slate and never reprocesses a block range. The script
+-- reseals network_content_period_counts afterward (that endpoint reads only the rollup;
+-- account_content_daily is read directly, no reseal needed).
 --
 -- This function is itself additive and just as unguarded as the one dropped above —
--- it is safe ONLY by the convention that rebuild_content_volume.sh always TRUNCATEs
--- the three tables before calling it. It is owner-only and reachable solely through
--- that script, so this is accepted as a second "loaded gun" rather than fixed here;
--- do not call it directly outside the script.
+-- it is safe ONLY by the convention that rebuild_content_volume.sh always TRUNCATEs the
+-- network tables and zeroes the account content columns before calling it. It is
+-- owner-only and reachable solely through that script, so this is accepted as a second
+-- "loaded gun" rather than fixed here; do not call it directly outside the script.
 CREATE OR REPLACE FUNCTION haf_stats_app.process_content_volume(
     _first_block INT,
     _last_block INT
@@ -1227,9 +1240,63 @@ network_counts AS (
         posts    = ncd.posts    + EXCLUDED.posts,
         comments = ncd.comments + EXCLUDED.comments,
         edits    = ncd.edits    + EXCLUDED.edits
+),
+-- Per-account created content — a byte-for-byte copy of the account path in
+-- process_content_stats (its contrib CTE + account_content_daily INSERT), reading the
+-- same `classified` set as network_counts above. Posts/comments regroup the identical
+-- is_create rows network_counts counts, differing only in the GROUP BY dimension, so
+-- SUM(account.posts) == network.posts by construction. replies_received credits the
+-- parent author of each created reply. Additive; rebuild_content_volume.sh zeroes these
+-- three columns before the batch loop so a day spanning batches accumulates from 0.
+contrib AS (
+    -- created content, already keyed by author id via comment_keys
+    SELECT
+        author_id AS account_id,
+        day,
+        COUNT(*) FILTER (WHERE parent_author = '')  AS posts,
+        COUNT(*) FILTER (WHERE parent_author <> '') AS comments,
+        0::BIGINT                                   AS replies_received
+    FROM classified
+    WHERE is_create
+    GROUP BY author_id, day
+    UNION ALL
+    -- replies received, credited to the parent author of each created reply
+    SELECT
+        a.id,
+        r.day,
+        0, 0,
+        r.replies
+    FROM (
+        SELECT parent_author, day, COUNT(*) AS replies
+        FROM classified
+        WHERE is_create AND parent_author <> ''
+        GROUP BY parent_author, day
+    ) r
+    JOIN hafd.accounts a ON a.name = r.parent_author
+),
+-- Data-modifying CTE, unreferenced by the terminal INSERT below, so (like registry_add/
+-- remove and network_counts) it executes exactly once. The INSERT column list omits
+-- votes_cast/votes_received: on conflict they are left untouched (preserved), and a
+-- genuinely new row takes the table default 0. GROUP BY collapses the two contrib
+-- branches into one row per (account_id, day) so ON CONFLICT never hits a row twice.
+account_content_upsert AS (
+    INSERT INTO haf_stats_backend.account_content_daily
+        (account_id, day, posts, comments, replies_received)
+    SELECT
+        c.account_id,
+        c.day,
+        SUM(c.posts)::INT,
+        SUM(c.comments)::INT,
+        SUM(c.replies_received)::INT
+    FROM contrib c
+    GROUP BY c.account_id, c.day
+    ON CONFLICT (account_id, day) DO UPDATE SET
+        posts            = account_content_daily.posts            + EXCLUDED.posts,
+        comments         = account_content_daily.comments         + EXCLUDED.comments,
+        replies_received = account_content_daily.replies_received + EXCLUDED.replies_received
 )
--- network_author_daily promoted to the main statement so the data-modifying CTEs
--- above (registry_add/remove, network_counts) all execute exactly once.
+-- network_author_daily promoted to the main statement so the data-modifying CTEs above
+-- (registry_add/remove, network_counts, account_content_upsert) all execute exactly once.
 INSERT INTO haf_stats_backend.network_author_daily (day, author_id)
 SELECT DISTINCT day, author_id
 FROM classified

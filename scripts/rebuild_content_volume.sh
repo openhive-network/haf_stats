@@ -1,5 +1,6 @@
 #!/bin/bash
-# Rebuild network content-volume aggregates (get_network_content_volume) from raw HAF data.
+# Rebuild network content-volume (get_network_content_volume) AND per-account content
+# (get_account_content_stats) aggregates from raw HAF data.
 #
 # Required to repair issue #42: network_content_daily counts posts/comments with an
 # additive upsert (posts = ncd.posts + EXCLUDED.posts), so any out-of-band reprocess
@@ -7,8 +8,16 @@
 # NOTHING membership set, stay correct). A TRUNCATE + clean genesis reprocess is the
 # only way to restore correct history on an affected deployment.
 #
-# This calls haf_stats_app.process_content_volume — a content-volume-only path — NOT
-# process_content_stats, whose shared scan also feeds votes/engagement/account stats
+# It ALSO repairs a stale over-report in account_content_daily's content columns: before
+# the create/edit dedup landed (#13), the account path counted raw comment ops (edits
+# included) as posts, and that table had no rebuild path, so affected deployments kept the
+# inflation permanently. This rebuild recomputes posts/comments/replies_received creates-
+# only in the same genesis registry replay. It ZEROES those three columns rather than
+# truncating account_content_daily, because votes_cast/votes_received come from a separate
+# vote scan this path does not reproduce and are already correct — they are preserved.
+#
+# This calls haf_stats_app.process_content_volume — a narrow path that writes only the
+# content tables — NOT process_content_stats, whose shared scan also feeds votes/engagement
 # and would re-double those if re-run.
 #
 # The rebuild covers exactly [1, last_processed_block]. Both ends are mandatory:
@@ -27,9 +36,11 @@
 # transaction commits, so it never returns partial history.
 #
 # IF THIS SCRIPT FAILS OR IS INTERRUPTED PART-WAY, the content tables are left in a
-# partial state and comment_registry is stranded mid-replay. Do NOT start the processor:
-# re-run this script to completion first (each run starts from a clean TRUNCATE, so
-# re-running is always safe — and after a failure it is mandatory).
+# partial state and comment_registry is stranded mid-replay (account_content_daily's
+# content columns are zeroed-then-partially-rebuilt and under-report). Do NOT start the
+# processor: re-run this script to completion first (each run starts from a clean TRUNCATE
+# and re-zeroes the account content columns, so re-running is always safe — and after a
+# failure it is mandatory).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,14 +73,17 @@ on_exit() {
         echo "!!! CONTENT-VOLUME REBUILD DID NOT COMPLETE (exit ${rc}) !!!" >&2
         echo "network_content_daily / network_author_daily / comment_registry are now in a" >&2
         echo "PARTIAL state: they describe only the blocks replayed so far, while" >&2
-        echo "app_status.last_processed_block still points at the tip." >&2
+        echo "app_status.last_processed_block still points at the tip. account_content_daily's" >&2
+        echo "content columns (posts/comments/replies_received) are likewise zeroed-then-" >&2
+        echo "partially-rebuilt and under-report until the rebuild completes." >&2
         echo "" >&2
         echo "DO NOT START THE PROCESSOR. It would resume past the gap with a stranded" >&2
         echo "comment_registry: the gap's days would be lost from network_content_daily" >&2
         echo "forever, and later edits of comments created there would be miscounted as" >&2
         echo "new posts (the issue #42 corruption, reintroduced)." >&2
         echo "" >&2
-        echo "Re-run this script to completion first." >&2
+        echo "Re-run this script to completion first (it re-zeroes and re-TRUNCATEs from a" >&2
+        echo "clean slate, so re-running is always safe)." >&2
     fi
     return $rc
 }
@@ -147,16 +161,27 @@ if (( live_procs > 0 )); then
     exit 2
 fi
 
-log "Rebuilding content-volume aggregates through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
+log "Rebuilding content-volume + per-account content aggregates through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
 
 # comment_registry is scratch state: a full genesis->TO_BLOCK replay leaves it in the
 # exact live-comment set the stopped processor had, so live processing resumes cleanly.
+#
+# account_content_daily is NOT truncated: votes_cast/votes_received come from a SEPARATE
+# vote scan that process_content_volume does not reproduce, and they are already correct.
+# Zero only the three content columns; the additive account upsert in process_content_volume
+# rebuilds them from 0, and the vote columns are preserved. The zeroing MUST run here, in
+# the same clean-slate statement as the TRUNCATEs and unconditionally on every run: the
+# upsert is additive, so re-running after an interrupted rebuild would otherwise add correct
+# counts on top of a partial rebuild (the #42 double-count class). Re-zeroing every run makes
+# restart safe, exactly as re-TRUNCATE does for the network tables.
 rebuild_started=1
 psql_cmd -c "
     TRUNCATE TABLE haf_stats_backend.network_content_daily;
     TRUNCATE TABLE haf_stats_backend.network_author_daily;
     TRUNCATE TABLE haf_stats_backend.comment_registry;
+    UPDATE haf_stats_backend.account_content_daily
+       SET posts = 0, comments = 0, replies_received = 0;
 "
 
 first="${FROM_BLOCK}"
@@ -198,5 +223,31 @@ psql_cmd -c "
         (SELECT MIN(day) FROM haf_stats_backend.network_content_daily), NULL);
 "
 
+# The reseal has committed, so the network rollup is published and account_content_daily's
+# content is fully rebuilt and correct. Clear rebuild_started BEFORE the cosmetic dead-row
+# cleanup below: if that DELETE fails the data is NOT corrupt (all-zero rows sum to nothing),
+# so on_exit must not raise the "content tables partial / do not start the processor" alarm.
 rebuild_started=0
-log "Content-volume rebuild complete."
+
+# Drop dead all-zero account rows the live processor never creates. Zeroing content columns
+# on a stale (author, day) whose content was all edits — with no votes and no received
+# replies — leaves a (0,0,0,0,0) row that a from-scratch install would never write; the
+# endpoint would surface it as a spurious all-zero period. Rows that still carry votes or
+# replies are kept.
+#
+# The predicate names every metric column: if one is ever added to account_content_daily, add
+# it here too, or a row non-zero only in the new column would be wrongly deleted. The parity
+# guard (tests/parity/content_volume_rebuild_consistency.sql) asserts this DELETE removes zero
+# rows on real data, so an over-broad predicate fails CI. The full-table scan and the earlier
+# zeroing UPDATE are both negligible beside the rebuild's genesis-wide operation scans, and the
+# zeroing is HOT-eligible (no indexed column changes) — simpler and interruption-safe versus a
+# TRUNCATE + restore-votes dance, which would need a scratch table shared across separate psql
+# batch processes plus its own interruption cleanup.
+log "Removing dead all-zero account_content_daily rows..."
+psql_cmd -c "
+    DELETE FROM haf_stats_backend.account_content_daily
+     WHERE posts = 0 AND comments = 0 AND replies_received = 0
+       AND votes_cast = 0 AND votes_received = 0;
+"
+
+log "Content-volume + per-account content rebuild complete."

@@ -389,7 +389,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account content stats",
-        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates.",
+        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates. Post and comment counts reflect content-creation events only (edits excluded): every creation is counted at creation time, including content later deleted or re-created under the same permlink, so figures can slightly exceed Hivemind, which counts only currently-live content. The difference is negligible in practice.",
         "operationId": "haf_stats_endpoints.get_account_content_stats",
         "parameters": [
           {
@@ -456,11 +456,11 @@ DECLARE
                       },
                       "posts": {
                         "type": "integer",
-                        "description": "Root posts authored (parent_author = '')"
+                        "description": "Root posts authored (parent_author = ''), counted at creation; edits excluded"
                       },
                       "comments": {
                         "type": "integer",
-                        "description": "Replies authored (parent_author <> '')"
+                        "description": "Replies authored (parent_author <> ''), counted at creation; edits excluded"
                       },
                       "votes_cast": {
                         "type": "integer"
@@ -1923,7 +1923,11 @@ $$;
       Per-account posting and engagement summary — posts, comments, votes cast,
       votes received, replies received, and author rewards — aggregated by the
       chosen granularity. Author reward figures are sourced from the account's
-      financial daily aggregates.
+      financial daily aggregates. Post and comment counts reflect content-creation
+      events only (edits excluded): every creation is counted at creation time,
+      including content later deleted or re-created under the same permlink, so
+      figures can slightly exceed Hivemind, which counts only currently-live content.
+      The difference is negligible in practice.
     operationId: haf_stats_endpoints.get_account_content_stats
     parameters:
       - in: path
@@ -1972,10 +1976,10 @@ $$;
                     description: ISO-8601 date string for the aggregation bucket
                   posts:
                     type: integer
-                    description: Root posts authored (parent_author = '')
+                    description: Root posts authored (parent_author = ''), counted at creation; edits excluded
                   comments:
                     type: integer
-                    description: Replies authored (parent_author <> '')
+                    description: Replies authored (parent_author <> ''), counted at creation; edits excluded
                   votes_cast:
                     type: integer
                   votes_received:
