@@ -1146,7 +1146,7 @@ DECLARE
           "Network"
         ],
         "summary": "Content creator cohort retention",
-        "description": "Month cohorts of accounts whose first-ever root post falls in the cohort month, with the share that created content again in the 30-, 90-, and 180-day windows after that first post day. \"Created content again\" means a new post or comment create under chain comment_operation semantics; edits are excluded. Windows are contiguous and non-overlapping: (0,30], (30,90], and (90,180] days. Results are grouped by first-post month; active_at_Nd is null until the full cohort month plus that observation horizon has elapsed. The usual retention decay ordering is empirical, not a mathematical guarantee.",
+        "description": "Month cohorts of accounts whose first-ever root post falls in the cohort month, with the share that created content again in the 30-, 90-, and 180-day windows after that first post day. \"Created content again\" means a new post or comment create under chain comment_operation semantics; edits are excluded. Windows are contiguous and non-overlapping: (0,30], (30,90], and (90,180] days. Results are grouped by first-post month. Disclosure is per-milestone: eligible_at_Nd counts only cohort members that have reached day N (first_post + N <= now), active_at_Nd counts the eligible members that were active in that window, and pct_Nd = active_at_Nd / eligible_at_Nd (null when eligible_at_Nd is 0), so a recent cohort populates on a partial basis as its members mature. The usual retention decay ordering is empirical, not a mathematical guarantee.",
         "operationId": "haf_stats_endpoints.get_network_author_retention",
         "parameters": [
           {
@@ -1178,7 +1178,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)",
+                  "x-sql-datatype": "TABLE(cohort_month TEXT, first_post_accounts INT, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC, eligible_at_180d INT, active_at_180d INT, pct_180d NUMERIC)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -1190,6 +1190,10 @@ DECLARE
                       "first_post_accounts": {
                         "type": "integer"
                       },
+                      "eligible_at_30d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
                       "active_at_30d": {
                         "type": "integer",
                         "nullable": true
@@ -1198,12 +1202,20 @@ DECLARE
                         "type": "number",
                         "nullable": true
                       },
+                      "eligible_at_90d": {
+                        "type": "integer",
+                        "nullable": true
+                      },
                       "active_at_90d": {
                         "type": "integer",
                         "nullable": true
                       },
                       "pct_90d": {
                         "type": "number",
+                        "nullable": true
+                      },
+                      "eligible_at_180d": {
+                        "type": "integer",
                         "nullable": true
                       },
                       "active_at_180d": {
@@ -3302,10 +3314,13 @@ $$;
       180-day windows after that first post day. "Created content again" means a
       new post or comment create under chain comment_operation semantics; edits
       are excluded. Windows are contiguous and non-overlapping: (0,30],
-      (30,90], and (90,180] days. Results are grouped by first-post month;
-      active_at_Nd is null until the full cohort month plus that observation
-      horizon has elapsed. The usual retention decay ordering is empirical, not
-      a mathematical guarantee.
+      (30,90], and (90,180] days. Results are grouped by first-post month.
+      Disclosure is per-milestone: eligible_at_Nd counts only cohort members that
+      have reached day N (first_post + N <= now), active_at_Nd counts the eligible
+      members that were active in that window, and pct_Nd = active_at_Nd /
+      eligible_at_Nd (null when eligible_at_Nd is 0), so a recent cohort populates
+      on a partial basis as its members mature. The usual retention decay ordering
+      is empirical, not a mathematical guarantee.
     operationId: haf_stats_endpoints.get_network_author_retention
     parameters:
       - in: query
@@ -3330,7 +3345,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)"
+              x-sql-datatype: "TABLE(cohort_month TEXT, first_post_accounts INT, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC, eligible_at_180d INT, active_at_180d INT, pct_180d NUMERIC)"
               type: array
               items:
                 type: object
@@ -3340,17 +3355,26 @@ $$;
                     example: "2026-01"
                   first_post_accounts:
                     type: integer
+                  eligible_at_30d:
+                    type: integer
+                    nullable: true
                   active_at_30d:
                     type: integer
                     nullable: true
                   pct_30d:
                     type: number
                     nullable: true
+                  eligible_at_90d:
+                    type: integer
+                    nullable: true
                   active_at_90d:
                     type: integer
                     nullable: true
                   pct_90d:
                     type: number
+                    nullable: true
+                  eligible_at_180d:
+                    type: integer
                     nullable: true
                   active_at_180d:
                     type: integer
@@ -3365,19 +3389,22 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_author_retention(
     "from_date" TEXT = NULL,
     "to_date" TEXT = NULL
 )
-RETURNS TABLE(cohort_month TEXT, first_post_accounts INT, active_at_30d INT, pct_30d NUMERIC, active_at_90d INT, pct_90d NUMERIC, active_at_180d INT, pct_180d NUMERIC)
+RETURNS TABLE(cohort_month TEXT, first_post_accounts INT, eligible_at_30d INT, active_at_30d INT, pct_30d NUMERIC, eligible_at_90d INT, active_at_90d INT, pct_90d NUMERIC, eligible_at_180d INT, active_at_180d INT, pct_180d NUMERIC)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
-        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                      AS cohort_month,
+        TO_CHAR(acr.cohort_month, 'YYYY-MM')                                    AS cohort_month,
         acr.first_post_accounts,
+        acr.eligible_at_30d,
         acr.active_at_30d,
-        ROUND(acr.active_at_30d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1)  AS pct_30d,
+        ROUND(acr.active_at_30d  * 100.0 / NULLIF(acr.eligible_at_30d, 0), 1)    AS pct_30d,
+        acr.eligible_at_90d,
         acr.active_at_90d,
-        ROUND(acr.active_at_90d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1)  AS pct_90d,
+        ROUND(acr.active_at_90d  * 100.0 / NULLIF(acr.eligible_at_90d, 0), 1)    AS pct_90d,
+        acr.eligible_at_180d,
         acr.active_at_180d,
-        ROUND(acr.active_at_180d * 100.0 / NULLIF(acr.first_post_accounts, 0), 1) AS pct_180d
+        ROUND(acr.active_at_180d * 100.0 / NULLIF(acr.eligible_at_180d, 0), 1)   AS pct_180d
     FROM haf_stats_backend.author_cohort_retention acr
     WHERE acr.cohort_month
         BETWEEN DATE_TRUNC('month', haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE))::DATE

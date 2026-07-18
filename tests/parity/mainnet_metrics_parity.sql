@@ -509,6 +509,130 @@ FROM endpoint e CROSS JOIN independent i CROSS JOIN LATERAL (
         ('active_at_90d', e.active_at_90d::NUMERIC, i.active_at_90d)
 ) AS fields(field, endpoint_val, independent_val);
 
+-- 10) get_network_author_retention (2016-04..2016-08 first-post cohorts).
+-- Content-creator retention over non-overlapping (0,30]/(30,90]/(90,180] windows
+-- relative to each account's first-post day, with PER-MEMBER eligibility
+-- (first_post_at + N <= as_of). Independently: the first-ever root post
+-- (parent_author='') fixes each account's cohort + first_post_at timestamp;
+-- "created content again" reuses the edit-excluded first-occurrence day set
+-- (_firsts) as an independent stand-in for the processor's network_author_daily.
+-- as_of is the head block time.
+--
+-- Five cohorts are asserted deliberately, to cover BOTH maturity regimes on the
+-- 5M replay (head ~ 2016-09-15): fully-matured windows where eligible = the whole
+-- cohort (Apr/May 30d & 90d) AND the PARTIAL disclosure this feature adds, where
+-- 0 < eligible_at_Nd < first_post_accounts (Jun 90d: 389/645; Aug 30d: 5849/9313).
+-- A single mature cohort would never exercise the partial-eligibility arithmetic
+-- that is the whole point of this endpoint change.
+--
+-- KNOWN COVERAGE GAP: every cohort's 180d window is beyond head (first_post + 180d
+-- > mid-Sep), so eligible_at_180d / active_at_180d are asserted only as 0 here. The
+-- 180d branch therefore has NO non-zero coverage on the 5M replay; a longer replay
+-- or a synthetic fixture is required to guard it (e.g. an INTERVAL '180 days' typo
+-- would pass unnoticed). The golden pattern file has the same limitation.
+--
+-- Determinism: pin the endpoint's rollup to head first. During forward replay,
+-- Step 3 refreshes each cohort at the last ~hourly block boundary, whose _as_of is
+-- <= MAX(created_at); the independent side below uses MAX(created_at). For cohorts
+-- whose window closes ~at head (Jun 90d, Aug 30d) a member maturing in that gap
+-- would be eligible on one side only. Refreshing to MAX(created_at) makes both
+-- sides share one as_of. (This writes the endpoint's own rollup table, not the
+-- independent derivation, so it does not weaken the independence of the check.)
+SELECT haf_stats_app.refresh_author_cohort_retention(
+    (SELECT MAX(created_at) FROM hafd.blocks), NULL, NULL
+);
+
+WITH first_posts AS MATERIALIZED (
+    -- Each account's first-EVER root post across all history (earliest op id),
+    -- with its exact block timestamp. DISTINCT ON mirrors the processor's Step 1.
+    SELECT DISTINCT ON (o.body_value->>'author')
+           o.body_value->>'author' AS author,
+           b.created_at            AS first_post_at,
+           b.created_at::DATE      AS first_post_day
+    FROM hafd.operations o
+    JOIN hafd.blocks b ON b.num = hafd.operation_id_to_block_num(o.id)
+    WHERE o.op_type_id = 1                        -- comment_operation
+      AND o.body_value->>'parent_author' = ''     -- root post
+    ORDER BY o.body_value->>'author', o.id
+),
+cohort AS MATERIALIZED (
+    SELECT author, first_post_at, first_post_day,
+           DATE_TRUNC('month', first_post_at)::DATE AS cohort_month
+    FROM first_posts
+    WHERE first_post_at >= TIMESTAMP '2016-04-01'
+      AND first_post_at <  TIMESTAMP '2016-09-01'
+),
+-- Retention flags from the create-only day set (_firsts: posts AND comments, edits
+-- excluded), day-granular, seed day excluded (day > first_post_day), matching the
+-- processor's non-overlapping windows exactly.
+flags AS (
+    SELECT c.cohort_month, c.author, c.first_post_at,
+           BOOL_OR(f.day > c.first_post_day
+                   AND f.day <= c.first_post_day + 30)  AS d30,
+           BOOL_OR(f.day > c.first_post_day + 30
+                   AND f.day <= c.first_post_day + 90)  AS d90,
+           BOOL_OR(f.day > c.first_post_day + 90
+                   AND f.day <= c.first_post_day + 180) AS d180
+    FROM cohort c
+    LEFT JOIN _firsts f
+           ON f.author = c.author
+          AND f.day > c.first_post_day
+          AND f.day <= c.first_post_day + 180
+    GROUP BY c.cohort_month, c.author, c.first_post_at
+),
+independent AS (
+    SELECT
+        cohort_month,
+        COUNT(*)::NUMERIC AS first_post_accounts,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '30 days' <= ao.ts
+        )::NUMERIC AS eligible_at_30d,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '30 days' <= ao.ts AND d30
+        )::NUMERIC AS active_at_30d,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '90 days' <= ao.ts
+        )::NUMERIC AS eligible_at_90d,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '90 days' <= ao.ts AND d90
+        )::NUMERIC AS active_at_90d,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '180 days' <= ao.ts
+        )::NUMERIC AS eligible_at_180d,
+        COUNT(*) FILTER (
+            WHERE first_post_at + INTERVAL '180 days' <= ao.ts AND d180
+        )::NUMERIC AS active_at_180d
+    FROM flags
+    CROSS JOIN (SELECT MAX(created_at) AS ts FROM hafd.blocks) ao
+    GROUP BY cohort_month
+),
+endpoint AS (
+    SELECT *
+    FROM haf_stats_endpoints.get_network_author_retention(
+        '2016-04-01', '2016-08-31'
+    )
+)
+-- FULL OUTER JOIN on month so a cohort present on only ONE side is caught, not
+-- silently dropped: an unmatched month yields NULL vs a number for every field,
+-- which the tail assertion flags as a mismatch. (An inner join would hide, e.g.,
+-- the endpoint omitting a cohort via a date-filter regression.) Every joined field
+-- must agree, per the tail assertion.
+INSERT INTO _parity
+SELECT 'author_retention.' || COALESCE(e.cohort_month, TO_CHAR(i.cohort_month, 'YYYY-MM')),
+       field, endpoint_val, independent_val
+FROM endpoint e
+FULL OUTER JOIN independent i ON TO_CHAR(i.cohort_month, 'YYYY-MM') = e.cohort_month
+CROSS JOIN LATERAL (
+    VALUES
+        ('first_post_accounts', e.first_post_accounts::NUMERIC, i.first_post_accounts),
+        ('eligible_at_30d', e.eligible_at_30d::NUMERIC, i.eligible_at_30d),
+        ('active_at_30d', e.active_at_30d::NUMERIC, i.active_at_30d),
+        ('eligible_at_90d', e.eligible_at_90d::NUMERIC, i.eligible_at_90d),
+        ('active_at_90d', e.active_at_90d::NUMERIC, i.active_at_90d),
+        ('eligible_at_180d', e.eligible_at_180d::NUMERIC, i.eligible_at_180d),
+        ('active_at_180d', e.active_at_180d::NUMERIC, i.active_at_180d)
+) AS fields(field, endpoint_val, independent_val);
+
 -- 8) top_accounts_window decomposition — the current-month seal guard (issue #37).
 --    Pure date logic (independent of replay data), so we assert the exact bounds with an
 --    injected _now. This covers the case an HTTP/replay test can NEVER reach: the trailing

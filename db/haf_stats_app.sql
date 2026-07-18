@@ -229,4 +229,38 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Companion to backfill_rollup_if_empty for the SCHEMA-upgrade case: a rollup
+-- that gained new columns via ALTER TABLE ... ADD COLUMN IF NOT EXISTS keeps its
+-- existing rows, so backfill_rollup_if_empty (which only fires on an empty rollup)
+-- never repopulates them and the new columns stay NULL. Pass a sentinel column
+-- that the current refresh always writes non-NULL (e.g. a COUNT that is >= 0); a
+-- NULL in it marks a row written before the upgrade. When any such row exists,
+-- run the full refresh once to populate the new columns. Idempotent: after the
+-- refresh no row has a NULL sentinel, so it does not fire again. On a fresh
+-- genesis node the rollup is empty, so EXISTS is false and this is a no-op.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rollup_if_column_null(
+    _rollup REGCLASS,
+    _sentinel_col TEXT,
+    _refresh_call TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _has_null BOOLEAN;
+BEGIN
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I IS NULL)', _rollup, _sentinel_col)
+        INTO _has_null;
+    IF NOT _has_null THEN
+        RETURN;  -- no pre-upgrade rows (or empty rollup); nothing to do
+    END IF;
+
+    RAISE NOTICE 'haf_stats: % has rows with NULL % - running one-time full refresh to populate upgrade columns', _rollup, _sentinel_col;
+    EXECUTE _refresh_call;
+END;
+$$;
+
 RESET ROLE;

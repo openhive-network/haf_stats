@@ -106,6 +106,19 @@ psql_cmd -c "
         'haf_stats_backend.author_cohort_retention',
         'haf_stats_backend.author_cohort_members',
         'SELECT haf_stats_app.refresh_author_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks))');
+    -- Self-heal deployments upgraded from the pre-eligibility cohort schema: the
+    -- eligible_at_Nd columns were added via ALTER TABLE ... ADD COLUMN IF NOT
+    -- EXISTS, which leaves them NULL on already-materialized cohorts that
+    -- backfill_rollup_if_empty (empty-rollup only) never revisits. The sentinel is
+    -- a column the current refresh always writes non-NULL; a full refresh once
+    -- populates the new denominators. Applies to BOTH cohort rollups that gained
+    -- eligible_at_Nd (author retention here, account funnel below).
+    SELECT haf_stats_app.backfill_rollup_if_column_null(
+        'haf_stats_backend.author_cohort_retention', 'eligible_at_30d',
+        'SELECT haf_stats_app.refresh_author_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks), NULL, NULL)');
+    SELECT haf_stats_app.backfill_rollup_if_column_null(
+        'haf_stats_backend.account_cohort_retention', 'eligible_at_7d',
+        'SELECT haf_stats_app.refresh_account_cohort_retention((SELECT MAX(created_at) FROM hafd.blocks), NULL, NULL)');
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.account_financial_monthly',
         'haf_stats_backend.account_financial_daily',
