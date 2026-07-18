@@ -25,8 +25,11 @@ SET ROLE haf_stats_owner;
 --
 -- Retention windows are day-granular because network_author_daily is day-grain:
 -- another create on the same calendar day as the first post is intentionally not
--- counted as retained. The metric is coarse by design and disclosed only after a
--- full cohort month plus the requested horizon has elapsed.
+-- counted as retained. The metric is coarse by design. Disclosure is per-member:
+-- a cohort member counts toward window N (eligible_at_Nd) only once its own N-day
+-- window has fully elapsed (first_post_at + N days <= as_of), so a cohort populates
+-- on a partial basis as its members mature rather than blanking until the whole
+-- cohort month plus the horizon has elapsed.
 
 -- ---------------------------------------------------------------------------
 -- Tables
@@ -55,10 +58,20 @@ GRANT SELECT ON haf_stats_backend.author_cohort_members TO haf_stats_user;
 CREATE TABLE IF NOT EXISTS haf_stats_backend.author_cohort_retention (
     cohort_month DATE PRIMARY KEY,
     first_post_accounts INT NOT NULL DEFAULT 0,
+    eligible_at_30d INT,
     active_at_30d INT,
+    eligible_at_90d INT,
     active_at_90d INT,
+    eligible_at_180d INT,
     active_at_180d INT
 );
+
+-- Upgrade path for existing deployments: the eligible_at_Nd disclosure columns
+-- were added to move author retention onto per-member (first_post_at-based)
+-- eligibility; back-fill the schema on tables that predate them.
+ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT;
+ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT;
+ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_180d INT;
 
 GRANT SELECT ON haf_stats_backend.author_cohort_retention TO haf_stats_user;
 
@@ -75,24 +88,43 @@ RETURNS VOID
 LANGUAGE sql
 AS $$
     INSERT INTO haf_stats_backend.author_cohort_retention
-        (cohort_month, first_post_accounts, active_at_30d, active_at_90d, active_at_180d)
+        (cohort_month, first_post_accounts,
+         eligible_at_30d,  active_at_30d,
+         eligible_at_90d,  active_at_90d,
+         eligible_at_180d, active_at_180d)
     SELECT
         cohort_month,
         COUNT(*) AS first_post_accounts,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '30 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_30d) ELSE NULL END AS active_at_30d,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '90 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_90d) ELSE NULL END AS active_at_90d,
-        CASE WHEN cohort_month + INTERVAL '1 month' + INTERVAL '180 days' <= _as_of
-             THEN COUNT(*) FILTER (WHERE active_180d) ELSE NULL END AS active_at_180d
+        -- Per-milestone eligibility: a member counts toward day N only once its
+        -- own window has fully elapsed (first_post_at + N days <= _as_of). pct_Nd
+        -- = active_at_Nd / eligible_at_Nd, computed by the endpoint. active_at_Nd
+        -- is no longer null-gated; a not-yet-matured cohort reports eligible_at_Nd
+        -- = 0 and the endpoint's NULLIF turns pct into null.
+        --
+        -- Eligibility is timestamp-based (first_post_at + N days), matching the
+        -- account-funnel model, while the active_Nd flags are day-granular. At a
+        -- member's exact maturity instant the flag's calendar-day window may not be
+        -- fully observed yet, so active_at_Nd can lag eligible_at_Nd by one member
+        -- for at most part of a day, self-correcting on the next refresh. This is
+        -- within the metric's day-granular coarseness and does not affect matured
+        -- cohorts (the only ones whose values are final).
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '30 days'  <= _as_of)                AS eligible_at_30d,
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '30 days'  <= _as_of AND active_30d)  AS active_at_30d,
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '90 days'  <= _as_of)                AS eligible_at_90d,
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '90 days'  <= _as_of AND active_90d)  AS active_at_90d,
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '180 days' <= _as_of)                AS eligible_at_180d,
+        COUNT(*) FILTER (WHERE first_post_at + INTERVAL '180 days' <= _as_of AND active_180d) AS active_at_180d
     FROM haf_stats_backend.author_cohort_members
     WHERE (_from_month IS NULL OR cohort_month >= _from_month)
       AND (_to_month IS NULL OR cohort_month <= _to_month)
     GROUP BY cohort_month
     ON CONFLICT (cohort_month) DO UPDATE SET
         first_post_accounts = EXCLUDED.first_post_accounts,
+        eligible_at_30d     = EXCLUDED.eligible_at_30d,
         active_at_30d       = EXCLUDED.active_at_30d,
+        eligible_at_90d     = EXCLUDED.eligible_at_90d,
         active_at_90d       = EXCLUDED.active_at_90d,
+        eligible_at_180d    = EXCLUDED.eligible_at_180d,
         active_at_180d      = EXCLUDED.active_at_180d;
 $$;
 
@@ -196,8 +228,9 @@ BEGIN
 
     -- Step 3: Recompute cohort retention summary from member flags.
     --
-    -- A cohort's N-day result is disclosed only after the full cohort month plus
-    -- N days has elapsed, so recent cohorts expose NULL rather than partial data.
+    -- Disclosure is per-member: refresh_author_cohort_retention counts a member
+    -- toward window N only once its own N-day window has elapsed (eligible_at_Nd),
+    -- so recent cohorts populate on a partial basis as members mature.
     -- Refresh only near hourly block boundaries; retention is a coarse metric and
     -- the affected cohorts are exactly re-aggregated when the refresh fires.
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
