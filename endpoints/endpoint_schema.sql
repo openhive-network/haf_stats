@@ -80,6 +80,33 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_name(TEXT) TO haf_stats_user;
 
+-- ---------------------------------------------------------------------------
+-- custom_json id -> registry category resolution (single source of truth).
+-- Same longest-prefix starts_with match as resolve_dapp_name, but returns the
+-- app's category; an id matching no pattern falls back to 'Uncategorized' (the
+-- same runtime fallback get_account_dapp_footprint uses). Shared by
+-- get_account_rc_footprint group_by=category and get_account_rc_footprint_timeline
+-- category_filter, so the category label is identical across them by construction.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp_category(_json_id TEXT)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(
+        (
+            SELECT r.category
+            FROM haf_stats_backend.custom_json_app_registry r
+            WHERE starts_with(_json_id, r.app_id_pattern)
+            ORDER BY LENGTH(r.app_id_pattern) DESC, r.app_id_pattern
+            LIMIT 1
+        ),
+        'Uncategorized'
+    )
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_category(TEXT) TO haf_stats_user;
+
 -- get_network_top_accounts window decomposition (issue #37). Splits [_from, _to]
 -- into the full interior months served from the *_monthly rollups plus the partial
 -- leading/trailing months served from the daily tables. Extracted from the endpoint
@@ -538,10 +565,11 @@ DECLARE
               "default": "op_type",
               "enum": [
                 "op_type",
-                "app"
+                "app",
+                "category"
               ]
             },
-            "description": "Group results by operation type or DApp"
+            "description": "Group results by operation type, DApp, or registry category (the custom_json_app_registry category each DApp belongs to, unmatched ids -> Uncategorized). app and category are byte-aware for custom_json (aggregations of the same daily buckets), so category totals reconcile with app rolled up by category - NOT with the timeline category_filter sum, which stays the op-count model."
           }
         ],
         "responses": {
@@ -557,7 +585,7 @@ DECLARE
                     "properties": {
                       "label": {
                         "type": "string",
-                        "description": "Operation type name or custom_json app ID"
+                        "description": "Operation type name, custom_json DApp name, or registry category"
                       },
                       "rc_consumed": {
                         "type": "integer"
@@ -639,6 +667,17 @@ DECLARE
               "type": "string"
             },
             "description": "Only return custom_json events whose resolved DApp name equals this value, e.g. Splinterlands (matches the rc-footprint group_by=app label)."
+          },
+          {
+            "in": "query",
+            "name": "category_filter",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Only return custom_json events whose registry category equals this value, e.g. Gaming (matches the rc-footprint group_by=category label; see /custom-json-app-registry for the category set, or Uncategorized for ids matching no registered app). Combinable with app_filter (intersection). Each event's rc_consumed stays the op-count estimate, so a category_filter sum reconciles with the group_by=op_type custom_json total, NOT the byte-aware group_by=category figure."
           },
           {
             "in": "query",
@@ -848,6 +887,51 @@ DECLARE
                             "type": "number"
                           }
                         }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/custom-json-app-registry": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "custom_json DApp registry",
+        "description": "The custom_json DApp registry: every registered app_id_pattern mapped to its DApp name, registry category, and homepage. This is the single source of truth that get_account_rc_footprint (group_by=app / group_by=category), get_account_rc_footprint_timeline (app_filter / category_filter) and get_account_dapp_footprint use to attribute custom_json ids - a longest-prefix starts_with match against app_id_pattern, so a raw id like sm_market_rent resolves to the longest registered prefix (sm_); an id matching no pattern falls back to the Uncategorized category with its raw id as the app name. Exposed so a client can render category/DApp labels, colours and homepage links without hard-coding the mapping. Static between deploys and only ~dozens of rows, so it is safe to cache. Ordered by category, then app name.",
+        "operationId": "haf_stats_endpoints.get_custom_json_app_registry",
+        "responses": {
+          "200": {
+            "description": "Registered custom_json DApps, ordered by category then app name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(app_id_pattern TEXT, app_name TEXT, category TEXT, homepage TEXT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "app_id_pattern": {
+                        "type": "string",
+                        "description": "custom_json id prefix; the longest one that prefixes an id wins"
+                      },
+                      "app_name": {
+                        "type": "string",
+                        "description": "Registered DApp name (the group_by=app label)"
+                      },
+                      "category": {
+                        "type": "string",
+                        "description": "Registry category (the group_by=category label)"
+                      },
+                      "homepage": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "DApp homepage URL, or null if unknown"
                       }
                     }
                   }
@@ -2134,8 +2218,13 @@ $$;
         schema:
           type: string
           default: op_type
-          enum: [op_type, app]
-        description: Group results by operation type or DApp
+          enum: [op_type, app, category]
+        description: >-
+          Group results by operation type, DApp, or registry category (the
+          custom_json_app_registry category each DApp belongs to, unmatched ids ->
+          Uncategorized). app and category are byte-aware for custom_json (aggregations of
+          the same daily buckets), so category totals reconcile with app rolled up by
+          category - NOT with the timeline category_filter sum, which stays the op-count model.
     responses:
       '200':
         description: RC consumption ranked by usage
@@ -2149,7 +2238,7 @@ $$;
                 properties:
                   label:
                     type: string
-                    description: Operation type name or custom_json app ID
+                    description: Operation type name, custom_json DApp name, or registry category
                   rc_consumed:
                     type: integer
                   op_count:
@@ -2184,10 +2273,10 @@ BEGIN
 
     -- Tolerate Wax's JSON-encoded string params (e.g. "op_type"); see issue #22.
     group_by := TRIM('"' FROM group_by);
-    IF group_by IS NULL OR group_by NOT IN ('op_type', 'app') THEN
+    IF group_by IS NULL OR group_by NOT IN ('op_type', 'app', 'category') THEN
         RAISE SQLSTATE '22023' USING
             MESSAGE = 'invalid group_by: ' || COALESCE(group_by, '(null)'),
-            HINT = 'Must be one of: op_type, app';
+            HINT = 'Must be one of: op_type, app, category';
     END IF;
 
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
@@ -2259,24 +2348,30 @@ BEGIN
         FROM agg, tot t
         ORDER BY agg.rc_consumed DESC, agg.label;
     ELSE
-        -- group_by = 'app': size-aware custom_json apps from the pre-aggregated
+        -- group_by = 'app' or 'category': size-aware custom_json from the pre-aggregated
         -- account_custom_json_daily (op_count + op_bytes per json_id, base+byte op-18 rate),
-        -- plus one 'non-custom_json' bucket for all other signed ops (op_count * avg_cost).
-        -- Each json_id is resolved to its registered DApp name via a longest-prefix
-        -- starts_with match against custom_json_app_registry (mirrors
-        -- get_account_dapp_footprint); an unmatched id keeps its raw json_id, and
-        -- distinct json_ids that map to the same app (e.g. 'sm_' and 'splinterlands')
-        -- roll up into a single labelled bucket.
+        -- rolled up to the registered DApp name (resolve_dapp_name) or, for group_by='category',
+        -- one registry level further to the DApp's category (resolve_dapp_category, unmatched
+        -- ids -> 'Uncategorized'). Distinct json_ids sharing a label merge (e.g. 'sm_' and
+        -- 'splinterlands' -> Splinterlands; Splinterlands + Rising Star -> Gaming). Plus one
+        -- 'non-custom_json' bucket for all other signed ops (op_count * avg_cost), so totals
+        -- still cover 100% of the account's RC. The two modes differ ONLY in the label resolver,
+        -- so a category total reconciles exactly with the app totals summed by category (and with
+        -- get_account_dapp_footprint's categories[].rc_estimated).
         RETURN QUERY
         WITH cj AS (
-            SELECT haf_stats_app.resolve_dapp_name(acj.json_id)  AS label,
+            SELECT CASE WHEN group_by = 'category'
+                        THEN haf_stats_app.resolve_dapp_category(acj.json_id)
+                        ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END AS label,
                    SUM(acj.op_count)::BIGINT     AS op_count,
                    SUM(acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)::BIGINT AS rc_consumed
             FROM haf_stats_backend.account_custom_json_daily acj
             CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
-            GROUP BY haf_stats_app.resolve_dapp_name(acj.json_id)
+            GROUP BY CASE WHEN group_by = 'category'
+                          THEN haf_stats_app.resolve_dapp_category(acj.json_id)
+                          ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END
         ),
         noncj AS (
             SELECT 'non-custom_json'::TEXT       AS label,
@@ -2375,6 +2470,20 @@ $$;
           Only return custom_json events whose resolved DApp name equals this value, e.g.
           Splinterlands (matches the rc-footprint group_by=app label).
       - in: query
+        name: category_filter
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: >-
+          Only return custom_json events whose registry category equals this value, e.g. Gaming
+          (matches the rc-footprint group_by=category label; see /custom-json-app-registry for the
+          category set, or Uncategorized for ids matching no registered app). Combinable with
+          app_filter (intersection). Each event's rc_consumed stays the op-count estimate, so a
+          category_filter sum reconciles with the group_by=op_type custom_json total, NOT the
+          byte-aware group_by=category figure.
+      - in: query
         name: limit_count
         required: false
         schema:
@@ -2448,6 +2557,7 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint_timeline
     "to_date" TEXT = NULL,
     "op_type_filter" TEXT = NULL,
     "app_filter" TEXT = NULL,
+    "category_filter" TEXT = NULL,
     "limit_count" INT = 100,
     "offset_start" INT = 0,
     "before_seq" BIGINT = NULL
@@ -2466,6 +2576,7 @@ DECLARE
     _hi_seq BIGINT;
     _op_type_filter TEXT;
     _app_filter TEXT;
+    _category_filter TEXT;
     _filter_op_type_id INT;
     _virtual_ids SMALLINT[];
     _matching_ids TEXT[];
@@ -2486,10 +2597,12 @@ BEGIN
 
     -- Normalize the optional drill-down filters: tolerate Wax's JSON-encoded quoting (issue #22)
     -- and treat '' as absent. op_type_filter matches the op_type label (e.g. vote_operation);
-    -- app_filter matches the RESOLVED DApp name (e.g. Splinterlands), so the caller can drill into
-    -- the exact get_account_rc_footprint group_by=op_type / group_by=app bucket it clicked.
+    -- app_filter matches the RESOLVED DApp name (e.g. Splinterlands) and category_filter the
+    -- RESOLVED registry category (e.g. Gaming), so the caller can drill into the exact
+    -- get_account_rc_footprint group_by=op_type / group_by=app / group_by=category bucket it clicked.
     _op_type_filter := NULLIF(TRIM('"' FROM COALESCE("op_type_filter", '')), '');
     _app_filter := NULLIF(TRIM('"' FROM COALESCE("app_filter", '')), '');
+    _category_filter := NULLIF(TRIM('"' FROM COALESCE("category_filter", '')), '');
 
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
     IF _account_id IS NULL THEN
@@ -2508,9 +2621,10 @@ BEGIN
         END IF;
     END IF;
 
-    -- app_filter selects only custom_json (op 18) events; pairing it with an op_type_filter for a
-    -- different type is contradictory -> empty.
-    IF _app_filter IS NOT NULL AND _filter_op_type_id IS NOT NULL AND _filter_op_type_id <> 18 THEN
+    -- app_filter and category_filter both select only custom_json (op 18) events; pairing either
+    -- with an op_type_filter for a different type is contradictory -> empty.
+    IF (_app_filter IS NOT NULL OR _category_filter IS NOT NULL)
+       AND _filter_op_type_id IS NOT NULL AND _filter_op_type_id <> 18 THEN
         RETURN;
     END IF;
 
@@ -2541,14 +2655,15 @@ BEGIN
     -- a full-window Sort. app is the resolved DApp name via haf_stats_app.resolve_dapp_name (the
     -- SAME resolver group_by=app uses, so the labels match by construction); custom_json_id keeps
     -- the raw id.
-    -- NOTE on app_filter reconciliation: app_filter selects the SET of events in a group_by=app
-    -- bucket, but each event's rc_consumed stays the op-count estimate, so SUM over an app_filter
-    -- drill-down reconciles with the group_by=op_type custom_json total, NOT the byte-aware
-    -- group_by=app bucket figure (the aggregate prices custom_json two ways - flat for op_type,
-    -- size-aware for app; the timeline follows the op_type model end to end).
+    -- NOTE on app_filter/category_filter reconciliation: each selects the SET of events in a
+    -- group_by=app / group_by=category bucket, but each event's rc_consumed stays the op-count
+    -- estimate, so SUM over such a drill-down reconciles with the group_by=op_type custom_json
+    -- total, NOT the byte-aware group_by=app / group_by=category bucket figure (the aggregate
+    -- prices custom_json two ways - flat for op_type, size-aware for app/category; the timeline
+    -- follows the op_type model end to end).
     -- before_seq is the keyset cursor: ORDER BY account_op_seq_no DESC means "seq < before_seq" is
     -- served by the same (account_id, seq) index with no offset walk, so deep paging stays O(1).
-    IF _app_filter IS NULL THEN
+    IF _app_filter IS NULL AND _category_filter IS NULL THEN
         -- No app filter: page first, then resolve the app for the returned page only (custom_json),
         -- avoiding a whole-history body scan. Virtual ops are dropped INSIDE the index-scan filter
         -- (op_type_id <> ALL(_virtual_ids)) rather than via an operation_types join above the LIMIT
@@ -2584,25 +2699,29 @@ BEGIN
         LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
         ORDER BY page.account_op_seq_no DESC;
     ELSE
-        -- app filter set. The resolved DApp name is a body-derived value, so filtering on it via a
-        -- raw op-18 body scan is O(op-18 count in the window) and can't early-terminate for a rare
-        -- or absent app (a heavy game account -> tens of seconds). Instead resolve the candidate
-        -- json_ids from the per-account custom_json rollup (account_custom_json_daily, the same
-        -- table + signer attribution get_account_rc_footprint group_by=app trusts): the resolver
-        -- runs once per DISTINCT id the account used (~dozens), not per event. If none resolve to
-        -- app_filter, the account never signed that DApp in the window -> return empty WITHOUT
-        -- touching the raw op stream (the op-volume-independent fast path). Otherwise scan the raw
-        -- op-18 rows filtered by the exact json_id set (a plain = ANY match, no per-row resolver),
-        -- which the (account_id, seq) index still serves backward and early-terminates at
-        -- OFFSET+LIMIT / before_seq. NOTE: this ties app_filter to the rollup's freshness the same
-        -- way group_by=app already is; per-event rc_consumed stays the op-count estimate.
+        -- app_filter and/or category_filter set. The resolved DApp name/category is a body-derived
+        -- value, so filtering on it via a raw op-18 body scan is O(op-18 count in the window) and
+        -- can't early-terminate for a rare or absent app/category (a heavy game account -> tens of
+        -- seconds). Instead resolve the candidate json_ids from the per-account custom_json rollup
+        -- (account_custom_json_daily, the same table + signer attribution get_account_rc_footprint
+        -- group_by=app trusts): the resolver runs once per DISTINCT id the account used (~dozens),
+        -- not per event. If none resolve to the filter(s), the account never signed that DApp /
+        -- category in the window -> return empty WITHOUT touching the raw op stream (the
+        -- op-volume-independent fast path). Otherwise scan the raw op-18 rows filtered by the exact
+        -- json_id set (a plain = ANY match, so the scan predicate needs no per-row resolver - the
+        -- app label is resolved only on the returned page), which the (account_id, seq) index
+        -- still serves backward and early-terminates at OFFSET+LIMIT / before_seq. Passing both
+        -- filters intersects them (an app must also be in the category). NOTE: this ties the
+        -- filters to the rollup's freshness the same way group_by=app already is; per-event
+        -- rc_consumed stays the op-count estimate.
         SELECT ARRAY(
             SELECT acj.json_id
             FROM haf_stats_backend.account_custom_json_daily acj
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
             GROUP BY acj.json_id
-            HAVING haf_stats_app.resolve_dapp_name(acj.json_id) = _app_filter
+            HAVING (_app_filter IS NULL OR haf_stats_app.resolve_dapp_name(acj.json_id) = _app_filter)
+               AND (_category_filter IS NULL OR haf_stats_app.resolve_dapp_category(acj.json_id) = _category_filter)
         ) INTO _matching_ids;
         IF _matching_ids IS NULL OR cardinality(_matching_ids) = 0 THEN
             RETURN;
@@ -2629,7 +2748,7 @@ BEGIN
             bv.created_at::TIMESTAMP,
             page.block_num,
             'custom_json_operation'::TEXT,
-            _app_filter,
+            haf_stats_app.resolve_dapp_name(page.json_id),
             page.json_id,
             haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT,
             page.account_op_seq_no::BIGINT
@@ -2875,6 +2994,69 @@ BEGIN
 
     RETURN _result;
 END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: custom_json DApp registry (the id -> app/category/homepage lookup)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/custom-json-app-registry:
+  get:
+    tags:
+      - Other
+    summary: custom_json DApp registry
+    description: >-
+      The custom_json DApp registry: every registered app_id_pattern mapped to its DApp name,
+      registry category, and homepage. This is the single source of truth that
+      get_account_rc_footprint (group_by=app / group_by=category),
+      get_account_rc_footprint_timeline (app_filter / category_filter) and
+      get_account_dapp_footprint use to attribute custom_json ids - a longest-prefix starts_with
+      match against app_id_pattern, so a raw id like sm_market_rent resolves to the longest
+      registered prefix (sm_); an id matching no pattern falls back to the Uncategorized category
+      with its raw id as the app name. Exposed so a client can render category/DApp labels,
+      colours and homepage links without hard-coding the mapping. Static between deploys and only
+      ~dozens of rows, so it is safe to cache. Ordered by category, then app name.
+    operationId: haf_stats_endpoints.get_custom_json_app_registry
+    responses:
+      '200':
+        description: Registered custom_json DApps, ordered by category then app name
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(app_id_pattern TEXT, app_name TEXT, category TEXT, homepage TEXT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  app_id_pattern:
+                    type: string
+                    description: custom_json id prefix; the longest one that prefixes an id wins
+                  app_name:
+                    type: string
+                    description: Registered DApp name (the group_by=app label)
+                  category:
+                    type: string
+                    description: Registry category (the group_by=category label)
+                  homepage:
+                    type: string
+                    nullable: true
+                    description: DApp homepage URL, or null if unknown
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_custom_json_app_registry;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_custom_json_app_registry()
+RETURNS TABLE(app_id_pattern TEXT, app_name TEXT, category TEXT, homepage TEXT)
+-- openapi-generated-code-end
+LANGUAGE sql STABLE
+AS $$
+    -- Straight read of the seeded reference table (haf_stats_backend.custom_json_app_registry,
+    -- created in db/process_rc.sql, populated by db/seed_data.sql). No parameters: the whole
+    -- registry is small and static between deploys. Ordered so the client gets a stable,
+    -- category-grouped list for rendering the #654 dashboard legend/colours.
+    SELECT r.app_id_pattern, r.app_name, r.category, r.homepage
+    FROM haf_stats_backend.custom_json_app_registry r
+    ORDER BY r.category, r.app_name, r.app_id_pattern;
 $$;
 
 -- ---------------------------------------------------------------------------

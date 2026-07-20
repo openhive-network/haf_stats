@@ -60,6 +60,30 @@ stages:
           op_count: 2
           pct: 0.01
 
+  # group_by=category rolls each app one registry level up: sm_claim_daily -> Splinterlands -> the
+  # "Gaming" category (same byte-aware 22000/2 figures relabelled), while the non-custom_json bucket
+  # is unchanged - so the category breakdown reconciles exactly with group_by=app summed by category.
+  - name: group_by=category rolls custom_json apps up to their registry category
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        group_by: "category"
+    response:
+      status_code: 200
+      json:
+        - label: "non-custom_json"
+          rc_consumed: 389115588
+          op_count: 4
+          pct: 99.99
+        - label: "Gaming"
+          rc_consumed: 22000
+          op_count: 2
+          pct: 0.01
+
 ---
 test_name: Account RC footprint group_by=app merges shared DApps and keeps unmatched ids raw
 
@@ -103,6 +127,39 @@ stages:
           op_count: 20
           pct: 6.19
         - label: "Splinterlands"
+          rc_consumed: 6000
+          op_count: 30
+          pct: 5.31
+
+  # group_by=category rolls those same apps up to their registry categories, exercising the
+  # Uncategorized fallback: mystery_app (no registry match) -> Uncategorized, follow -> Social Graph,
+  # ssc-mainnet-hive -> DeFi & Tokens, sm_* -> Gaming. Each app maps to a distinct category here, so
+  # the per-category RC/op figures (and pct) equal the group_by=app rows relabelled by category.
+  - name: group_by=category buckets unmatched ids as Uncategorized and reconciles with group_by=app
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        group_by: "category"
+    response:
+      status_code: 200
+      json:
+        - label: "Uncategorized"
+          rc_consumed: 85000
+          op_count: 5
+          pct: 75.22
+        - label: "Social Graph"
+          rc_consumed: 15000
+          op_count: 10
+          pct: 13.27
+        - label: "DeFi & Tokens"
+          rc_consumed: 7000
+          op_count: 20
+          pct: 6.19
+        - label: "Gaming"
           rc_consumed: 6000
           op_count: 30
           pct: 5.31

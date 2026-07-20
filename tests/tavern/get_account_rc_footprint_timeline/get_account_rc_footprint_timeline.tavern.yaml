@@ -118,6 +118,72 @@ stages:
       status_code: 200
       json: []
 
+  # category_filter drills one registry level up from app_filter: it resolves the account's json_ids
+  # to their category (sm_claim_daily -> Splinterlands -> Gaming) via the same rollup candidate-id
+  # path, then scans the same op-18 rows. app stays the per-row resolved DApp name.
+  - name: category_filter drills into a single registry category bucket (Gaming)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        category_filter: "Gaming"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+
+  # category_filter for a category the account never used short-circuits via the rollup (no op scan).
+  - name: category_filter for a category the account never used returns empty (rollup fast-reject)
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        category_filter: "NFTs"
+    response:
+      status_code: 200
+      json: []
+
+  # app_filter + category_filter intersect: Splinterlands IS in Gaming, so the candidate-id set is
+  # unchanged and the two sm_claim_daily events are returned.
+  - name: app_filter and category_filter combine as an intersection when consistent
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        app_filter: "Splinterlands"
+        category_filter: "Gaming"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+
+  # Splinterlands is NOT in the NFTs category, so the intersection is empty (no json_id resolves to
+  # both) - the rollup fast-reject returns empty without an op scan.
+  - name: app_filter and category_filter that disagree intersect to empty
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rctester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-31"
+        app_filter: "Splinterlands"
+        category_filter: "NFTs"
+    response:
+      status_code: 200
+      json: []
+
   # transfer_operation is a valid non-virtual op type in the stub that rctester never signs, so this
   # exercises the resolved-op-type + zero-match scan predicate (ao.op_type_id = _filter_op_type_id),
   # not the unknown-op-type short-circuit.
@@ -145,3 +211,68 @@ stages:
     response:
       status_code: 200
       json: []
+
+---
+test_name: Account RC footprint timeline category_filter drills multi-DApp categories and Uncategorized
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# cattester (ci_setup, id 4001) signed three custom_json events in block 4000 (2020-06-01):
+# sm_claim_daily -> Splinterlands and risingstar -> Rising Star (BOTH the Gaming category), and
+# mystery_cat -> Uncategorized (no registry match). This is the case a single-DApp fixture cannot
+# cover: category_filter=Gaming returns rows whose resolved `app` DIFFERS per row, proving the
+# app label is resolved per-row (resolve_dapp_name(page.json_id)) and not held at a constant.
+# rc_consumed is the per-event estimate rc_avg_cost(18, 2020-06-01) = 167828015; ordered by op_seq
+# DESC (3 > 2 > 1).
+stages:
+  - name: category_filter=Gaming returns both Gaming DApps, each with its own resolved app name
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "cattester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        category_filter: "Gaming"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1}
+
+  # category_filter=Uncategorized drills into the unmatched-id bucket; app falls back to the raw id.
+  - name: category_filter=Uncategorized returns unmatched-id events with the raw id as app
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "cattester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        category_filter: "Uncategorized"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "mystery_cat", custom_json_id: "mystery_cat", rc_consumed: 167828015, op_seq: 3}
+
+  # op_type_filter=custom_json_operation is consistent with a category_filter (both select op 18),
+  # so the contradiction guard must NOT fire - the result equals the plain category_filter=Gaming.
+  - name: category_filter combined with op_type_filter=custom_json_operation is not contradictory
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "cattester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        category_filter: "Gaming"
+        op_type_filter: "custom_json_operation"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1}
