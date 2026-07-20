@@ -1,0 +1,26 @@
+---
+test_name: custom_json app registry lists registered DApps with category and homepage
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Straight read of the seeded custom_json_app_registry (db/seed_data.sql) - the single source of
+# truth the rc-footprint group_by=app/category, the rc-footprint-timeline app_filter/category_filter
+# and get_account_dapp_footprint resolve custom_json ids against. The registry grows/re-categorises
+# over time, so this asserts a representative SUBSET is present and in the endpoint's ORDER BY
+# (category, then app_name) order - not the whole table - via validate_response:assert_rows_present.
+# The four checked rows span four categories in ascending order: actifit -> Actifit (Community &
+# Social DApps), ssc- -> Hive Engine (SSC) (DeFi & Tokens), sm_ -> Splinterlands (Gaming),
+# follow -> Hivemind Follow (Social Graph).
+stages:
+  - name: registry returns registered apps with category + homepage, ordered by category then app
+    request:
+      url: "{api_url}/rpc/get_custom_json_app_registry"
+      method: GET
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:assert_rows_present

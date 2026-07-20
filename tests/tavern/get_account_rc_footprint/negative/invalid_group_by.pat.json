@@ -1,6 +1,6 @@
 {
   "code": "22023",
   "details": null,
-  "hint": "Must be one of: op_type, app",
+  "hint": "Must be one of: op_type, app, category",
   "message": "invalid group_by: invalid"
 }

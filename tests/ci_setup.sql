@@ -93,6 +93,7 @@ $$;
 INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (3001, 'rctester') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (4001, 'cattester') ON CONFLICT DO NOTHING;
 
 -- Op type names for the get_network_rc_utilization + get_account_rc_footprint synthetic tests
 -- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
@@ -175,6 +176,27 @@ VALUES
 (2001, 2001, 4000, 18, 1),
 (2001, 2001, 4000, 18, 2)
 ON CONFLICT DO NOTHING;
+
+-- cattester (4001) drives get_account_rc_footprint_timeline's category_filter drill-down where a
+-- single category spans MULTIPLE DApps (so app must be resolved PER ROW, not held constant) and
+-- the Uncategorized fallback. Three signed custom_json events in block 4000 (2020-06-01), each a
+-- different json_id: sm_claim_daily -> Splinterlands and risingstar -> Rising Star (BOTH Gaming),
+-- and mystery_cat -> Uncategorized. account_op_seq_no is dense + monotonic with block; the timeline
+-- orders by it DESC, so the resolved-app assertions ride seq 3 (mystery_cat) > 2 (risingstar) > 1
+-- (sm_claim_daily). operation_id encodes block 4000: hafd.operation_id(4000, seq) = 4000*1e6 + seq.
+INSERT INTO hive.account_operations_view
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no, operation_id)
+VALUES
+(4001, 4001, 4000, 18, 1, 4000000001),
+(4001, 4001, 4000, 18, 2, 4000000002),
+(4001, 4001, 4000, 18, 3, 4000000003)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
+(4000000001, 18, '{"id": "sm_claim_daily"}'),
+(4000000002, 18, '{"id": "risingstar"}'),
+(4000000003, 18, '{"id": "mystery_cat"}')
+ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
@@ -743,6 +765,19 @@ ON CONFLICT DO NOTHING;
 -- priced by the op-18 base+byte rate effective then (2020-06-08: 1000/100) = 2*1000+200*100 = 22000.
 INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
 VALUES (3001, '2021-03-01', 'sm_claim_daily', 2, 200)
+ON CONFLICT DO NOTHING;
+
+-- cattester (4001) custom_json rollup: the per-json_id candidate set the timeline's
+-- category_filter/app_filter resolve against (one row per json_id it signed in block 4000).
+-- sm_claim_daily + risingstar both resolve to the Gaming category (two distinct DApps);
+-- mystery_cat resolves to no registered app -> Uncategorized. Counts mirror the one op-18 event
+-- each in account_operations_view; the timeline prices per event via rc_avg_cost, so these
+-- op_count/op_bytes only gate the candidate-id fast path, not the returned rc_consumed.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
+VALUES
+    (4001, '2020-06-01', 'sm_claim_daily', 1, 100),
+    (4001, '2020-06-01', 'risingstar', 1, 100),
+    (4001, '2020-06-01', 'mystery_cat', 1, 100)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;

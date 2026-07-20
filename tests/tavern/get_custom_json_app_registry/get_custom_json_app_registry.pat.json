@@ -1,0 +1,26 @@
+[
+  {
+    "app_id_pattern": "actifit",
+    "app_name": "Actifit",
+    "category": "Community & Social DApps",
+    "homepage": "https://actifit.io"
+  },
+  {
+    "app_id_pattern": "ssc-",
+    "app_name": "Hive Engine (SSC)",
+    "category": "DeFi & Tokens",
+    "homepage": "https://hive-engine.com"
+  },
+  {
+    "app_id_pattern": "sm_",
+    "app_name": "Splinterlands",
+    "category": "Gaming",
+    "homepage": "https://splinterlands.com"
+  },
+  {
+    "app_id_pattern": "follow",
+    "app_name": "Hivemind Follow",
+    "category": "Social Graph",
+    "homepage": "https://hive.blog"
+  }
+]
