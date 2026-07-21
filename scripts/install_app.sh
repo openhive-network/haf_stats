@@ -44,6 +44,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_network_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_top_accounts_alltime.sql"
@@ -90,6 +91,15 @@ psql_cmd -c "
         'haf_stats_backend.network_content_period_counts',
         'haf_stats_backend.network_content_daily',
         'SELECT haf_stats_app.refresh_network_content_periods(''2016-03-24'')');
+    -- network_custom_json_daily is raw-op-derived (no cheap daily source to roll up from), so its
+    -- one-time backfill IS the processor over every already-processed block. Empty-only: on a
+    -- fresh genesis replay app_status.last_processed_block is still 0, so process_network_custom_json(1, 0)
+    -- is a no-op and the forward hook fills it; on an already-synced re-install it backfills [1, tip]
+    -- once (the processor then resumes forward from tip+1, so no double-count).
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.network_custom_json_daily',
+        'hafd.operations',
+        'SELECT haf_stats_app.process_network_custom_json(1, (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.engagement_period_counts',
         'haf_stats_backend.post_engagement',

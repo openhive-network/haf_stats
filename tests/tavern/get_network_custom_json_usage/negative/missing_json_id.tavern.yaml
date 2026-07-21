@@ -1,0 +1,25 @@
+---
+test_name: Network custom_json usage requires a json_id
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+# json_id has a NULL default so omitting it reaches the endpoint body (a clean 400) instead of
+# failing PostgREST overload resolution with a 404.
+stages:
+  - name: Reject a missing json_id
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        granularity: "day"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

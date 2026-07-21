@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Provide a custom_json id (e.g. follow)",
+  "message": "json_id is required"
+}

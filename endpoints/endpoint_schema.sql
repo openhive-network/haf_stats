@@ -1024,6 +1024,220 @@ DECLARE
         }
       }
     },
+    "/network/custom-json-usage": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "custom_json usage over time for one id",
+        "description": "Time-series of network-wide custom_json (op_type 18) usage for a single id (e.g. `follow`, `sm_claim_daily`): op_count, summed payload bytes, and an estimated RC cost per period. RC is a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18 rc_op_stats_daily rate effective on/before each day), as real per-op RC cost is unavailable on this node. Reads the network_custom_json_daily rollup.",
+        "operationId": "haf_stats_endpoints.get_network_custom_json_usage",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "json_id",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "The custom_json id to report (e.g. follow); required (400 if omitted)"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "granularity",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Aggregation granularity"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "custom_json usage time-series for the id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "ISO-8601 date string for the aggregation bucket"
+                      },
+                      "op_count": {
+                        "type": "integer",
+                        "description": "Number of custom_json ops with this id in the period"
+                      },
+                      "op_bytes": {
+                        "type": "integer",
+                        "description": "Summed payload bytes of those ops"
+                      },
+                      "rc_estimate": {
+                        "type": "number",
+                        "description": "Estimated RC consumed by those ops (may exceed 2^63)"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/network/top-custom-json": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Most-used custom_json ids / DApps",
+        "description": "Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked by op_count (or op_bytes / rc_estimate), returning at most limit_count rows. group_by=id ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app collapses an app's ids to the registered DApp; group_by=category rolls up one level further (json_id is null for app, json_id and app_name are null for category). RC is a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day). Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.",
+        "operationId": "haf_stats_endpoints.get_network_top_custom_json",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "limit_count",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 25,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Number of rows to return (1-100)"
+          },
+          {
+            "in": "query",
+            "name": "group_by",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "id",
+              "enum": [
+                "id",
+                "app",
+                "category"
+              ]
+            },
+            "description": "Group by raw custom_json id, resolved DApp app, or category"
+          },
+          {
+            "in": "query",
+            "name": "order_by",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "op_count",
+              "enum": [
+                "op_count",
+                "op_bytes",
+                "rc_estimate"
+              ]
+            },
+            "description": "Column to rank by, descending"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "custom_json usage leaderboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(json_id TEXT, app_name TEXT, category TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "json_id": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Raw custom_json id (null when group_by=app or category)"
+                      },
+                      "app_name": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Resolved DApp name (null when group_by=category)"
+                      },
+                      "category": {
+                        "type": "string",
+                        "description": "DApp category (Uncategorized if unregistered)"
+                      },
+                      "op_count": {
+                        "type": "integer",
+                        "description": "Number of custom_json ops in the window"
+                      },
+                      "op_bytes": {
+                        "type": "integer",
+                        "description": "Summed payload bytes of those ops"
+                      },
+                      "rc_estimate": {
+                        "type": "number",
+                        "description": "Estimated RC consumed by those ops (may exceed 2^63)"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/network/hp-distribution": {
       "get": {
         "tags": [
@@ -3208,6 +3422,374 @@ BEGIN
     FROM per_label
     GROUP BY per_label.period
     ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: network-wide custom_json usage by id (issue #41)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/custom-json-usage:
+  get:
+    tags:
+      - Network
+    summary: custom_json usage over time for one id
+    description: >-
+      Time-series of network-wide custom_json (op_type 18) usage for a single id (e.g. `follow`,
+      `sm_claim_daily`): op_count, summed payload bytes, and an estimated RC cost per period. RC is
+      a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18 rc_op_stats_daily
+      rate effective on/before each day), as real per-op RC cost is unavailable on this node. Reads
+      the network_custom_json_daily rollup.
+    operationId: haf_stats_endpoints.get_network_custom_json_usage
+    parameters:
+      - in: query
+        name: json_id
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: The custom_json id to report (e.g. follow); required (400 if omitted)
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: granularity
+        required: false
+        schema:
+          type: string
+          default: day
+          enum: [day, week, month]
+        description: Aggregation granularity
+    responses:
+      '200':
+        description: custom_json usage time-series for the id
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: ISO-8601 date string for the aggregation bucket
+                  op_count:
+                    type: integer
+                    description: Number of custom_json ops with this id in the period
+                  op_bytes:
+                    type: integer
+                    description: Summed payload bytes of those ops
+                  rc_estimate:
+                    type: number
+                    description: Estimated RC consumed by those ops (may exceed 2^63)
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_custom_json_usage;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_custom_json_usage(
+    "json_id" TEXT = NULL,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "granularity" TEXT = 'day'
+)
+RETURNS TABLE(period TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _json_id TEXT;
+BEGIN
+    -- Tolerate Wax's JSON-encoded string params (e.g. "follow"); see issue #22. json_id is
+    -- required, but declared with a NULL default so an omitted param yields a clean 400 here
+    -- rather than a PostgREST "function not found" 404.
+    _json_id := TRIM('"' FROM COALESCE("json_id", ''));
+    IF _json_id = '' THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'json_id is required',
+            HINT = 'Provide a custom_json id (e.g. follow)';
+    END IF;
+
+    -- No date filter ⇒ full history (chain genesis 2016-03-24), consistent with the sibling
+    -- network endpoints (issue #35).
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- Tolerate Wax's JSON-encoded string params (e.g. "day"); see issue #22.
+    granularity := TRIM('"' FROM granularity);
+    IF granularity IS NULL OR granularity NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid granularity: ' || COALESCE(granularity, '(null)'),
+            HINT = 'Must be one of: day, week, month';
+    END IF;
+
+    RETURN QUERY
+    -- Price each activity day at the op-18 rate effective on/before it (rc_rate always returns
+    -- one row via seeded defaults), then roll up to the requested granularity. byte_rc is NUMERIC,
+    -- so the RC sum is already NUMERIC and is returned as-is (not cast to BIGINT, which could
+    -- overflow on a wide window). GROUP BY the DATE_TRUNC expression (not the `period` alias, which
+    -- collides with the RETURNS TABLE OUT column).
+    SELECT
+        TO_CHAR(DATE_TRUNC(granularity, ncj.day), 'YYYY-MM-DD')             AS period,
+        SUM(ncj.op_count)::BIGINT                                           AS op_count,
+        SUM(ncj.op_bytes)::BIGINT                                           AS op_bytes,
+        SUM(ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc)::NUMERIC AS rc_estimate
+    FROM haf_stats_backend.network_custom_json_daily ncj
+    CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
+    WHERE ncj.json_id = _json_id
+      AND ncj.day BETWEEN _from AND _to
+    GROUP BY DATE_TRUNC(granularity, ncj.day)
+    ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: most-used network custom_json ids / DApps (issue #41)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/network/top-custom-json:
+  get:
+    tags:
+      - Network
+    summary: Most-used custom_json ids / DApps
+    description: >-
+      Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked
+      by op_count (or op_bytes / rc_estimate), returning at most limit_count rows. group_by=id
+      ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app
+      collapses an app's ids to the registered DApp; group_by=category rolls up one level further
+      (json_id is null for app, json_id and app_name are null for category). RC is a calibrated
+      ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day).
+      Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.
+    operationId: haf_stats_endpoints.get_network_top_custom_json
+    parameters:
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: limit_count
+        required: false
+        schema:
+          type: integer
+          default: 25
+          minimum: 1
+          maximum: 100
+        description: Number of rows to return (1-100)
+      - in: query
+        name: group_by
+        required: false
+        schema:
+          type: string
+          default: id
+          enum: [id, app, category]
+        description: Group by raw custom_json id, resolved DApp app, or category
+      - in: query
+        name: order_by
+        required: false
+        schema:
+          type: string
+          default: op_count
+          enum: [op_count, op_bytes, rc_estimate]
+        description: Column to rank by, descending
+    responses:
+      '200':
+        description: custom_json usage leaderboard
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(json_id TEXT, app_name TEXT, category TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)"
+              type: array
+              items:
+                type: object
+                properties:
+                  json_id:
+                    type: string
+                    nullable: true
+                    description: Raw custom_json id (null when group_by=app or category)
+                  app_name:
+                    type: string
+                    nullable: true
+                    description: Resolved DApp name (null when group_by=category)
+                  category:
+                    type: string
+                    description: DApp category (Uncategorized if unregistered)
+                  op_count:
+                    type: integer
+                    description: Number of custom_json ops in the window
+                  op_bytes:
+                    type: integer
+                    description: Summed payload bytes of those ops
+                  rc_estimate:
+                    type: number
+                    description: Estimated RC consumed by those ops (may exceed 2^63)
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_top_custom_json;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_top_custom_json(
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "limit_count" INT = 25,
+    "group_by" TEXT = 'id',
+    "order_by" TEXT = 'op_count'
+)
+RETURNS TABLE(json_id TEXT, app_name TEXT, category TEXT, op_count BIGINT, op_bytes BIGINT, rc_estimate NUMERIC)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+BEGIN
+    -- No date filter ⇒ full history (chain genesis 2016-03-24), consistent with the sibling
+    -- network endpoints (issue #35).
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    IF "limit_count" IS NULL OR "limit_count" < 1 OR "limit_count" > 100 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid limit_count: ' || COALESCE("limit_count"::TEXT, '(null)'),
+            HINT = 'Must be between 1 and 100';
+    END IF;
+
+    -- Tolerate Wax's JSON-encoded string params (e.g. "id"); see issue #22.
+    group_by := TRIM('"' FROM group_by);
+    IF group_by IS NULL OR group_by NOT IN ('id', 'app', 'category') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid group_by: ' || COALESCE(group_by, '(null)'),
+            HINT = 'Must be one of: id, app, category';
+    END IF;
+
+    order_by := TRIM('"' FROM order_by);
+    IF order_by IS NULL OR order_by NOT IN ('op_count', 'op_bytes', 'rc_estimate') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid order_by: ' || COALESCE(order_by, '(null)'),
+            HINT = 'Must be one of: op_count, op_bytes, rc_estimate';
+    END IF;
+
+    -- rc_estimate is returned as NUMERIC (not cast to BIGINT): a no-date, network-wide sum can
+    -- approach the BIGINT ceiling (~9.2e18) as custom_json volume grows, and this is a coarse
+    -- estimate, so precision beyond that is irrelevant. per_id prices each (json_id, day) at the
+    -- op-18 rate effective on/before it (byte_rc is NUMERIC, so the sum is already NUMERIC).
+    IF group_by = 'id' THEN
+        -- Fast path: rank the raw ids, then resolve the DApp name/category for ONLY the returned
+        -- page. resolve_dapp_name/category each probe the registry, so resolving every distinct id
+        -- in a wide window before the LIMIT would be wasted work. json_id is unique, so it is a
+        -- complete tiebreak on its own.
+        RETURN QUERY
+        WITH per_id AS (
+            SELECT
+                ncj.json_id,
+                SUM(ncj.op_count)::BIGINT                                  AS op_count,
+                SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
+                SUM(ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc) AS rc_estimate
+            FROM haf_stats_backend.network_custom_json_daily ncj
+            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
+            WHERE ncj.day BETWEEN _from AND _to
+            GROUP BY ncj.json_id
+        ),
+        top AS (
+            SELECT p.json_id, p.op_count, p.op_bytes, p.rc_estimate
+            FROM per_id p
+            ORDER BY
+                CASE WHEN order_by = 'op_bytes'    THEN p.op_bytes
+                     WHEN order_by = 'rc_estimate' THEN p.rc_estimate
+                     ELSE p.op_count END DESC,
+                p.json_id
+            LIMIT "limit_count"
+        )
+        SELECT
+            t.json_id,
+            haf_stats_app.resolve_dapp_name(t.json_id),
+            haf_stats_app.resolve_dapp_category(t.json_id),
+            t.op_count,
+            t.op_bytes,
+            t.rc_estimate
+        FROM top t
+        ORDER BY
+            CASE WHEN order_by = 'op_bytes'    THEN t.op_bytes
+                 WHEN order_by = 'rc_estimate' THEN t.rc_estimate
+                 ELSE t.op_count END DESC,
+            t.json_id;
+    ELSE
+        -- group_by = 'app' or 'category': the DApp / category IS the group key, so resolution must
+        -- happen before grouping (resolved once per distinct id, since per_id already collapsed the
+        -- days). json_id is null for both dimensions; app_name is null for category.
+        RETURN QUERY
+        WITH per_id AS (
+            SELECT
+                ncj.json_id,
+                SUM(ncj.op_count)::BIGINT                                  AS op_count,
+                SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
+                SUM(ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc) AS rc_estimate
+            FROM haf_stats_backend.network_custom_json_daily ncj
+            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
+            WHERE ncj.day BETWEEN _from AND _to
+            GROUP BY ncj.json_id
+        ),
+        keyed AS (
+            SELECT
+                haf_stats_app.resolve_dapp_name(pid.json_id)     AS app_name,
+                haf_stats_app.resolve_dapp_category(pid.json_id) AS category,
+                pid.op_count,
+                pid.op_bytes,
+                pid.rc_estimate
+            FROM per_id pid
+        ),
+        grouped AS (
+            SELECT
+                CASE WHEN group_by = 'app' THEN k.app_name END AS app_name,
+                k.category                                     AS category,
+                SUM(k.op_count)::BIGINT                         AS op_count,
+                SUM(k.op_bytes)::BIGINT                         AS op_bytes,
+                SUM(k.rc_estimate)                             AS rc_estimate
+            FROM keyed k
+            GROUP BY
+                CASE WHEN group_by = 'app' THEN k.app_name END,
+                k.category
+        )
+        SELECT
+            NULL::TEXT,
+            g.app_name,
+            g.category,
+            g.op_count,
+            g.op_bytes,
+            g.rc_estimate
+        FROM grouped g
+        ORDER BY
+            CASE WHEN order_by = 'op_bytes'    THEN g.op_bytes
+                 WHEN order_by = 'rc_estimate' THEN g.rc_estimate
+                 ELSE g.op_count END DESC,
+            g.category, g.app_name;
+    END IF;
 END;
 $$;
 

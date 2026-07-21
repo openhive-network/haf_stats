@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be one of: op_count, op_bytes, rc_estimate",
+  "message": "invalid order_by: rc_total"
+}

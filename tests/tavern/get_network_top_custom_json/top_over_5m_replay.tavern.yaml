@@ -1,0 +1,36 @@
+---
+test_name: Network top custom_json matches the 5M replay (ranking + category rollup)
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+# Exercises the REAL process_network_custom_json over the 5M replay (the stub gate only seeds the
+# rollup). The first 5M blocks contain exactly three custom_json ids (follow, booyah, reblog);
+# this guards the processor's per-id aggregation, the op_count ranking, and the group_by=category
+# rollup + json_id/app_name null-out, all against real ops. rc_estimate is priced from the single
+# seeded op-18 rate (deterministic; refresh_rc_op_stats is a no-op without plpython3u).
+stages:
+  - name: group_by=id leaderboard over full replay history
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+
+  - name: group_by=category rolls the ids up to their category
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "category"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: top_over_5m_replay_category.pat.json

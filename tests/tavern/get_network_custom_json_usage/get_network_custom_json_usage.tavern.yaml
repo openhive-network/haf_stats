@@ -1,0 +1,66 @@
+---
+test_name: Network custom_json usage prices one id by per-day rate and rolls up per period
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Reads network_custom_json_daily for a single id and prices each activity day at the op-18
+# rc_op_stats_daily rate effective on/before it (#41/#33). ci_setup seeds follow on 2020-06-05
+# (12 ops / 120 bytes, cheap rate 100/10 -> rc 2400) and 2020-06-10 (10 ops / 100 bytes, pricey
+# rate 1000/100 -> rc 20000); sm_claim_daily only on 2020-06-05 (8 ops / 80 bytes -> rc 1600).
+stages:
+  - name: follow at granularity=day returns one row per day priced at that day's rate
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        granularity: "day"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-05"
+          op_count: 12
+          op_bytes: 120
+          rc_estimate: 2400
+        - period: "2020-06-10"
+          op_count: 10
+          op_bytes: 100
+          rc_estimate: 20000
+
+  - name: follow at granularity=month aggregates both days into one period
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-01"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+
+  - name: a Gaming id (sm_claim_daily) returns only its single active day
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "sm_claim_daily"
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-01"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600

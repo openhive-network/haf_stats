@@ -758,6 +758,31 @@ VALUES
 ('2020-06-10', 18, 10, 100)
 ON CONFLICT DO NOTHING;
 
+-- Network custom_json usage stub: network_custom_json_daily (mirrors
+-- db/process_network_custom_json.sql), read by get_network_custom_json_usage and
+-- get_network_top_custom_json. Keyed by the raw custom_json id, priced at read time by the
+-- op-18 rc_op_stats_daily rates seeded above (2020-06-01: 100/10, 2020-06-08: 1000/100).
+-- Rows are chosen so each day's (op_count, op_bytes) total equals the op-18 network_op_daily
+-- row above (06-05 -> 20/200, 06-10 -> 10/100), demonstrating the cross-rollup invariant
+-- SUM(network_custom_json_daily) == network_op_daily[op_type_id=18] per day. Ids resolve via
+-- the seeded registry: follow -> Hivemind Follow/Social Graph, sm_claim_daily -> Splinterlands
+-- (prefix sm_)/Gaming - so group_by=id/app/category all return distinct, deterministic rows.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.network_custom_json_daily (
+    day DATE NOT NULL,
+    json_id TEXT NOT NULL,
+    op_count BIGINT NOT NULL DEFAULT 0,
+    op_bytes BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, json_id)
+);
+GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
+
+INSERT INTO haf_stats_backend.network_custom_json_daily (day, json_id, op_count, op_bytes)
+VALUES
+('2020-06-05', 'follow', 12, 120),
+('2020-06-05', 'sm_claim_daily', 8, 80),
+('2020-06-10', 'follow', 10, 100)
+ON CONFLICT DO NOTHING;
+
 -- (account-operations fixtures for rctester are seeded into hive.account_operations_view
 -- before SET ROLE - that is the global view the endpoint reads.)
 
