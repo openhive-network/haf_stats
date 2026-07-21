@@ -1,0 +1,24 @@
+---
+test_name: Network custom_json usage rejects invalid date format
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject malformed to_date
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        to_date: "not-a-date"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

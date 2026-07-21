@@ -1,0 +1,49 @@
+---
+test_name: Network custom_json usage matches the 5M replay (follow, monthly)
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+# Exercises the REAL process_network_custom_json over the 5M replay - the stub gate only seeds
+# network_custom_json_daily, it never runs the processor, so the one-row-per-op aggregation (and
+# the op_type_id=18 filter) is otherwise unguarded by CI. follow is the dominant custom_json id
+# in the first 5M blocks; op_count/op_bytes come straight from the replayed ops. rc_estimate is
+# priced from the single seeded op-18 rate (refresh_rc_op_stats is a no-op without plpython3u),
+# so it is deterministic too.
+stages:
+  - name: follow monthly usage over 2016-06..2016-09
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        from_date: "2016-06-01"
+        to_date: "2016-09-30"
+        granularity: "month"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+
+  - name: same rows via block-number range (to_filter_date block path)
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        # Block 1942556 is the first block of 2016-06-01 and block 5000000 is 2016-09-15, so this
+        # block range resolves (via to_filter_date) to the SAME [2016-06-01, ...] window as the
+        # date-based stage above. Using genesis (block 1) here would instead depend on there being
+        # no follow activity before 2016-06 for the shared pattern file to stay valid.
+        from_date: "1942556"
+        to_date: "5000000"
+        granularity: "month"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: usage_over_5m_replay.pat.json

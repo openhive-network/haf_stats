@@ -1,0 +1,93 @@
+---
+test_name: Network top custom_json ranks ids and rolls up to app / category
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Reads network_custom_json_daily over the window, prices RC per day at the op-18 rate, and ranks.
+# ci_setup seeds follow (22 ops / 220 bytes / rc 22400 -> Hivemind Follow, Social Graph) and
+# sm_claim_daily (8 ops / 80 bytes / rc 1600 -> Splinterlands via the sm_ prefix, Gaming). With no
+# date params the window defaults to full history (issue #35), covering both 2020-06 fixture days.
+stages:
+  - name: group_by=id (default) ranks raw ids by op_count with resolved app + category
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+    response:
+      status_code: 200
+      json:
+        - json_id: "follow"
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: "sm_claim_daily"
+          app_name: "Splinterlands"
+          category: "Gaming"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600
+
+  - name: group_by=category rolls ids up to their category (json_id + app_name null)
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "category"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: null
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: null
+          category: "Gaming"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600
+
+  - name: group_by=app rolls ids up to the registered DApp (json_id null)
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "app"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: "Splinterlands"
+          category: "Gaming"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600
+
+  - name: limit_count truncates to the single top row
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        limit_count: "1"
+    response:
+      status_code: 200
+      json:
+        - json_id: "follow"
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400

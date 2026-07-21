@@ -1,0 +1,28 @@
+---
+test_name: Network custom_json usage no-date default returns full history (issue #35)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #35: with no from_date the endpoint defaults to chain genesis (full history),
+# consistent with the sibling network endpoints - NOT the last 30 days. ci_setup seeds follow
+# only in 2020-06; a genesis default rolls both days into the single 2020-06 month period,
+# whereas the old NOW()-30d default would return [] (the 2020 rows fall outside the last month).
+stages:
+  - name: GET /rpc/get_network_custom_json_usage for follow with no date params
+    request:
+      url: "{api_url}/rpc/get_network_custom_json_usage"
+      method: GET
+      params:
+        json_id: "follow"
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-06-01"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400

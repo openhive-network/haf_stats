@@ -1,0 +1,37 @@
+---
+test_name: Network top custom_json rejects invalid limit
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject zero limit_count (lower bound)
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        limit_count: "0"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true
+
+  - name: Reject over-max limit_count (upper bound)
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        limit_count: "101"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true
+          pattern_file: invalid_limit_high.pat.json

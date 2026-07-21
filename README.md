@@ -20,6 +20,8 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 | `get_account_rc_footprint` | RC cost by op type and DApp — not in any existing API |
 | `get_account_content_stats` | Per-account posting & engagement (posts/comments/votes/replies) + author rewards — not aggregated in any existing API |
 | `get_network_rc_utilization` | Network-wide RC consumption by category — not in any existing API |
+| `get_network_custom_json_usage` | Per-`id` network custom_json usage time-series (op counts, bytes, estimated RC) — no existing API breaks custom_json out by id |
+| `get_network_top_custom_json` | Leaderboard of most-used custom_json ids / DApps / categories — no existing API ranks custom_json actions |
 | `get_network_supply` | HIVE/HBD/VESTS supply **time-series** — existing TVL endpoint is snapshot-only |
 | `get_network_hp_distribution` | Bucketed HP stake distribution — existing top-holders is a ranked list, not bucketed |
 | `get_network_vote_stats` | Network-wide vote activity time-series (up/down/unvotes, self-votes, unique voters) — no existing API aggregates votes |
@@ -89,6 +91,9 @@ scripts/
                             Rebuilds network content-volume tables and per-account content
                             columns (repairs double-counts / stale post over-reporting)
   rebuild_financial.sh      Rebuilds account financial aggregates after category changes
+  rebuild_network_custom_json.sh
+                            Rebuilds network custom_json usage (network_custom_json_daily)
+                            on already-synced nodes (forward-only otherwise)
 
 docker/
   docker-compose.yml        Production stack (4 services)
@@ -267,6 +272,8 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
+| `GET /rpc/get_network_custom_json_usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
+| `GET /rpc/get_network_top_custom_json` | ✅ Live | process_network_custom_json.sql | Most-used custom_json ids/DApps/categories by op_count, op_bytes, or estimated RC (`group_by=id/app/category`) |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
 | `GET /rpc/get_governance_influence_concentration` | ✅ Live | process_governance_concentration.sql | Current HP concentration snapshot: Gini, top 1%/10% share, holder count, median and mean HP |
