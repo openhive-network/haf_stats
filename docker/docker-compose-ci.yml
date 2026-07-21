@@ -41,6 +41,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_content_stats.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /community_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /hivemind_oracle_fixture.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /mainnet_community_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /community_vs_hivemind.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /seed_data.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_governance_concentration.sql &&
@@ -59,8 +60,11 @@ services:
       - ../db/process_content_stats.sql:/process_content_stats.sql:ro
       - ../tests/community_fixture.sql:/community_fixture.sql:ro
       # A hivemind_app test double, so the oracle's dynamic-SQL path is not dead code
-      # until it first runs on a production node that co-locates hivemind.
+      # until it first runs on a production node that co-locates hivemind. Loaded BEFORE
+      # the mainnet fixture, which mirrors its real nodes into the same stub.
       - ../tests/hivemind_oracle_fixture.sql:/hivemind_oracle_fixture.sql:ro
+      # Real mainnet threads replayed as raw ops, checked against hivemind's own verdict.
+      - ../tests/mainnet_community_fixture.sql:/mainnet_community_fixture.sql:ro
       - ../tests/parity/community_vs_hivemind.sql:/community_vs_hivemind.sql:ro
       - ../db/seed_data.sql:/seed_data.sql:ro
       - ../db/process_account_cohorts.sql:/process_account_cohorts.sql:ro

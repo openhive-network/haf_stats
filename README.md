@@ -371,6 +371,27 @@ content is expected and equals the deleted content. `tests/hivemind_oracle_fixtu
 stubs a `hivemind_app` in the CI stack so the oracle's dynamic-SQL path is exercised there
 rather than lying dormant until it first meets a production node.
 
+### Real-data parity without a mainnet replay
+
+Everything the resolver consumes for a comment — `author`, `permlink`, `parent_author`,
+`parent_permlink` — is returned by `condenser_api.get_content` for any post, and hivemind
+hands over the **answer** in the same response: `category` is the thread root's community,
+propagated to every descendant. So real threads can be replayed as the raw
+`comment_operation`s they came from and checked against hivemind's own verdict, without a
+multi-TB mainnet HAF:
+
+```bash
+python3 tests/tools/gen_mainnet_community_fixture.py > tests/mainnet_community_fixture.sql
+```
+
+The generated fixture is **committed**, so CI needs no network. It currently holds 120 real
+nodes across 8 communities and 2 legacy tag categories, up to **depth 8** — replayed in a
+single batch, so most parent links resolve in-batch, which is the case a plain
+`comment_registry` lookup gets wrong. It asserts our derived community equals hivemind's for
+every node, and self-guards: it fails if a regenerated sample loses its deep replies, its
+community content, or its legacy-category negatives. The same nodes are mirrored into the
+`hivemind_app` stub, so the oracle above runs over real communities and accounts too.
+
 ## DApp Attribution
 
 `custom_json` operations are attributed to DApps via `haf_stats_backend.custom_json_app_registry`, a longest-prefix `starts_with` match from a custom_json id to a DApp name + category. This drives `get_account_dapp_footprint` (full per-DApp/per-category dashboard) and the `group_by=app` mode of `get_account_rc_footprint` (ids that share a DApp roll up under one name; unmatched ids keep their raw id).

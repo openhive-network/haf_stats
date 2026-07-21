@@ -74,13 +74,23 @@ GRANT SELECT ON ALL TABLES IN SCHEMA hivemind_app TO haf_stats_owner;
 -- Assert the oracle's own arithmetic on this fixture, so a future change to it cannot
 -- silently start passing for the wrong reason. Ours minus hivemind must be exactly the two
 -- re-creations (alice/p4 and erin/p5) and nothing else.
+--
+-- SCOPED to this fixture's accounts (47001-47007): tests/mainnet_community_fixture.sql
+-- adds real mainnet nodes to BOTH sides, so a global count here would drift every time
+-- that sample is regenerated. The oracle itself still compares everything.
 DO $$
 DECLARE
     _excess BIGINT;
 BEGIN
     SELECT
-        (SELECT COALESCE(SUM(posts) + SUM(comments), 0) FROM haf_stats_backend.account_community_daily)
-      - (SELECT COUNT(*) FROM hivemind_app.hive_posts WHERE community_id IS NOT NULL AND counter_deleted = 0)
+        (SELECT COALESCE(SUM(acd.posts) + SUM(acd.comments), 0)
+           FROM haf_stats_backend.account_community_daily acd
+          WHERE acd.account_id BETWEEN 47001 AND 47007)
+      - (SELECT COUNT(*)
+           FROM hivemind_app.hive_posts hp
+          WHERE hp.community_id IS NOT NULL
+            AND hp.counter_deleted = 0
+            AND hp.author_id BETWEEN 47001 AND 47007)
     INTO _excess;
 
     IF _excess <> 2 THEN
