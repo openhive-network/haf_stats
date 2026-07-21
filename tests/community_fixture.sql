@@ -31,12 +31,20 @@ VALUES
     (47003, 'bob'),
     (47004, 'carol'),
     (47005, 'dave'),
-    (47006, 'mallory')        -- no role: their updateProps must be ignored
+    (47006, 'mallory'),       -- no role: their updateProps must be ignored
+    (47007, 'erin')           -- delete -> re-create spanning two days in ONE batch
 ON CONFLICT (id) DO NOTHING;
 
+-- Two days inside the SAME 1200-block refresh bucket. The day boundary at 37500030 is
+-- deliberate: a batch that spans it must still credit each creation to its own day.
 INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
 SELECT n, '2019-10-01 12:00:00'::TIMESTAMP, 1000000000, 1000000000
-FROM GENERATE_SERIES(37500000, 37500030) AS n
+FROM GENERATE_SERIES(37500000, 37500029) AS n
+ON CONFLICT (num) DO NOTHING;
+
+INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
+SELECT n, '2019-10-02 12:00:00'::TIMESTAMP, 1000000000, 1000000000
+FROM GENERATE_SERIES(37500030, 37500040) AS n
 ON CONFLICT (num) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -148,17 +156,31 @@ VALUES
         'parent_author', 'alice', 'parent_permlink', 'p1')),
     (hafd.operation_id(37500021, 1), 1, JSONB_BUILD_OBJECT(
         'author', 'dave', 'permlink', 'c5',
-        'parent_author', 'bob', 'parent_permlink', 'p2'))
+        'parent_author', 'bob', 'parent_permlink', 'p2')),
+    -- erin: create -> delete -> re-create where the re-creation lands on the NEXT DAY,
+    -- still inside this one batch. Each creation must be credited to its own day; a stage
+    -- keyed per comment (rather than per comment+day) would move both onto 10-02, pushing
+    -- that day's community count above account_content_daily and corrupting the
+    -- endpoint's subtracted personal-blog bucket.
+    (hafd.operation_id(37500025, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'erin', 'permlink', 'p5',
+        'parent_author', '', 'parent_permlink', 'hive-100001')),
+    (hafd.operation_id(37500026, 1), 17, JSONB_BUILD_OBJECT(
+        'author', 'erin', 'permlink', 'p5')),
+    (hafd.operation_id(37500031, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'erin', 'permlink', 'p5',
+        'parent_author', '', 'parent_permlink', 'hive-100001'))
 ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Run the real processors, in the same order process_block_range does.
 -- ---------------------------------------------------------------------------
 
+-- Batch 2 deliberately spans the 10-01/10-02 day boundary.
 SELECT haf_stats_app.process_community_registry(37500001, 37500019);
 SELECT haf_stats_app.process_content_stats(37500001, 37500019);
-SELECT haf_stats_app.process_community_registry(37500020, 37500030);
-SELECT haf_stats_app.process_content_stats(37500020, 37500030);
+SELECT haf_stats_app.process_community_registry(37500020, 37500040);
+SELECT haf_stats_app.process_content_stats(37500020, 37500040);
 
 -- ---------------------------------------------------------------------------
 -- Assertions — live path
@@ -217,9 +239,10 @@ BEGIN
         RAISE EXCEPTION 'expected no community for the unregistered/legacy/non-community-reply content, got % mapped row(s)', _n;
     END IF;
 
+    -- The 6 thread members above plus erin's re-created p5.
     SELECT COUNT(*) INTO _n FROM haf_stats_backend.comment_registry WHERE community IS NOT NULL;
-    IF _n <> 6 THEN
-        RAISE EXCEPTION 'comment_registry: expected exactly 6 community-mapped comments, got %', _n;
+    IF _n <> 7 THEN
+        RAISE EXCEPTION 'comment_registry: expected exactly 7 community-mapped comments, got %', _n;
     END IF;
 END;
 $$;
@@ -269,6 +292,25 @@ BEGIN
         RAISE EXCEPTION 'dave should have no community activity, got % row(s)', _bad;
     END IF;
 
+    -- erin's two creations of p5 straddle a day boundary inside ONE batch: exactly one
+    -- post on each day, never two on the later one.
+    SELECT COUNT(*) INTO _bad
+    FROM haf_stats_backend.account_community_daily acd
+    JOIN hafd.accounts a ON a.id = acd.account_id
+    WHERE a.name = 'erin'
+      AND acd.community = 'hive-100001'
+      AND acd.posts = 1
+      AND acd.comments = 0
+      AND acd.day IN (DATE '2019-10-01', DATE '2019-10-02');
+    IF _bad <> 2 THEN
+        RAISE EXCEPTION 'erin''s delete/re-create across a day boundary: expected 1 post on EACH of 2019-10-01 and 2019-10-02, got % matching row(s) out of %',
+            _bad,
+            (SELECT COALESCE(STRING_AGG(FORMAT('%s:posts=%s', acd.day, acd.posts), ' '), '(none)')
+             FROM haf_stats_backend.account_community_daily acd
+             JOIN hafd.accounts a ON a.id = acd.account_id
+             WHERE a.name = 'erin');
+    END IF;
+
     -- The endpoint derives "Personal blog / No community" by subtraction, so the
     -- community counts must never exceed the per-account totals.
     SELECT COUNT(*) INTO _bad FROM (
@@ -301,20 +343,20 @@ $$;
 -- tables for another test.
 CREATE TEMP TABLE _live_community AS
     SELECT * FROM haf_stats_backend.account_community_daily
-    WHERE account_id BETWEEN 47001 AND 47006;
+    WHERE account_id BETWEEN 47001 AND 47007;
 CREATE TEMP TABLE _live_mapping AS
     SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-    WHERE author_id BETWEEN 47001 AND 47006;
+    WHERE author_id BETWEEN 47001 AND 47007;
 
-DELETE FROM haf_stats_backend.account_community_daily WHERE account_id BETWEEN 47001 AND 47006;
-DELETE FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47006;
-DELETE FROM haf_stats_backend.network_content_daily WHERE day = DATE '2019-10-01';
-DELETE FROM haf_stats_backend.network_author_daily WHERE day = DATE '2019-10-01';
+DELETE FROM haf_stats_backend.account_community_daily WHERE account_id BETWEEN 47001 AND 47007;
+DELETE FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47007;
+DELETE FROM haf_stats_backend.network_content_daily WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
+DELETE FROM haf_stats_backend.network_author_daily WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
 UPDATE haf_stats_backend.account_content_daily
    SET posts = 0, comments = 0, replies_received = 0
- WHERE day = DATE '2019-10-01';
+ WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
 
-SELECT haf_stats_app.process_content_volume(37500001, 37500030);
+SELECT haf_stats_app.process_content_volume(37500001, 37500040);
 
 DO $$
 DECLARE
@@ -323,7 +365,7 @@ BEGIN
     SELECT COUNT(*) INTO _diff FROM (
         (SELECT account_id, day, community, posts, comments
            FROM haf_stats_backend.account_community_daily
-          WHERE account_id BETWEEN 47001 AND 47006
+          WHERE account_id BETWEEN 47001 AND 47007
          EXCEPT
          SELECT account_id, day, community, posts, comments FROM _live_community)
         UNION ALL
@@ -331,7 +373,7 @@ BEGIN
          EXCEPT
          SELECT account_id, day, community, posts, comments
            FROM haf_stats_backend.account_community_daily
-          WHERE account_id BETWEEN 47001 AND 47006)
+          WHERE account_id BETWEEN 47001 AND 47007)
     ) d;
     IF _diff <> 0 THEN
         RAISE EXCEPTION 'process_content_volume produced % account_community_daily row(s) differing from the live path', _diff;
@@ -339,14 +381,14 @@ BEGIN
 
     SELECT COUNT(*) INTO _diff FROM (
         (SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-          WHERE author_id BETWEEN 47001 AND 47006
+          WHERE author_id BETWEEN 47001 AND 47007
          EXCEPT
          SELECT author_id, permlink, community FROM _live_mapping)
         UNION ALL
         (SELECT author_id, permlink, community FROM _live_mapping
          EXCEPT
          SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-          WHERE author_id BETWEEN 47001 AND 47006)
+          WHERE author_id BETWEEN 47001 AND 47007)
     ) d;
     IF _diff <> 0 THEN
         RAISE EXCEPTION 'process_content_volume produced % comment_registry row(s) differing from the live path (community resolution drifted between the two comment-scan paths)', _diff;
