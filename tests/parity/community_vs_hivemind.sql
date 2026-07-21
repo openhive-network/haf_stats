@@ -1,0 +1,196 @@
+-- =============================================================================
+-- community_vs_hivemind.sql — oracle check for issue #47.
+--
+-- haf_stats derives community membership from raw operations because it must run on any
+-- HAF node, including ones without hivemind. But hivemind IS a HAF app and, where it is
+-- deployed, it lives in the SAME database under hivemind_app — which makes it available
+-- as an ORACLE even though it is deliberately not our data source.
+--
+-- This is the one check that can prove the derivation right on real community data. The
+-- app's own tests cannot: the CI replay is 2016 chain history and communities did not
+-- exist until block 37,500,000, so every automated test of the community path runs on
+-- synthetic fixtures.
+--
+-- READ-ONLY. Safe to run against a production node; it takes no locks and writes nothing.
+--
+-- SKIPS CLEANLY when hivemind_app is absent (the normal case for a standalone haf_stats
+-- deployment and for CI) — same "probe information_schema, no-op if missing" posture as
+-- refresh_hp_distribution_snapshot uses for balance_tracker. All hivemind access is via
+-- EXECUTE so the SQL never has to resolve hivemind_app names on a node without it.
+--
+-- The two sides count DIFFERENT things by design, and that is the whole reason this
+-- reports rather than demanding equality:
+--   * ours     = content CREATIONS, counted at creation (what account_content_daily
+--                counts, which is what makes the endpoint's personal-blog bucket
+--                reconcile with get_account_content_stats)
+--   * hivemind = content that is currently LIVE (counter_deleted = 0)
+-- So ours >= hivemind's is EXPECTED; the excess is deleted content. The reverse is not
+-- explainable and is the actual bug signal, so only that direction fails.
+-- =============================================================================
+\set ON_ERROR_STOP on
+
+DO $$
+DECLARE
+    _have_hivemind BOOLEAN;
+    _sample CONSTANT INT := 200;   -- accounts compared; keeps this cheap on a live node
+    _unknown_communities BIGINT;
+    _missing_registrations BIGINT;
+    _title_mismatches BIGINT;
+    _undercounts BIGINT;
+    _worst TEXT;
+    _compared BIGINT;
+    _excess BIGINT;
+BEGIN
+    SELECT COUNT(*) = 2 INTO _have_hivemind
+    FROM information_schema.tables
+    WHERE table_schema = 'hivemind_app'
+      AND table_name IN ('hive_posts', 'hive_communities');
+
+    IF NOT _have_hivemind THEN
+        RAISE NOTICE 'community oracle: hivemind_app not present on this node - skipping (the raw-op derivation is the source of truth here; this check is only available where hivemind is co-located).';
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily) THEN
+        RAISE NOTICE 'community oracle: account_community_daily is empty - nothing to compare. On a node synced before #47 this is expected until scripts/rebuild_content_volume.sh has been run.';
+        RETURN;
+    END IF;
+
+    -- ---------------------------------------------------------------------
+    -- 1. Every community we attribute content to must be one hivemind knows.
+    --    A community we invented would mean our name pattern or registration gate is
+    --    wrong, and every post we filed under it is misattributed.
+    -- ---------------------------------------------------------------------
+    EXECUTE $q$
+        SELECT COUNT(*)
+        FROM (SELECT DISTINCT community FROM haf_stats_backend.account_community_daily) ours
+        WHERE NOT EXISTS (
+            SELECT 1 FROM hivemind_app.hive_communities hc WHERE hc.name = ours.community
+        )
+    $q$ INTO _unknown_communities;
+
+    -- ---------------------------------------------------------------------
+    -- 2. Registration coverage. A community hivemind registered but we did not means we
+    --    would file its posts under the personal-blog bucket instead — silent
+    --    under-reporting, so this fails rather than warns.
+    -- ---------------------------------------------------------------------
+    EXECUTE $q$
+        SELECT COUNT(*)
+        FROM hivemind_app.hive_communities hc
+        WHERE NOT EXISTS (
+            SELECT 1 FROM haf_stats_backend.community_registry cr WHERE cr.community = hc.name
+        )
+    $q$ INTO _missing_registrations;
+
+    -- ---------------------------------------------------------------------
+    -- 3. Titles. This is the direct test of the owner/admin gate in
+    --    process_community_registry: hivemind applies the same authorization rules, so
+    --    where we recorded a title it must be hivemind's. Communities we have no title
+    --    for (no updateProps seen) are skipped, as is hivemind's '' default.
+    -- ---------------------------------------------------------------------
+    EXECUTE $q$
+        SELECT COUNT(*)
+        FROM haf_stats_backend.community_registry cr
+        JOIN hivemind_app.hive_communities hc ON hc.name = cr.community
+        WHERE cr.title IS NOT NULL
+          AND hc.title <> ''
+          AND cr.title IS DISTINCT FROM hc.title
+    $q$ INTO _title_mismatches;
+
+    -- ---------------------------------------------------------------------
+    -- 4. Per-(account, community) counts over a sample of the most active community
+    --    authors. Ours counts creations and hivemind counts live content, so ours must
+    --    be >= hivemind's; an UNDERCOUNT means we failed to attribute content hivemind
+    --    did — a broken root resolution, or a registration we missed.
+    -- ---------------------------------------------------------------------
+    EXECUTE FORMAT($q$
+        WITH
+        -- Sampled from BOTH sides, not just ours. A sample drawn only from accounts we
+        -- already credited with community activity cannot see the worst failure mode there
+        -- is: an account whose content we attributed to NOTHING while hivemind attributed
+        -- it to a community (a wholesale root-resolution or registration miss). Those
+        -- accounts have no row on our side at all, so only hivemind can nominate them.
+        sample_accounts AS (
+            SELECT name FROM (
+                SELECT a.name
+                FROM haf_stats_backend.account_community_daily acd
+                JOIN hafd.accounts a ON a.id = acd.account_id
+                GROUP BY a.name
+                ORDER BY SUM(acd.posts) + SUM(acd.comments) DESC
+                LIMIT %1$s
+            ) ours_top
+            UNION
+            SELECT name FROM (
+                SELECT ha.name
+                FROM hivemind_app.hive_posts hp
+                JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
+                WHERE hp.community_id IS NOT NULL
+                  AND hp.counter_deleted = 0
+                GROUP BY ha.name
+                ORDER BY COUNT(*) DESC
+                LIMIT %1$s
+            ) theirs_top
+        ),
+        ours AS (
+            SELECT a.name, acd.community,
+                   SUM(acd.posts)::BIGINT    AS posts,
+                   SUM(acd.comments)::BIGINT AS comments
+            FROM haf_stats_backend.account_community_daily acd
+            JOIN hafd.accounts a ON a.id = acd.account_id
+            WHERE a.name IN (SELECT name FROM sample_accounts)
+            GROUP BY a.name, acd.community
+        ),
+        theirs AS (
+            SELECT ha.name, hc.name AS community,
+                   COUNT(*) FILTER (WHERE hp.depth = 0)::BIGINT AS posts,
+                   COUNT(*) FILTER (WHERE hp.depth > 0)::BIGINT AS comments
+            FROM hivemind_app.hive_posts hp
+            JOIN hivemind_app.hive_communities hc ON hc.id = hp.community_id
+            JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
+            WHERE hp.counter_deleted = 0
+              AND ha.name IN (SELECT name FROM sample_accounts)
+            GROUP BY ha.name, hc.name
+        ),
+        joined AS (
+            SELECT COALESCE(o.name, t.name)           AS name,
+                   COALESCE(o.community, t.community) AS community,
+                   COALESCE(o.posts, 0)     AS our_posts,
+                   COALESCE(o.comments, 0)  AS our_comments,
+                   COALESCE(t.posts, 0)     AS hm_posts,
+                   COALESCE(t.comments, 0)  AS hm_comments
+            FROM ours o
+            FULL JOIN theirs t ON t.name = o.name AND t.community = o.community
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE our_posts < hm_posts OR our_comments < hm_comments),
+            COUNT(*),
+            COALESCE(SUM((our_posts - hm_posts) + (our_comments - hm_comments)), 0),
+            COALESCE((
+                SELECT FORMAT('%%s/%%s ours=%%s+%%s hivemind=%%s+%%s',
+                              name, community, our_posts, our_comments, hm_posts, hm_comments)
+                FROM joined
+                WHERE our_posts < hm_posts OR our_comments < hm_comments
+                ORDER BY (hm_posts - our_posts) + (hm_comments - our_comments) DESC
+                LIMIT 1
+            ), '(none)')
+        FROM joined
+    $q$, _sample) INTO _undercounts, _compared, _excess, _worst;
+
+    -- FULL JOIN + COALESCE(...,0) is what makes the missing-account case visible: an
+    -- account hivemind credits and we do not appears with our_posts = 0, which is an
+    -- undercount rather than a silently absent row.
+
+    IF _unknown_communities <> 0 OR _missing_registrations <> 0
+       OR _title_mismatches <> 0 OR _undercounts <> 0 THEN
+        RAISE EXCEPTION E'community derivation disagrees with hivemind:\n'
+            '  % community name(s) we attribute content to are unknown to hivemind\n'
+            '  % hivemind community/ies we never registered (their posts fall to the personal-blog bucket)\n'
+            '  % title(s) differ from hivemind (check the owner/admin gate in process_community_registry)\n'
+            '  % (account, community) pair(s) where we counted FEWER than hivemind - worst: %',
+            _unknown_communities, _missing_registrations, _title_mismatches, _undercounts, _worst;
+    END IF;
+
+    RAISE NOTICE 'community oracle OK: % (account, community) pairs across the top % community authors match hivemind, with +% creations we count that hivemind no longer shows live (deleted content, as expected); community names, registrations and titles all agree.',
+        _compared, _sample, _excess;
+END;
+$$;

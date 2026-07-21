@@ -15,6 +15,12 @@
 #        rebuilds account_content_daily's content columns correctly (SUM==network)
 #        while preserving its vote columns. Rolls back, so the data tables are
 #        left untouched.
+#   4. tests/parity/community_vs_hivemind.sql (issue #47)
+#        Where hivemind is co-located (hivemind_app in the same DB), compares our
+#        raw-op community derivation against hivemind's own community_id. This is
+#        the only check that can exercise the community path on real data — the CI
+#        replay is 2016 history, which predates communities entirely. Read-only,
+#        and skips cleanly when hivemind_app is absent.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -92,7 +98,10 @@ else
   fi
 fi
 
-echo "===== Guard 3/3: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/4: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency) ====="
+echo "===== Guard 4/4: community derivation vs hivemind (issue #47) ====="
+run_sql_file tests/parity/community_vs_hivemind.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle) ====="

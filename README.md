@@ -348,6 +348,29 @@ assignment when the author is muted there or lacks posting rights in a journal/c
 community; and only owner/admin roles are modelled, since nothing but title authorization
 needs them.
 
+### Checking the derivation against hivemind
+
+Hivemind is itself a HAF app, so on a node that runs it, `hivemind_app` sits in the **same
+database**. haf_stats deliberately does not read it — a hard dependency would break this
+app's standalone architecture, and hivemind counts currently-**live** content while we
+count **creations**, which is exactly what makes the endpoint's buckets sum to
+`get_account_content_stats`. But where it is present it makes an excellent **oracle**, and
+it is the only way to exercise the community path on real data (the CI replay is 2016
+history, which predates communities entirely):
+
+```bash
+psql -f tests/parity/community_vs_hivemind.sql      # also runs via run_verification.sh
+```
+
+Read-only, takes no locks, and skips cleanly when `hivemind_app` is absent. It fails on
+communities we attribute content to that hivemind does not know, communities hivemind
+registered that we missed, titles that disagree (the direct test of the owner/admin gate),
+and any (account, community) pair where we counted **fewer** than hivemind. It only reports
+— never fails on — the reverse, since our creations-based excess over hivemind's live
+content is expected and equals the deleted content. `tests/hivemind_oracle_fixture.sql`
+stubs a `hivemind_app` in the CI stack so the oracle's dynamic-SQL path is exercised there
+rather than lying dormant until it first meets a production node.
+
 ## DApp Attribution
 
 `custom_json` operations are attributed to DApps via `haf_stats_backend.custom_json_app_registry`, a longest-prefix `starts_with` match from a custom_json id to a DApp name + category. This drives `get_account_dapp_footprint` (full per-DApp/per-category dashboard) and the `group_by=app` mode of `get_account_rc_footprint` (ids that share a DApp roll up under one name; unmatched ids keep their raw id).
