@@ -297,7 +297,7 @@ def main():
     w("$$;")
     w("")
 
-    print("\n".join(out))
+    print("\n".join(out).rstrip("\n"))
 
 
 if __name__ == "__main__":
