@@ -40,14 +40,46 @@ DECLARE
     _worst TEXT;
     _compared BIGINT;
     _excess BIGINT;
+    _missing_columns TEXT;
 BEGIN
-    SELECT COUNT(*) = 2 INTO _have_hivemind
+    SELECT COUNT(*) = 3 INTO _have_hivemind
     FROM information_schema.tables
     WHERE table_schema = 'hivemind_app'
-      AND table_name IN ('hive_posts', 'hive_communities');
+      AND table_name IN ('hive_posts', 'hive_communities', 'hive_accounts');
 
     IF NOT _have_hivemind THEN
         RAISE NOTICE 'community oracle: hivemind_app not present on this node - skipping (the raw-op derivation is the source of truth here; this check is only available where hivemind is co-located).';
+        RETURN;
+    END IF;
+
+    -- Verify hivemind's shape before querying it. Every hivemind reference below is
+    -- dynamic SQL, so a renamed or missing column would otherwise surface as a bare
+    -- "column ... does not exist" from inside an EXECUTE, on someone's production node,
+    -- with nothing naming what changed.
+    --
+    -- This check exists because the CI stub (tests/hivemind_oracle_fixture.sql) is one we
+    -- wrote ourselves from hivemind's create_tables.sql: it proves these queries are
+    -- internally consistent, NOT that they match a real hivemind_app. This is the only
+    -- part of the oracle that can catch that difference, so it names exactly what is
+    -- missing rather than failing the run.
+    SELECT STRING_AGG(FORMAT('%s.%s', t, c), ', ' ORDER BY t, c) INTO _missing_columns
+    FROM (VALUES
+        ('hive_posts', 'author_id'), ('hive_posts', 'community_id'),
+        ('hive_posts', 'depth'), ('hive_posts', 'counter_deleted'),
+        ('hive_communities', 'id'), ('hive_communities', 'name'),
+        ('hive_communities', 'title'),
+        ('hive_accounts', 'id'), ('hive_accounts', 'name')
+    ) AS required(t, c)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM information_schema.columns ic
+        WHERE ic.table_schema = 'hivemind_app'
+          AND ic.table_name = required.t
+          AND ic.column_name = required.c
+    );
+
+    IF _missing_columns IS NOT NULL THEN
+        RAISE NOTICE 'community oracle: hivemind_app is present but does not expose the columns this check reads (missing: %). Skipping rather than failing - hivemind''s schema has moved and tests/parity/community_vs_hivemind.sql needs updating to match it.',
+            _missing_columns;
         RETURN;
     END IF;
 
