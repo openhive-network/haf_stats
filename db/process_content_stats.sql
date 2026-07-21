@@ -59,6 +59,47 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.comment_registry (
 
 GRANT SELECT ON haf_stats_backend.comment_registry TO haf_stats_user;
 
+-- Community dimension for get_account_community_activity (issue #47, backend for
+-- block_explorer_ui#761). NULL = not in a community (personal blog, or one of the
+-- legacy tag categories that predate communities entirely).
+--
+-- This has to be materialized per comment because a raw comment_operation names only
+-- its IMMEDIATE parent, while a reply belongs to its ROOT post's community — verified
+-- on chain: @blocktrades/ticn6q sits at depth 6 with parent_permlink
+-- 're-blocktrades-2026717t192753168z', yet carries category hive-139531, the root's
+-- community. Every comment therefore stores its resolved community so the next reply
+-- down inherits it in one lookup instead of a walk to the root.
+--
+-- It lives here rather than in a parallel table because this table's ~277 bytes/row
+-- (951,749 rows / 264 MB over the first 5M blocks) is almost entirely the (author_id,
+-- permlink) key and its index; a second table keyed the same way would pay all of that
+-- again, where a column pays only the value bytes.
+ALTER TABLE haf_stats_backend.comment_registry
+ADD COLUMN IF NOT EXISTS community TEXT;
+
+-- Per-account, per-community created content (get_account_community_activity).
+-- Shape mirrors account_custom_json_daily (process_custom_json.sql): additive upsert,
+-- exactly-once per block range, same as every other daily counter here.
+--
+-- Only community-affiliated activity is stored. The endpoint derives the
+-- "Personal blog / No community" bucket by subtracting these from
+-- account_content_daily, so the buckets reconcile with get_account_content_stats by
+-- construction (both count creations off the same `classified` rows) and this table
+-- stays empty for all pre-2019 history.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_community_daily (
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    community TEXT NOT NULL,
+    posts INT NOT NULL DEFAULT 0,
+    comments INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, day, community)
+);
+
+CREATE INDEX IF NOT EXISTS idx_acomd_account_day
+ON haf_stats_backend.account_community_daily (account_id, day DESC);
+
+GRANT SELECT ON haf_stats_backend.account_community_daily TO haf_stats_user;
+
 -- Per-post engagement state for get_network_engagement.
 -- One row per unique root post (parent_author = ''). post_day is the FIRST
 -- creation date: re-creation after a delete is ON CONFLICT DO NOTHING, so the
@@ -244,6 +285,142 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_period_counts (
 );
 
 GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
+
+-- ---------------------------------------------------------------------------
+-- Community resolution (issue #47) — shared by BOTH comment-scan paths
+--
+-- The hard part is not the pattern match, it is that the whole batch is written by a
+-- single statement whose data-modifying CTEs all see the pre-statement snapshot (see
+-- the comment on insert_posts below). A reply looking its parent up in comment_registry
+-- therefore MISSES every parent created in the same batch — and with 1,000,000-block
+-- rebuild batches (rebuild_content_volume.sh) a post and its whole reply tree normally
+-- land together, so that is the common case, not an edge case.
+--
+-- So the comment scan stages this batch's created comments (one row per live key) into
+-- a per-transaction temp table, and a SECOND statement resolves communities over
+-- stage + registry with a recursive walk that follows in-batch parent chains to any
+-- depth. Staging off `classified` rather than re-scanning the op stream is what keeps
+-- this to zero extra scans AND reuses the create-vs-edit decision instead of
+-- re-deriving it — re-deriving it independently is exactly how issues #13/#42/#45
+-- happened.
+--
+-- Temp + ON COMMIT DROP is the same per-batch scratch pattern as
+-- haf_stats_batch_authored_ops (process_block_range.sql): no WAL, no bloat, and the
+-- rebuild script's one-transaction-per-batch loop cleans up after itself.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_community_batch_stage()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Probe first rather than leaning on IF NOT EXISTS: the table survives for the life of
+    -- the transaction, so a multi-batch rebuild loop would otherwise emit one "already
+    -- exists, skipping" NOTICE per batch. Same guard shape as prepare_batch_authored_ops.
+    IF TO_REGCLASS('pg_temp.haf_stats_community_batch_stage') IS NOT NULL THEN
+        TRUNCATE haf_stats_community_batch_stage;
+        RETURN;
+    END IF;
+
+    CREATE TEMP TABLE haf_stats_community_batch_stage (
+        author_id INT NOT NULL,
+        permlink TEXT NOT NULL,
+        -- NULL for a root post; otherwise the parent comment's key.
+        parent_author_id INT,
+        parent_permlink TEXT,
+        is_root BOOLEAN NOT NULL,
+        block_num INT NOT NULL,
+        day DATE NOT NULL,
+        -- The community this row addresses DIRECTLY: set only for a root post whose
+        -- category is a registered community name. Replies inherit instead.
+        own_community TEXT,
+        -- How many create events this batch held for the key (>1 only for a
+        -- delete -> re-create inside one batch), so the rollup counts creations the
+        -- same way account_content_daily does.
+        create_count INT NOT NULL,
+        PRIMARY KEY (author_id, permlink)
+    ) ON COMMIT DROP;
+END;
+$$;
+
+-- Resolve every staged comment's community, then write both outputs. Runs as its own
+-- statement AFTER the comment scan, so this batch's rows are already in
+-- comment_registry (with community still NULL) — which is precisely why the base case
+-- below must exclude parents that are in the stage, or an in-batch parent would resolve
+-- to its own not-yet-computed NULL.
+CREATE OR REPLACE FUNCTION haf_stats_app.resolve_community_batch()
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+
+WITH RECURSIVE resolved AS (
+    -- Base 1: root posts staged in this batch. own_community is already the answer
+    -- (NULL when the category is not a registered community).
+    SELECT s.author_id, s.permlink, s.own_community AS community
+    FROM haf_stats_community_batch_stage s
+    WHERE s.is_root
+    UNION ALL
+    -- Base 2: replies whose parent was created in an EARLIER batch, so its community is
+    -- already stored. The NOT EXISTS is load-bearing: a parent created in THIS batch is
+    -- also present in comment_registry by now, but with a NULL community, so matching it
+    -- here would resolve the whole subtree to NULL.
+    SELECT s.author_id, s.permlink, r.community
+    FROM haf_stats_community_batch_stage s
+    JOIN haf_stats_backend.comment_registry r
+        ON r.author_id = s.parent_author_id AND r.permlink = s.parent_permlink
+    WHERE NOT s.is_root
+      AND NOT EXISTS (
+          SELECT 1
+          FROM haf_stats_community_batch_stage p
+          WHERE p.author_id = s.parent_author_id AND p.permlink = s.parent_permlink
+      )
+    UNION ALL
+    -- Recursive: replies whose parent is itself staged, walked one depth level per
+    -- iteration. Terminates because the parent relation is a forest (each comment has
+    -- exactly one parent, always created before it) and the stage is unique per key.
+    SELECT s.author_id, s.permlink, res.community
+    FROM resolved res
+    JOIN haf_stats_community_batch_stage s
+        ON s.parent_author_id = res.author_id AND s.parent_permlink = res.permlink
+    WHERE NOT s.is_root
+),
+-- A reply whose parent is in neither the stage nor the registry (e.g. its parent was
+-- deleted) yields no row at all, which correctly reads as "no community".
+in_community AS (
+    SELECT author_id, permlink, community
+    FROM resolved
+    WHERE community IS NOT NULL
+),
+mark_registry AS (
+    UPDATE haf_stats_backend.comment_registry r
+    SET community = ic.community
+    FROM in_community ic
+    WHERE r.author_id = ic.author_id
+      AND r.permlink = ic.permlink
+      AND r.community IS DISTINCT FROM ic.community
+)
+INSERT INTO haf_stats_backend.account_community_daily AS acd
+    (account_id, day, community, posts, comments)
+SELECT
+    s.author_id,
+    s.day,
+    ic.community,
+    -- COALESCE: a group with only replies (or only posts) makes the other FILTERed SUM
+    -- NULL, and both columns are NOT NULL.
+    COALESCE(SUM(s.create_count) FILTER (WHERE s.is_root), 0)::INT,
+    COALESCE(SUM(s.create_count) FILTER (WHERE NOT s.is_root), 0)::INT
+FROM in_community ic
+JOIN haf_stats_community_batch_stage s
+    ON s.author_id = ic.author_id AND s.permlink = ic.permlink
+GROUP BY s.author_id, s.day, ic.community
+ON CONFLICT (account_id, day, community) DO UPDATE SET
+    posts    = acd.posts    + EXCLUDED.posts,
+    comments = acd.comments + EXCLUDED.comments;
+
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Rollup refresh (feeds get_network_vote_stats)
@@ -666,13 +843,16 @@ IF _first_block <= _high_water THEN
         USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
 END IF;
 
--- Comment ops: ONE scan, five outputs.
+PERFORM haf_stats_app.prepare_community_batch_stage();
+
+-- Comment ops: ONE scan, six outputs.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
 --   network_content_daily — daily created posts/comments + edits counters
 --   network_author_daily  — distinct (day, author) set for exact unique authors
 --   account_content_daily — author's posts/comments + parent's replies_received
 --   post_engagement       — per-post vote/reply counts (insert new root posts +
 --                           update reply_count for direct replies)
+--   community stage       — this batch's created comments, for resolve_community_batch()
 WITH comment_ops AS MATERIALIZED (
     SELECT
         ov.id,
@@ -680,7 +860,8 @@ WITH comment_ops AS MATERIALIZED (
         ov.body_value ->> 'permlink'        AS permlink,
         ov.body_value ->> 'parent_author'   AS parent_author,
         ov.body_value ->> 'parent_permlink' AS parent_permlink,
-        b.created_at::DATE                  AS day
+        b.created_at::DATE                  AS day,
+        ov.block_num
     FROM hive.operations_view ov
     JOIN hafd.blocks b ON b.num = ov.block_num
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
@@ -722,19 +903,21 @@ effective_deletes AS (
 -- or it has no previous event in the batch and no registry row from earlier ones.
 seq AS (
     SELECT
+        id,
         author,
         permlink,
         parent_author,
         parent_permlink,
         day,
+        block_num,
         is_comment,
         LAG(is_comment) OVER w  AS prev_is_comment,
         LEAD(id) OVER w IS NULL AS is_last
     FROM (
-        SELECT id, author, permlink, parent_author, parent_permlink, day, TRUE AS is_comment
+        SELECT id, author, permlink, parent_author, parent_permlink, day, block_num, TRUE AS is_comment
         FROM comment_ops
         UNION ALL
-        SELECT id, author, permlink, NULL, NULL, NULL, FALSE
+        SELECT id, author, permlink, NULL, NULL, NULL, NULL, FALSE
         FROM effective_deletes
     ) e
     WINDOW w AS (PARTITION BY author, permlink ORDER BY id)
@@ -753,9 +936,11 @@ comment_keys AS (
 ),
 classified AS (
     SELECT
+        s.id,
         s.parent_author,
         s.parent_permlink,
         s.day,
+        s.block_num,
         s.is_comment,
         s.is_last,
         k.author_id,
@@ -763,6 +948,48 @@ classified AS (
         s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create
     FROM seq s
     JOIN comment_keys k ON k.author = s.author AND k.permlink = s.permlink
+),
+-- Stage this batch's created comments for resolve_community_batch() (issue #47).
+-- Deduped to the LAST create per key: a delete -> re-create inside one batch fires
+-- is_create twice for the same key, and the stage's PK would reject the second (a
+-- statement may not touch the same new row twice, so ON CONFLICT cannot rescue it).
+-- create_count carries the dropped duplicates so the rollup still counts creations the
+-- way account_content_daily does; the surviving row's day is the last create's, which
+-- differs only if a re-creation crossed midnight inside one batch (~155 re-creations
+-- total over the first 5M blocks, so this is noise).
+-- The block_num floor makes the whole community feature free for pre-2019 ranges: no
+-- community can exist before hivemind's start block, so nothing is staged at all.
+community_stage AS (
+    INSERT INTO haf_stats_community_batch_stage
+        (author_id, permlink, parent_author_id, parent_permlink,
+         is_root, block_num, day, own_community, create_count)
+    SELECT DISTINCT ON (c.author_id, c.permlink)
+        c.author_id,
+        c.permlink,
+        pa.id,
+        c.parent_permlink,
+        c.parent_author = '',
+        c.block_num,
+        c.day,
+        -- A root post's category is its community only if that community was already
+        -- registered at this block: a category can look like a community name years
+        -- before (or without) the account ever existing.
+        CASE
+            WHEN c.parent_author = ''
+             AND EXISTS (
+                 SELECT 1
+                 FROM haf_stats_backend.community_registry cr
+                 WHERE cr.community = c.parent_permlink
+                   AND cr.created_block <= c.block_num
+             )
+                THEN c.parent_permlink
+        END,
+        COUNT(*) OVER (PARTITION BY c.author_id, c.permlink)::INT
+    FROM classified c
+    LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
+    WHERE c.is_create
+      AND c.block_num >= haf_stats_app.community_start_block()
+    ORDER BY c.author_id, c.permlink, c.id DESC
 ),
 -- End-of-batch registry state: a comment is present iff its last event is a
 -- comment op. The add/remove key sets are disjoint (is_last is unique per key),
@@ -904,6 +1131,11 @@ ON CONFLICT (account_id, day) DO UPDATE SET
     posts            = account_content_daily.posts            + EXCLUDED.posts,
     comments         = account_content_daily.comments         + EXCLUDED.comments,
     replies_received = account_content_daily.replies_received + EXCLUDED.replies_received;
+
+-- Resolve the staged batch's communities and write comment_registry.community +
+-- account_community_daily. Must be a SEPARATE statement: the community of a reply whose
+-- parent was created just above is only knowable once that INSERT is visible.
+PERFORM haf_stats_app.resolve_community_batch();
 
 -- Vote ops: ONE scan, four outputs.
 --   account_content_daily — votes_cast (voter) + votes_received (author)
@@ -1119,6 +1351,8 @@ SET jit = OFF
 AS $$
 BEGIN
 
+PERFORM haf_stats_app.prepare_community_batch_stage();
+
 WITH comment_ops AS MATERIALIZED (
     SELECT
         ov.id,
@@ -1126,7 +1360,8 @@ WITH comment_ops AS MATERIALIZED (
         ov.body_value ->> 'permlink'        AS permlink,
         ov.body_value ->> 'parent_author'   AS parent_author,
         ov.body_value ->> 'parent_permlink' AS parent_permlink,
-        b.created_at::DATE                  AS day
+        b.created_at::DATE                  AS day,
+        ov.block_num
     FROM hive.operations_view ov
     JOIN hafd.blocks b ON b.num = ov.block_num
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
@@ -1168,19 +1403,21 @@ effective_deletes AS (
 -- or it has no previous event in the batch and no registry row from earlier ones.
 seq AS (
     SELECT
+        id,
         author,
         permlink,
         parent_author,
         parent_permlink,
         day,
+        block_num,
         is_comment,
         LAG(is_comment) OVER w  AS prev_is_comment,
         LEAD(id) OVER w IS NULL AS is_last
     FROM (
-        SELECT id, author, permlink, parent_author, parent_permlink, day, TRUE AS is_comment
+        SELECT id, author, permlink, parent_author, parent_permlink, day, block_num, TRUE AS is_comment
         FROM comment_ops
         UNION ALL
-        SELECT id, author, permlink, NULL, NULL, NULL, FALSE
+        SELECT id, author, permlink, NULL, NULL, NULL, NULL, FALSE
         FROM effective_deletes
     ) e
     WINDOW w AS (PARTITION BY author, permlink ORDER BY id)
@@ -1199,9 +1436,11 @@ comment_keys AS (
 ),
 classified AS (
     SELECT
+        s.id,
         s.parent_author,
         s.parent_permlink,
         s.day,
+        s.block_num,
         s.is_comment,
         s.is_last,
         k.author_id,
@@ -1209,6 +1448,48 @@ classified AS (
         s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create
     FROM seq s
     JOIN comment_keys k ON k.author = s.author AND k.permlink = s.permlink
+),
+-- Stage this batch's created comments for resolve_community_batch() (issue #47).
+-- Deduped to the LAST create per key: a delete -> re-create inside one batch fires
+-- is_create twice for the same key, and the stage's PK would reject the second (a
+-- statement may not touch the same new row twice, so ON CONFLICT cannot rescue it).
+-- create_count carries the dropped duplicates so the rollup still counts creations the
+-- way account_content_daily does; the surviving row's day is the last create's, which
+-- differs only if a re-creation crossed midnight inside one batch (~155 re-creations
+-- total over the first 5M blocks, so this is noise).
+-- The block_num floor makes the whole community feature free for pre-2019 ranges: no
+-- community can exist before hivemind's start block, so nothing is staged at all.
+community_stage AS (
+    INSERT INTO haf_stats_community_batch_stage
+        (author_id, permlink, parent_author_id, parent_permlink,
+         is_root, block_num, day, own_community, create_count)
+    SELECT DISTINCT ON (c.author_id, c.permlink)
+        c.author_id,
+        c.permlink,
+        pa.id,
+        c.parent_permlink,
+        c.parent_author = '',
+        c.block_num,
+        c.day,
+        -- A root post's category is its community only if that community was already
+        -- registered at this block: a category can look like a community name years
+        -- before (or without) the account ever existing.
+        CASE
+            WHEN c.parent_author = ''
+             AND EXISTS (
+                 SELECT 1
+                 FROM haf_stats_backend.community_registry cr
+                 WHERE cr.community = c.parent_permlink
+                   AND cr.created_block <= c.block_num
+             )
+                THEN c.parent_permlink
+        END,
+        COUNT(*) OVER (PARTITION BY c.author_id, c.permlink)::INT
+    FROM classified c
+    LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
+    WHERE c.is_create
+      AND c.block_num >= haf_stats_app.community_start_block()
+    ORDER BY c.author_id, c.permlink, c.id DESC
 ),
 -- End-of-batch registry state: a comment is present iff its last event is a
 -- comment op. The add/remove key sets are disjoint (is_last is unique per key),
@@ -1302,6 +1583,12 @@ SELECT DISTINCT day, author_id
 FROM classified
 WHERE is_create
 ON CONFLICT (day, author_id) DO NOTHING;
+
+-- Same second statement as the live path, for the same reason: an in-batch parent's
+-- community is only knowable once the statement above has landed. Keeping this in a
+-- shared function (rather than a copy) is what stops the two paths drifting on the one
+-- piece of logic the rebuild consistency test cannot express as a column comparison.
+PERFORM haf_stats_app.resolve_community_batch();
 
 END;
 $$;

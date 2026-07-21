@@ -40,6 +40,9 @@ run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
+# Before process_content_stats: that file's community staging calls
+# haf_stats_app.is_community_name / community_start_block, defined here.
+run_sql_file "${SCRIPT_DIR}/../db/process_community_registry.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
@@ -127,6 +130,20 @@ psql_cmd -c "
         'haf_stats_backend.active_users_account_monthly',
         'haf_stats_backend.active_users_daily',
         'SELECT haf_stats_app.refresh_active_users_account_monthly(''2016-03-24'')');
+    -- Community names/titles (#47). Safe to self-heal where the content rollups are not:
+    -- process_community_registry is idempotent (registration is ON CONFLICT DO NOTHING,
+    -- roles/titles are last-writer-wins over an ordered replay), so re-running a range
+    -- cannot double anything. It also returns immediately for ranges below hivemind's
+    -- community start block, which makes this a no-op on a node still replaying 2016.
+    -- The per-comment community mapping is deliberately NOT self-healed here: it rides on
+    -- comment_registry, whose create-vs-edit replay only works from genesis. Repairing it
+    -- is scripts/rebuild_content_volume.sh (see README).
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.community_registry',
+        'hafd.blocks',
+        'SELECT haf_stats_app.process_community_registry(
+             haf_stats_app.community_start_block(),
+             (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
     RESET ROLE;
 "
 

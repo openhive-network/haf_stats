@@ -1,0 +1,89 @@
+---
+test_name: Account community activity groups posts and comments by community
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Values come from tests/community_fixture.sql, which runs the REAL processors over
+# synthetic ops at/after block 37,500,000 (the 2016 replay the pattern tests use has no
+# communities at all, so this path is unreachable there).
+#
+# alice: p1 into hive-100001, p4 created twice (delete -> re-create), and one reply c3
+# three levels down the same thread -> 3 posts / 1 comment, all in the community. Her
+# edit of p1 is not a creation and is not counted, so there is nothing left over and no
+# personal-blog bucket appears.
+#
+# bob: c1 (reply below alice's root, created in the SAME batch as that root — the
+# in-batch parent case) plus c4 (a later batch, resolved from comment_registry) = 2
+# community comments; his p2 addresses hive-200002, which was never registered, so it
+# falls to the personal-blog bucket.
+#
+# The community title is "Test Community": the owner's original title was overwritten by
+# alice after the owner granted her admin, while mallory's unauthorized rename was dropped.
+stages:
+  - name: GET /rpc/get_account_community_activity for alice (all community, no leftover)
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "alice"
+        from_date: "2019-10-01"
+        to_date: "2019-10-01"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
+          post_count: 3
+          comment_count: 1
+
+  - name: GET /rpc/get_account_community_activity for bob (community + personal blog)
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "bob"
+        from_date: "2019-10-01"
+        to_date: "2019-10-01"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
+          post_count: 0
+          comment_count: 2
+        # The unregistered-community post lands here, and the bucket always sorts last.
+        - community: null
+          title: "Personal blog / No community"
+          post_count: 1
+          comment_count: 0
+
+  - name: GET /rpc/get_account_community_activity for dave (no community activity at all)
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "dave"
+        from_date: "2019-10-01"
+        to_date: "2019-10-01"
+    response:
+      status_code: 200
+      json:
+        # dave only replied below bob's non-community root, so his reply inherits nothing.
+        - community: null
+          title: "Personal blog / No community"
+          post_count: 0
+          comment_count: 1
+
+  - name: GET /rpc/get_account_community_activity for an unknown account returns empty
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "no-such-account-47"
+    response:
+      status_code: 200
+      json: []

@@ -1,0 +1,34 @@
+---
+test_name: Account community activity accepts block numbers for from_date/to_date
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Issue #23: from/to accept a block number as well as a date. The fixture's blocks
+# 37500000-37500030 all carry 2019-10-01, so the block-number form must return exactly
+# what the date form returns. Marked synthetic rather than patterntest because the
+# community path only exists in the stub fixture — the real 2016 replay has no
+# communities and no such blocks.
+stages:
+  - name: GET /rpc/get_account_community_activity for bob via block numbers
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "bob"
+        from_date: "37500000"
+        to_date: "37500030"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
+          post_count: 0
+          comment_count: 2
+        - community: null
+          title: "Personal blog / No community"
+          post_count: 1
+          comment_count: 0

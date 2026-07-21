@@ -16,6 +16,12 @@
 # truncating account_content_daily, because votes_cast/votes_received come from a separate
 # vote scan this path does not reproduce and are already correct — they are preserved.
 #
+# It is ALSO the only way to populate the community dimension (#47:
+# comment_registry.community + account_community_daily) on a deployment that synced before
+# that feature existed. Those cannot be self-healed at install time like the other rollups,
+# because a comment's community is inherited from its root post and the create-vs-edit
+# classification that identifies creations only replays correctly from genesis.
+#
 # This calls haf_stats_app.process_content_volume — a narrow path that writes only the
 # content tables — NOT process_content_stats, whose shared scan also feeds votes/engagement
 # and would re-double those if re-run.
@@ -71,7 +77,8 @@ on_exit() {
     if (( rc != 0 && rebuild_started == 1 )); then
         echo "" >&2
         echo "!!! CONTENT-VOLUME REBUILD DID NOT COMPLETE (exit ${rc}) !!!" >&2
-        echo "network_content_daily / network_author_daily / comment_registry are now in a" >&2
+        echo "network_content_daily / network_author_daily / comment_registry /" >&2
+        echo "account_community_daily are now in a" >&2
         echo "PARTIAL state: they describe only the blocks replayed so far, while" >&2
         echo "app_status.last_processed_block still points at the tip. account_content_daily's" >&2
         echo "content columns (posts/comments/replies_received) are likewise zeroed-then-" >&2
@@ -175,11 +182,19 @@ log "The haf_stats processor must remain stopped until this command finishes."
 # upsert is additive, so re-running after an interrupted rebuild would otherwise add correct
 # counts on top of a partial rebuild (the #42 double-count class). Re-zeroing every run makes
 # restart safe, exactly as re-TRUNCATE does for the network tables.
+#
+# account_community_daily (#47) IS truncated: unlike account_content_daily it has no
+# columns from another scan to preserve, and process_content_volume rebuilds it in full.
+# Its per-comment source of truth is comment_registry.community, which the TRUNCATE above
+# clears with the rest of the registry, so the two are re-derived together — this is also
+# the only way to backfill the community dimension onto an already-synced deployment,
+# since the create-vs-edit classification only replays correctly from genesis.
 rebuild_started=1
 psql_cmd -c "
     TRUNCATE TABLE haf_stats_backend.network_content_daily;
     TRUNCATE TABLE haf_stats_backend.network_author_daily;
     TRUNCATE TABLE haf_stats_backend.comment_registry;
+    TRUNCATE TABLE haf_stats_backend.account_community_daily;
     UPDATE haf_stats_backend.account_content_daily
        SET posts = 0, comments = 0, replies_received = 0;
 "
