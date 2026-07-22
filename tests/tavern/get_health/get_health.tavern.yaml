@@ -17,3 +17,6 @@ stages:
         - status: "ok"
           last_processed_block: !anything
           version: !anything
+          # The replay stops at block 5,000,000, well below the community start block, so
+          # there is no community data to be missing and this must report ready (#47).
+          community_data_ready: true

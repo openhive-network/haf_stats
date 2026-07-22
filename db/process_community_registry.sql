@@ -21,11 +21,18 @@ SET ROLE haf_stats_owner;
 -- track exactly that much of its role state machine (community_role) and nothing more:
 -- mod/member/muted roles are not modelled, since only title authorization needs roles.
 --
--- What this does NOT model (documented in the endpoint description too): hivemind also
--- refuses to place a post in a community when the author is muted there or lacks posting
--- rights in a journal/council community (Community.is_post_valid + its SQL
--- process_community_post). We attribute a post to the community it addressed, so our
--- counts can slightly exceed hivemind's for restricted communities.
+-- What this does NOT model (documented in the endpoint description too). Note muting is
+-- NOT on this list: hivemind's process_community_post resolves community_id from the
+-- category (root) or the parent (reply) BEFORE any role check, and a muted or
+-- non-member author only sets hive_posts.is_muted — community_id is never cleared. So a
+-- muted author's post still belongs to the community, for hivemind and for us alike.
+-- The divergences that DO exist:
+--   * setRole: we model only owner/admin, since nothing but title authorization needs
+--     roles. mod/member/muted grants are ignored, so a community whose title was set by
+--     a role we do not track is not reproduced.
+--   * type_id is derived from the community NAME at registration. Hivemind seeds it the
+--     same way but lets updateProps change it later; we do not follow that.
+--   * Registration is gated on the account_created block being >= the start block.
 
 -- ---------------------------------------------------------------------------
 -- Shared constants
@@ -126,6 +133,7 @@ DECLARE
     _signer TEXT;
     _signer_role SMALLINT;
     _target_role SMALLINT;
+    _current_target_role SMALLINT;
     _title TEXT;
 BEGIN
 
@@ -185,7 +193,11 @@ LOOP
     _action := _json ->> 0;
     _payload := _json -> 1;
 
-    IF _action NOT IN ('setRole', 'updateProps')
+    -- IS NULL is required, not decorative: `->> 0` yields SQL NULL for a JSON null, and
+    -- "NULL NOT IN (...)" evaluates to NULL, not TRUE — so a payload like [null, {...}]
+    -- would slip past this gate and fall through to the setRole branch below.
+    IF _action IS NULL
+       OR _action NOT IN ('setRole', 'updateProps')
        OR _payload IS NULL OR JSONB_TYPEOF(_payload) <> 'object' THEN
         CONTINUE;
     END IF;
@@ -219,11 +231,21 @@ LOOP
 
     IF _action = 'updateProps' THEN
         -- updateProps carries the whole props object; a call that omits title leaves the
-        -- stored one alone. Hivemind caps the title at 32 characters.
-        _title := NULLIF(TRIM(_payload -> 'props' ->> 'title'), '');
-        IF _title IS NOT NULL THEN
+        -- stored one alone.
+        --
+        -- Hivemind REJECTS a bad title rather than repairing it: CommunityOp._read_props
+        -- calls read_key_str(props, 'title', 20), which asserts the value is a string, is
+        -- already stripped, is at most 20 characters, and does not start with '@' or '#';
+        -- any AssertionError aborts validate() and the WHOLE op is discarded. Truncating
+        -- to fit (as an earlier revision did) would store titles no Hive frontend shows,
+        -- and would make the hivemind oracle's title check fire and blame the role gate.
+        _title := _payload -> 'props' ->> 'title';
+        IF _title IS NOT NULL
+           AND _title = BTRIM(_title)
+           AND LENGTH(_title) BETWEEN 1 AND 20
+           AND LEFT(_title, 1) NOT IN ('@', '#') THEN
             UPDATE haf_stats_backend.community_registry
-            SET title = LEFT(_title, 32)
+            SET title = _title
             WHERE community = _community;
         END IF;
         CONTINUE;
@@ -242,6 +264,20 @@ LOOP
 
     -- Hivemind forbids granting a role at or above your own.
     IF _target_role IS NULL OR _target_role >= _signer_role THEN
+        CONTINUE;
+    END IF;
+
+    -- ...and it also protects the TARGET: community_set_role refuses when the target
+    -- already outranks (or matches) the signer, and the owner can never be demoted.
+    -- Without this an admin could strip the owner's role and then, with the owner gone,
+    -- the community's title becomes editable by whoever remains.
+    SELECT COALESCE(MAX(r.role), 0)::SMALLINT INTO _current_target_role
+    FROM haf_stats_backend.community_role r
+    JOIN hafd.accounts a ON a.id = r.account_id
+    WHERE r.community = _community AND a.name = _payload ->> 'account';
+
+    IF _current_target_role = 8
+       OR (_current_target_role >= _signer_role AND (_payload ->> 'account') IS DISTINCT FROM _signer) THEN
         CONTINUE;
     END IF;
 

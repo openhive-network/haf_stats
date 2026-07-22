@@ -130,22 +130,47 @@ psql_cmd -c "
         'haf_stats_backend.active_users_account_monthly',
         'haf_stats_backend.active_users_daily',
         'SELECT haf_stats_app.refresh_active_users_account_monthly(''2016-03-24'')');
-    -- Community names/titles (#47). Safe to self-heal where the content rollups are not:
-    -- process_community_registry is idempotent (registration is ON CONFLICT DO NOTHING,
-    -- roles/titles are last-writer-wins over an ordered replay), so re-running a range
-    -- cannot double anything. It also returns immediately for ranges below hivemind's
-    -- community start block, which makes this a no-op on a node still replaying 2016.
-    -- The per-comment community mapping is deliberately NOT self-healed here: it rides on
-    -- comment_registry, whose create-vs-edit replay only works from genesis. Repairing it
-    -- is scripts/rebuild_content_volume.sh (see README).
-    SELECT haf_stats_app.backfill_rollup_if_empty(
-        'haf_stats_backend.community_registry',
-        'hafd.blocks',
-        'SELECT haf_stats_app.process_community_registry(
-             haf_stats_app.community_start_block(),
-             (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
     RESET ROLE;
 "
+
+# 8a. Community registry backfill (#47).
+#
+#     Deliberately NOT a backfill_rollup_if_empty call in the block above: everything there
+#     runs in ONE implicit transaction (psql executes a multi-statement -c string as a single
+#     transaction), and this backfill is a row-at-a-time replay over every community
+#     custom_json from block 37.5M to the tip. On an already-synced mainnet node that is tens
+#     of millions of blocks inside a transaction that also holds the other ten refreshes — a
+#     multi-hour install that cannot be interrupted without losing all of it, and that pins
+#     the xmin horizon against vacuum for the duration.
+#
+#     Batched, one transaction per chunk, so it commits as it goes and a failure costs one
+#     chunk. Safe to re-run: process_community_registry is idempotent (registration is
+#     ON CONFLICT DO NOTHING; roles/titles are last-writer-wins over an ordered replay), and
+#     it returns immediately for ranges below the community start block, so a node still
+#     replaying 2016 skips it entirely.
+#
+#     The per-comment community mapping is NOT self-healed here: it rides on comment_registry,
+#     whose create-vs-edit replay only works from genesis. Repairing it is
+#     scripts/rebuild_content_volume.sh (see README).
+: "${COMMUNITY_BACKFILL_BATCH:=1000000}"
+community_rows="$(psql_cmd -Atc "SELECT COUNT(*) FROM haf_stats_backend.community_registry")"
+community_start="$(psql_cmd -Atc "SELECT haf_stats_app.community_start_block()")"
+app_head="$(psql_cmd -Atc "SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status")"
+
+if [[ "${community_rows}" =~ ^[0-9]+$ && "${community_start}" =~ ^[0-9]+$ && "${app_head}" =~ ^[0-9]+$ ]] \
+   && (( community_rows == 0 )) && (( app_head >= community_start )); then
+    log "Backfilling the community registry over blocks ${community_start}-${app_head} in batches of ${COMMUNITY_BACKFILL_BATCH} (one transaction each)..."
+    cb_first="${community_start}"
+    while (( cb_first <= app_head )); do
+        cb_last=$(( cb_first + COMMUNITY_BACKFILL_BATCH - 1 ))
+        if (( cb_last > app_head )); then
+            cb_last="${app_head}"
+        fi
+        psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.process_community_registry(${cb_first}, ${cb_last});"
+        cb_first=$(( cb_last + 1 ))
+    done
+    log "Community registry backfill complete."
+fi
 
 # 8b. Compute the current-state snapshots once so their endpoints are populated immediately on
 #     an already-synced node. No-op-safe: each writes nothing without a readable balance

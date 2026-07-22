@@ -251,7 +251,7 @@ DECLARE
           "Other"
         ],
         "summary": "Health check",
-        "description": "Returns service health and last processed block number.",
+        "description": "Returns service health, last processed block number, and whether the per-account community dimension has been backfilled.",
         "operationId": "haf_stats_endpoints.get_health",
         "responses": {
           "200": {
@@ -259,7 +259,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT)",
+                  "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)",
                   "type": "object",
                   "properties": {
                     "status": {
@@ -271,6 +271,10 @@ DECLARE
                     },
                     "version": {
                       "type": "string"
+                    },
+                    "community_data_ready": {
+                      "type": "boolean",
+                      "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
                     }
                   }
                 }
@@ -495,7 +499,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account activity by community",
-        "description": "Per-account created posts and comments grouped by Hive community, for the Community Activity treemap. A post belongs to the community named by its category; a reply belongs to its ROOT post's community, not its immediate parent's, matching how the chain propagates a thread's category to every descendant. Content outside any community \u2014 personal-blog posts and the legacy tag categories that predate communities \u2014 is returned as a single bucket with a null community, so the buckets always sum to get_account_content_stats' posts and comments for the same range. Counts are creations only (edits excluded), counted at creation time, exactly as get_account_content_stats counts them. Fidelity note: a post is attributed to the community it was ADDRESSED to. Hivemind additionally withholds the assignment when the author is muted in that community or lacks posting rights in a journal/council community, so these figures can slightly exceed Hivemind's for restricted communities. Communities are recognised from block 37,500,000 onward (Hivemind's community start block); nothing before it can belong to a community.",
+        "description": "Per-account created posts and comments grouped by Hive community, for the Community Activity treemap. A post belongs to the community named by its category; a reply belongs to its ROOT post's community, not its immediate parent's, matching how the chain propagates a thread's category to every descendant. Content outside any community \u2014 personal-blog posts and the legacy tag categories that predate communities \u2014 is returned as a single bucket with a null community, so the buckets always sum to get_account_content_stats' posts and comments for the same range. Counts are creations only (edits excluded), counted at creation time, exactly as get_account_content_stats counts them \u2014 so content later deleted is still counted, which is the main reason a figure here can exceed what Hivemind currently shows as live. Muting does NOT change community membership: Hivemind assigns community_id before any role check and only flags the post as muted, so muted and non-member posts belong to the community for both Hivemind and this endpoint. Communities are recognised from block 37,500,000 onward (Hivemind's community start block); nothing before it can belong to a community. Community titles follow Hivemind's rules for owner/admin updateProps; roles below admin are not modelled, so a title set through a role this app does not track is not reflected.",
         "operationId": "haf_stats_endpoints.get_account_community_activity",
         "parameters": [
           {
@@ -1842,7 +1846,9 @@ $$;
     tags:
       - Other
     summary: Health check
-    description: Returns service health and last processed block number.
+    description: >-
+      Returns service health, last processed block number, and whether the per-account
+      community dimension has been backfilled.
     operationId: haf_stats_endpoints.get_health
     responses:
       '200':
@@ -1850,7 +1856,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT)"
+              x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)"
               type: object
               properties:
                 status:
@@ -1860,18 +1866,36 @@ $$;
                   type: integer
                 version:
                   type: string
+                community_data_ready:
+                  type: boolean
+                  description: >-
+                    False when this node has processed past the community start block
+                    (37,500,000) but holds no per-account community rows — i.e. it synced
+                    before the community feature and scripts/rebuild_content_volume.sh has
+                    not been run yet. get_account_community_activity still answers on such
+                    a node, but reports everything under the personal-blog bucket.
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_health()
-RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT)
+RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
         'ok'::TEXT                                               AS status,
         s.last_processed_block,
-        (SELECT git_hash FROM haf_stats_app.app_version LIMIT 1) AS version
+        (SELECT git_hash FROM haf_stats_app.app_version LIMIT 1) AS version,
+        -- The community dimension is the one thing install cannot self-heal (it rides on
+        -- comment_registry's genesis create-vs-edit replay), so a node upgraded from an
+        -- older version answers get_account_community_activity with everything in the
+        -- personal-blog bucket until the rebuild runs — indistinguishable, to a caller,
+        -- from an account that genuinely never posted in a community. Surface it here so
+        -- that state is detectable rather than silently plausible.
+        (
+            s.last_processed_block < haf_stats_app.community_start_block()
+            OR EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily)
+        ) AS community_data_ready
     FROM haf_stats_app.app_status s
     LIMIT 1;
 $$;
@@ -2185,13 +2209,15 @@ $$;
       communities — is returned as a single bucket with a null community, so the buckets
       always sum to get_account_content_stats' posts and comments for the same range.
       Counts are creations only (edits excluded), counted at creation time, exactly as
-      get_account_content_stats counts them.
-      Fidelity note: a post is attributed to the community it was ADDRESSED to. Hivemind
-      additionally withholds the assignment when the author is muted in that community or
-      lacks posting rights in a journal/council community, so these figures can slightly
-      exceed Hivemind's for restricted communities. Communities are recognised from block
-      37,500,000 onward (Hivemind's community start block); nothing before it can belong
-      to a community.
+      get_account_content_stats counts them — so content later deleted is still counted,
+      which is the main reason a figure here can exceed what Hivemind currently shows as
+      live. Muting does NOT change community membership: Hivemind assigns community_id
+      before any role check and only flags the post as muted, so muted and non-member
+      posts belong to the community for both Hivemind and this endpoint.
+      Communities are recognised from block 37,500,000 onward (Hivemind's community start
+      block); nothing before it can belong to a community. Community titles follow
+      Hivemind's rules for owner/admin updateProps; roles below admin are not modelled, so
+      a title set through a role this app does not track is not reflected.
     operationId: haf_stats_endpoints.get_account_community_activity
     parameters:
       - in: path

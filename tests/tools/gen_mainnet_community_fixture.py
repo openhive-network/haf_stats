@@ -296,6 +296,13 @@ def main():
     w("END;")
     w("$$;")
     w("")
+    w("-- Record a processed head, so the stub looks like a node that actually replayed these")
+    w("-- blocks. tests/parity/community_vs_hivemind.sql bounds hivemind's side by this head;")
+    w("-- without it the oracle cannot tell 'behind' from 'wrong' and skips.")
+    w("UPDATE haf_stats_app.app_status")
+    w(f"SET last_processed_block = {last_block}")
+    w(f"WHERE last_processed_block < {last_block};")
+    w("")
 
     print("\n".join(out).rstrip("\n"))
 

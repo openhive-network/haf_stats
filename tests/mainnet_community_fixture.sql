@@ -857,3 +857,10 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
 END;
 $$;
+
+-- Record a processed head, so the stub looks like a node that actually replayed these
+-- blocks. tests/parity/community_vs_hivemind.sql bounds hivemind's side by this head;
+-- without it the oracle cannot tell 'behind' from 'wrong' and skips.
+UPDATE haf_stats_app.app_status
+SET last_processed_block = 37502528
+WHERE last_processed_block < 37502528;

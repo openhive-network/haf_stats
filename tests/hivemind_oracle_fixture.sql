@@ -19,8 +19,15 @@ CREATE TABLE IF NOT EXISTS hivemind_app.hive_communities (
     id INTEGER PRIMARY KEY,
     type_id SMALLINT NOT NULL,
     name VARCHAR(16) NOT NULL,
-    title VARCHAR(32) NOT NULL DEFAULT ''
+    title VARCHAR(32) NOT NULL DEFAULT '',
+    -- The oracle bounds hivemind's side by our processed head, so it needs to know when
+    -- each community was registered; default keeps the generated mainnet fixture's
+    -- column-less INSERT working.
+    created_at TIMESTAMP NOT NULL DEFAULT '2019-01-01 00:00:00'
 );
+
+ALTER TABLE hivemind_app.hive_communities
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT '2019-01-01 00:00:00';
 
 CREATE TABLE IF NOT EXISTS hivemind_app.hive_accounts (
     id INTEGER PRIMARY KEY,

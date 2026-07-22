@@ -41,6 +41,9 @@ DECLARE
     _compared BIGINT;
     _excess BIGINT;
     _missing_columns TEXT;
+    _our_head_block INT;
+    _our_head_time TIMESTAMP;
+    _hm_in_range BIGINT;
 BEGIN
     SELECT COUNT(*) = 3 INTO _have_hivemind
     FROM information_schema.tables
@@ -66,8 +69,9 @@ BEGIN
     FROM (VALUES
         ('hive_posts', 'author_id'), ('hive_posts', 'community_id'),
         ('hive_posts', 'depth'), ('hive_posts', 'counter_deleted'),
+        ('hive_posts', 'created_at'),
         ('hive_communities', 'id'), ('hive_communities', 'name'),
-        ('hive_communities', 'title'),
+        ('hive_communities', 'title'), ('hive_communities', 'created_at'),
         ('hive_accounts', 'id'), ('hive_accounts', 'name')
     ) AS required(t, c)
     WHERE NOT EXISTS (
@@ -83,8 +87,39 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Everything below must compare LIKE FOR LIKE. hivemind on a production node is synced
+    -- to the chain tip, while haf_stats only knows what it has processed - and they are
+    -- routinely far apart: during the initial sync, and for the whole catch-up after the
+    -- documented repair (stop processor -> rebuild -> restart, which the README budgets at
+    -- 2-4h). Comparing our processed head against hivemind's tip would report every active
+    -- author as an undercount and fail the verification run for a node that is simply behind.
+    SELECT COALESCE(MIN(last_processed_block), 0) INTO _our_head_block
+    FROM haf_stats_app.app_status;
+
+    SELECT created_at INTO _our_head_time FROM hafd.blocks WHERE num = _our_head_block;
+
+    IF _our_head_time IS NULL THEN
+        RAISE NOTICE 'community oracle: cannot resolve the timestamp of our processed head block % - skipping.', _our_head_block;
+        RETURN;
+    END IF;
+
+    -- Only skip on an empty table when hivemind ALSO has nothing in our processed range.
+    -- Skipping unconditionally would turn a total derivation failure - we produced nothing
+    -- while hivemind has plenty - into a silent pass, which is exactly the case this check
+    -- exists to catch.
     IF NOT EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily) THEN
-        RAISE NOTICE 'community oracle: account_community_daily is empty - nothing to compare. On a node synced before #47 this is expected until scripts/rebuild_content_volume.sh has been run.';
+        EXECUTE FORMAT($q$
+            SELECT COUNT(*) FROM hivemind_app.hive_posts hp
+            WHERE hp.community_id IS NOT NULL AND hp.counter_deleted = 0
+              AND hp.created_at <= %L
+        $q$, _our_head_time) INTO _hm_in_range;
+
+        IF _hm_in_range > 0 THEN
+            RAISE EXCEPTION 'community oracle: account_community_daily is EMPTY, but hivemind has % community post(s)/comment(s) at or before our processed head (block %, %). Either the community dimension was never backfilled (run scripts/rebuild_content_volume.sh) or the derivation is producing nothing at all.',
+                _hm_in_range, _our_head_block, _our_head_time;
+        END IF;
+
+        RAISE NOTICE 'community oracle: neither side has community content at or before our processed head (block %) - nothing to compare.', _our_head_block;
         RETURN;
     END IF;
 
@@ -106,13 +141,14 @@ BEGIN
     --    would file its posts under the personal-blog bucket instead — silent
     --    under-reporting, so this fails rather than warns.
     -- ---------------------------------------------------------------------
-    EXECUTE $q$
+    EXECUTE FORMAT($q$
         SELECT COUNT(*)
         FROM hivemind_app.hive_communities hc
-        WHERE NOT EXISTS (
+        WHERE hc.created_at <= %L
+          AND NOT EXISTS (
             SELECT 1 FROM haf_stats_backend.community_registry cr WHERE cr.community = hc.name
         )
-    $q$ INTO _missing_registrations;
+    $q$, _our_head_time) INTO _missing_registrations;
 
     -- ---------------------------------------------------------------------
     -- 3. Titles. This is the direct test of the owner/admin gate in
@@ -158,6 +194,7 @@ BEGIN
                 JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
                 WHERE hp.community_id IS NOT NULL
                   AND hp.counter_deleted = 0
+                  AND hp.created_at <= %2$L
                 GROUP BY ha.name
                 ORDER BY COUNT(*) DESC
                 LIMIT %1$s
@@ -180,6 +217,7 @@ BEGIN
             JOIN hivemind_app.hive_communities hc ON hc.id = hp.community_id
             JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
             WHERE hp.counter_deleted = 0
+              AND hp.created_at <= %2$L
               AND ha.name IN (SELECT name FROM sample_accounts)
             GROUP BY ha.name, hc.name
         ),
@@ -206,7 +244,7 @@ BEGIN
                 LIMIT 1
             ), '(none)')
         FROM joined
-    $q$, _sample) INTO _undercounts, _compared, _excess, _worst;
+    $q$, _sample, _our_head_time) INTO _undercounts, _compared, _excess, _worst;
 
     -- FULL JOIN + COALESCE(...,0) is what makes the missing-account case visible: an
     -- account hivemind credits and we do not appears with our_posts = 0, which is an

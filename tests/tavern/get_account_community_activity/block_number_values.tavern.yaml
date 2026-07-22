@@ -7,28 +7,60 @@ marks:
 includes:
   - !include ../common.yaml
 
-# Issue #23: from/to accept a block number as well as a date. The fixture's blocks
-# 37500000-37500030 all carry 2019-10-01, so the block-number form must return exactly
-# what the date form returns. Marked synthetic rather than patterntest because the
-# community path only exists in the stub fixture — the real 2016 replay has no
-# communities and no such blocks.
+# Issue #23: from/to accept a block number as well as a date.
+#
+# Queried against erin, whose two creations of p5 straddle the 10-01/10-02 day boundary at
+# block 37500030, so the two ranges below MUST return different counts. An earlier version
+# of this test asked for a range covering the whole fixture and would have passed even if
+# the endpoint ignored from_date/to_date entirely — it asserted nothing about the range.
+#
+# Marked synthetic rather than patterntest because the community path only exists in the
+# stub fixture: the real 2016 replay has no communities and no such blocks.
 stages:
-  - name: GET /rpc/get_account_community_activity for bob via block numbers
+  - name: Blocks 37500000-37500029 cover only 2019-10-01 — the first creation
     request:
       url: "{api_url}/rpc/get_account_community_activity"
       method: GET
       params:
-        account: "bob"
+        account: "erin"
         from_date: "37500000"
-        to_date: "37500030"
+        to_date: "37500029"
     response:
       status_code: 200
       json:
         - community: "hive-100001"
           title: "Test Community"
-          post_count: 0
-          comment_count: 2
-        - community: null
-          title: "Personal blog / No community"
+          post_count: 1
+          comment_count: 0
+
+  - name: Extending to block 37500040 pulls in 2019-10-02 — both creations
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "erin"
+        from_date: "37500000"
+        to_date: "37500040"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
+          post_count: 2
+          comment_count: 0
+
+  - name: The equivalent DATE range must agree with the block range
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "erin"
+        from_date: "2019-10-01"
+        to_date: "2019-10-01"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
           post_count: 1
           comment_count: 0

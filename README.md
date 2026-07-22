@@ -268,18 +268,30 @@ This is also the **only** way to populate the community dimension
 `get_account_community_activity`) on a deployment that synced before that feature landed.
 It cannot be self-healed at install time like the other rollups: a comment's community is
 inherited from its root post, and the create-vs-edit classification that identifies
-creations only replays correctly from genesis. Run
-`./scripts/rebuild_community_registry.sh` **first** (so the classification sees a complete
-registry), then `./scripts/rebuild_content_volume.sh`.
+creations only replays correctly from genesis.
+
+The community classification needs a populated `community_registry`, which
+**`install_app.sh` has already backfilled** (step 8a, batched). So the upgrade recipe is:
+
+```bash
+./scripts/install_app.sh                     # backfills community_registry, batched
+psql -c "SELECT COUNT(*) FROM haf_stats_backend.community_registry"   # expect > 0
+./scripts/rebuild_content_volume.sh          # derives the per-comment community dimension
+```
+
+Only run `rebuild_community_registry.sh` if that count is 0, or if the registry must be
+re-derived after a rules change — running it routinely adds a second full-history sweep for
+nothing.
 
 ### Rebuilding the community registry
 
-`community_registry` / `community_role` hold community names, types and titles. Unlike the
-content rebuilds, `process_community_registry` is **idempotent** — registration is
-`ON CONFLICT DO NOTHING` and roles/titles are last-writer-wins over an ordered replay — so
-`install_app.sh` self-heals the table automatically whenever it is empty and the app has
-already processed blocks. Use the script only when it is *not* empty and must be
-re-derived, e.g. after changing the authorization rules:
+`community_registry` / `community_role` hold community names and titles, plus the type
+implied by the community's name at registration (hivemind's later `updateProps` type
+changes are not tracked). Unlike the content rebuilds, `process_community_registry` is
+**idempotent** — registration is `ON CONFLICT DO NOTHING` and roles/titles are
+last-writer-wins over an ordered replay — which is why `install_app.sh` can backfill it
+directly. Use the script only when the table is *not* empty and must be re-derived, e.g.
+after changing the authorization rules:
 
 ```bash
 ./scripts/rebuild_community_registry.sh
@@ -342,11 +354,21 @@ from hivemind's `hive/indexer/community.py` and verified against live chain data
   signer holding owner/admin — otherwise any account could rename any community. Roles are
   tracked from `setRole` ops, seeded with the community account itself as owner.
 
-Two deliberate divergences from hivemind, documented on the endpoint too: a post is
-attributed to the community it **addressed**, whereas hivemind additionally withholds the
-assignment when the author is muted there or lacks posting rights in a journal/council
-community; and only owner/admin roles are modelled, since nothing but title authorization
-needs them.
+Known divergences from hivemind, documented on the endpoint too:
+
+* **Deleted content.** We count creations; hivemind's `hive_posts` holds what is currently
+  live. This is the main reason a figure here can exceed hivemind's, and it is deliberate —
+  it is what makes the buckets reconcile with `get_account_content_stats`.
+* **Roles below admin.** Only owner/admin are modelled, since nothing but title
+  authorization needs them, so a title set through a `mod` grant is not reproduced.
+* **`type_id`** is derived from the community name at registration. Hivemind seeds it the
+  same way but lets a later `updateProps` change it; we do not follow that.
+
+Muting is explicitly **not** a divergence, contrary to a claim in an earlier revision of
+this document: hivemind's `process_community_post` resolves `community_id` from the
+category (root) or the parent (reply) *before* any role check, and a muted or non-member
+author only sets `hive_posts.is_muted`. The post still belongs to the community on both
+sides.
 
 ### Checking the derivation against hivemind
 

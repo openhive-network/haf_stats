@@ -32,7 +32,10 @@ VALUES
     (47004, 'carol'),
     (47005, 'dave'),
     (47006, 'mallory'),       -- no role: their updateProps must be ignored
-    (47007, 'erin')           -- delete -> re-create spanning two days in ONE batch
+    (47007, 'erin'),          -- delete -> re-create spanning two days in ONE batch
+    (47008, 'frank'),         -- root -> delete -> re-create as a REPLY, same day
+    (47009, 'grace'),         -- community post re-created OUTSIDE any community
+    (47010, 'heidi')          -- replies under grace's post, before and after the switch
 ON CONFLICT (id) DO NOTHING;
 
 -- Two days inside the SAME 1200-block refresh bucket. The day boundary at 37500030 is
@@ -44,7 +47,7 @@ ON CONFLICT (num) DO NOTHING;
 
 INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
 SELECT n, '2019-10-02 12:00:00'::TIMESTAMP, 1000000000, 1000000000
-FROM GENERATE_SERIES(37500030, 37500040) AS n
+FROM GENERATE_SERIES(37500030, 37500045) AS n
 ON CONFLICT (num) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -169,7 +172,45 @@ VALUES
         'author', 'erin', 'permlink', 'p5')),
     (hafd.operation_id(37500031, 1), 1, JSONB_BUILD_OBJECT(
         'author', 'erin', 'permlink', 'p5',
-        'parent_author', '', 'parent_permlink', 'hive-100001'))
+        'parent_author', '', 'parent_permlink', 'hive-100001')),
+
+    -- frank: ROOT -> delete -> re-create as a REPLY, same key, same day, one batch.
+    -- This shape exists on mainnet (testing001/'testing6', blocks 4010780/4011017/4011023,
+    -- all 2016-08-12). Staging per (key, day) collapsed both creations onto the LAST one,
+    -- crediting 2 comments and 0 posts while account_content_daily correctly recorded
+    -- 1 post + 1 comment - the endpoint's buckets then stopped summing to
+    -- get_account_content_stats, and the GREATEST() clamp hid it.
+    (hafd.operation_id(37500032, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'frank', 'permlink', 'f1',
+        'parent_author', '', 'parent_permlink', 'hive-100001')),
+    (hafd.operation_id(37500033, 1), 17, JSONB_BUILD_OBJECT(
+        'author', 'frank', 'permlink', 'f1')),
+    (hafd.operation_id(37500034, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'frank', 'permlink', 'f1',
+        'parent_author', 'alice', 'parent_permlink', 'p1')),
+
+    -- grace: a community post, a reply beneath it, then the post is deleted and re-created
+    -- OUTSIDE any community, then another reply. Three separate bugs meet here:
+    --   * the stored community must be CLEARED on the re-creation, or every later reply
+    --     inherits a community the post no longer belongs to;
+    --   * heidi's FIRST reply was made while the post was still in the community, so it
+    --     must keep that community rather than follow the parent's end-of-batch state;
+    --   * grace's two creations must be credited to different buckets, not both to the
+    --     community the key ended up in.
+    (hafd.operation_id(37500035, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'grace', 'permlink', 'g1',
+        'parent_author', '', 'parent_permlink', 'hive-100001')),
+    (hafd.operation_id(37500036, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'heidi', 'permlink', 'h1',
+        'parent_author', 'grace', 'parent_permlink', 'g1')),
+    (hafd.operation_id(37500037, 1), 17, JSONB_BUILD_OBJECT(
+        'author', 'grace', 'permlink', 'g1')),
+    (hafd.operation_id(37500038, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'grace', 'permlink', 'g1',
+        'parent_author', '', 'parent_permlink', 'photography')),
+    (hafd.operation_id(37500039, 1), 1, JSONB_BUILD_OBJECT(
+        'author', 'heidi', 'permlink', 'h2',
+        'parent_author', 'grace', 'parent_permlink', 'g1'))
 ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -179,8 +220,8 @@ ON CONFLICT (id) DO NOTHING;
 -- Batch 2 deliberately spans the 10-01/10-02 day boundary.
 SELECT haf_stats_app.process_community_registry(37500001, 37500019);
 SELECT haf_stats_app.process_content_stats(37500001, 37500019);
-SELECT haf_stats_app.process_community_registry(37500020, 37500040);
-SELECT haf_stats_app.process_content_stats(37500020, 37500040);
+SELECT haf_stats_app.process_community_registry(37500020, 37500045);
+SELECT haf_stats_app.process_content_stats(37500020, 37500045);
 
 -- ---------------------------------------------------------------------------
 -- Assertions — live path
@@ -240,9 +281,11 @@ BEGIN
     END IF;
 
     -- The 6 thread members above plus erin's re-created p5.
+    -- alice/p1, bob/c1, carol/c2, alice/c3, alice/p4, bob/c4, erin/p5, frank/f1, heidi/h1.
+    -- grace/g1 is deliberately NOT here: it was re-created outside any community.
     SELECT COUNT(*) INTO _n FROM haf_stats_backend.comment_registry WHERE community IS NOT NULL;
-    IF _n <> 7 THEN
-        RAISE EXCEPTION 'comment_registry: expected exactly 7 community-mapped comments, got %', _n;
+    IF _n <> 9 THEN
+        RAISE EXCEPTION 'comment_registry: expected exactly 9 community-mapped comments, got %', _n;
     END IF;
 END;
 $$;
@@ -311,6 +354,59 @@ BEGIN
              WHERE a.name = 'erin');
     END IF;
 
+    -- frank's key was created once as a ROOT in the community and once as a REPLY under a
+    -- community post: one post AND one comment, both in hive-100001.
+    SELECT COUNT(*) INTO _bad
+    FROM haf_stats_backend.account_community_daily acd
+    JOIN hafd.accounts a ON a.id = acd.account_id
+    WHERE a.name = 'frank' AND acd.community = 'hive-100001'
+      AND acd.posts = 1 AND acd.comments = 1;
+    IF _bad <> 1 THEN
+        RAISE EXCEPTION 'frank root->reply flip: expected posts=1 comments=1 in hive-100001, got %',
+            COALESCE((SELECT FORMAT('posts=%s comments=%s', acd.posts, acd.comments)
+                      FROM haf_stats_backend.account_community_daily acd
+                      JOIN hafd.accounts a ON a.id = acd.account_id
+                      WHERE a.name = 'frank'), '(no row)');
+    END IF;
+
+    -- grace: one creation into the community, one outside it. Only the first counts here.
+    SELECT COUNT(*) INTO _bad
+    FROM haf_stats_backend.account_community_daily acd
+    JOIN hafd.accounts a ON a.id = acd.account_id
+    WHERE a.name = 'grace' AND acd.community = 'hive-100001' AND acd.posts = 1;
+    IF _bad <> 1 THEN
+        RAISE EXCEPTION 'grace community->personal re-creation: expected exactly 1 post credited to hive-100001, got %',
+            COALESCE((SELECT FORMAT('posts=%s', acd.posts)
+                      FROM haf_stats_backend.account_community_daily acd
+                      JOIN hafd.accounts a ON a.id = acd.account_id
+                      WHERE a.name = 'grace' AND acd.community = 'hive-100001'), '(no row)');
+    END IF;
+
+    -- The re-creation left the community, so the stored value must be CLEARED - otherwise
+    -- every later reply inherits a community the post no longer belongs to.
+    IF (SELECT r.community FROM haf_stats_backend.comment_registry r
+        JOIN hafd.accounts a ON a.id = r.author_id
+        WHERE a.name = 'grace' AND r.permlink = 'g1') IS NOT NULL THEN
+        RAISE EXCEPTION 'grace/g1 was re-created outside any community, but comment_registry.community was not cleared';
+    END IF;
+
+    -- heidi replied twice to the same key: once while it was in the community (h1, must
+    -- keep it) and once after it left (h2, must have none). Point-in-time inheritance.
+    IF (SELECT r.community FROM haf_stats_backend.comment_registry r
+        JOIN hafd.accounts a ON a.id = r.author_id
+        WHERE a.name = 'heidi' AND r.permlink = 'h1') IS DISTINCT FROM 'hive-100001' THEN
+        RAISE EXCEPTION 'heidi/h1 was posted while its parent was still in hive-100001 and must keep that community, got %',
+            COALESCE((SELECT r.community FROM haf_stats_backend.comment_registry r
+                      JOIN hafd.accounts a ON a.id = r.author_id
+                      WHERE a.name = 'heidi' AND r.permlink = 'h1'), '(null)');
+    END IF;
+
+    IF (SELECT r.community FROM haf_stats_backend.comment_registry r
+        JOIN hafd.accounts a ON a.id = r.author_id
+        WHERE a.name = 'heidi' AND r.permlink = 'h2') IS NOT NULL THEN
+        RAISE EXCEPTION 'heidi/h2 was posted after its parent left the community and must have none';
+    END IF;
+
     -- The endpoint derives "Personal blog / No community" by subtraction, so the
     -- community counts must never exceed the per-account totals.
     SELECT COUNT(*) INTO _bad FROM (
@@ -343,20 +439,20 @@ $$;
 -- tables for another test.
 CREATE TEMP TABLE _live_community AS
     SELECT * FROM haf_stats_backend.account_community_daily
-    WHERE account_id BETWEEN 47001 AND 47007;
+    WHERE account_id BETWEEN 47001 AND 47010;
 CREATE TEMP TABLE _live_mapping AS
     SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-    WHERE author_id BETWEEN 47001 AND 47007;
+    WHERE author_id BETWEEN 47001 AND 47010;
 
-DELETE FROM haf_stats_backend.account_community_daily WHERE account_id BETWEEN 47001 AND 47007;
-DELETE FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47007;
+DELETE FROM haf_stats_backend.account_community_daily WHERE account_id BETWEEN 47001 AND 47010;
+DELETE FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47010;
 DELETE FROM haf_stats_backend.network_content_daily WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
 DELETE FROM haf_stats_backend.network_author_daily WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
 UPDATE haf_stats_backend.account_content_daily
    SET posts = 0, comments = 0, replies_received = 0
  WHERE day IN (DATE '2019-10-01', DATE '2019-10-02');
 
-SELECT haf_stats_app.process_content_volume(37500001, 37500040);
+SELECT haf_stats_app.process_content_volume(37500001, 37500045);
 
 DO $$
 DECLARE
@@ -365,7 +461,7 @@ BEGIN
     SELECT COUNT(*) INTO _diff FROM (
         (SELECT account_id, day, community, posts, comments
            FROM haf_stats_backend.account_community_daily
-          WHERE account_id BETWEEN 47001 AND 47007
+          WHERE account_id BETWEEN 47001 AND 47010
          EXCEPT
          SELECT account_id, day, community, posts, comments FROM _live_community)
         UNION ALL
@@ -373,7 +469,7 @@ BEGIN
          EXCEPT
          SELECT account_id, day, community, posts, comments
            FROM haf_stats_backend.account_community_daily
-          WHERE account_id BETWEEN 47001 AND 47007)
+          WHERE account_id BETWEEN 47001 AND 47010)
     ) d;
     IF _diff <> 0 THEN
         RAISE EXCEPTION 'process_content_volume produced % account_community_daily row(s) differing from the live path', _diff;
@@ -381,14 +477,14 @@ BEGIN
 
     SELECT COUNT(*) INTO _diff FROM (
         (SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-          WHERE author_id BETWEEN 47001 AND 47007
+          WHERE author_id BETWEEN 47001 AND 47010
          EXCEPT
          SELECT author_id, permlink, community FROM _live_mapping)
         UNION ALL
         (SELECT author_id, permlink, community FROM _live_mapping
          EXCEPT
          SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
-          WHERE author_id BETWEEN 47001 AND 47007)
+          WHERE author_id BETWEEN 47001 AND 47010)
     ) d;
     IF _diff <> 0 THEN
         RAISE EXCEPTION 'process_content_volume produced % comment_registry row(s) differing from the live path (community resolution drifted between the two comment-scan paths)', _diff;
