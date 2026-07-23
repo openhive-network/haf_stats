@@ -93,6 +93,9 @@ BEGIN
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
     PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
     PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
+    -- Before process_content_stats: a community registered in this batch must already be
+    -- in community_registry when the comment scan classifies posts addressed to it.
+    PERFORM haf_stats_app.process_community_registry(_first_block, _last_block);
     PERFORM haf_stats_app.process_content_stats(_first_block, _last_block);
     PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
     PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);

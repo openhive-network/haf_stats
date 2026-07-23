@@ -19,6 +19,7 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 | `get_account_financial_summary` | Categorized incoming/outgoing flows per account — not in any existing API |
 | `get_account_rc_footprint` | RC cost by op type and DApp — not in any existing API |
 | `get_account_content_stats` | Per-account posting & engagement (posts/comments/votes/replies) + author rewards — not aggregated in any existing API |
+| `get_account_community_activity` | Per-account posts/comments grouped by community — hivemind's `bridge` API returns paginated post *lists* with a community field, never per-community counts |
 | `get_network_rc_utilization` | Network-wide RC consumption by category — not in any existing API |
 | `get_network_custom_json_usage` | Per-`id` network custom_json usage time-series (op counts, bytes, estimated RC) — no existing API breaks custom_json out by id |
 | `get_network_top_custom_json` | Leaderboard of most-used custom_json ids / DApps / categories — no existing API ranks custom_json actions |
@@ -71,6 +72,9 @@ db/
   process_rc.sql            ⚠ RC cost attribution — BLOCKED: rc_account_statuses ops are not captured by HAF (see docs/VERIFICATION.md)
   process_content_cohorts.sql
                             ✓ First-post author retention cohorts
+  process_community_registry.sql
+                            ✓ Community names/types/titles from account_created + community
+                            custom_json ops (owner/admin gated)
   process_delegations.sql   HP delegation current state (graph traversal only; per-account list → balance-api)
   process_governance.sql    Proxy chain current state only (witness + DHF proposal data → hafbe-api)
   process_network_stats.sql Supply snapshots from hafd.blocks (DAU/tx stats → hafbe-api)
@@ -87,9 +91,13 @@ scripts/
                             Rebuilds account cohorts after definition changes
   rebuild_content_cohorts.sh
                             Rebuilds content-creator cohorts (required on already-synced nodes)
+  rebuild_community_registry.sh
+                            Re-derives community names/types/titles (idempotent; install
+                            self-heals an empty registry, so this is for forced rebuilds)
   rebuild_content_volume.sh
                             Rebuilds network content-volume tables and per-account content
-                            columns (repairs double-counts / stale post over-reporting)
+                            columns (repairs double-counts / stale post over-reporting) and
+                            populates the community dimension on already-synced nodes
   rebuild_financial.sh      Rebuilds account financial aggregates after category changes
   rebuild_network_custom_json.sh
                             Rebuilds network custom_json usage (network_custom_json_daily)
@@ -260,6 +268,46 @@ least one deployment, writing exactly the three tables found doubled — is drop
 safe only because `rebuild_content_volume.sh` always `TRUNCATE`s first. Do not call either
 function directly outside that script.
 
+This is also the **only** way to populate the community dimension
+(`comment_registry.community` + `account_community_daily`, feeding
+`get_account_community_activity`) on a deployment that synced before that feature landed.
+It cannot be self-healed at install time like the other rollups: a comment's community is
+inherited from its root post, and the create-vs-edit classification that identifies
+creations only replays correctly from genesis.
+
+The community classification needs a populated `community_registry`, which
+**`install_app.sh` has already backfilled** (step 8a, batched). So the upgrade recipe is:
+
+```bash
+./scripts/install_app.sh                     # backfills community_registry, batched
+psql -c "SELECT COUNT(*) FROM haf_stats_backend.community_registry"   # expect > 0
+./scripts/rebuild_content_volume.sh          # derives the per-comment community dimension
+```
+
+Only run `rebuild_community_registry.sh` if that count is 0, or if the registry must be
+re-derived after a rules change — running it routinely adds a second full-history sweep for
+nothing.
+
+### Rebuilding the community registry
+
+`community_registry` / `community_role` hold community names and titles, plus the type
+implied by the community's name at registration (hivemind's later `updateProps` type
+changes are not tracked). Unlike the content rebuilds, `process_community_registry` is
+**idempotent** — registration is `ON CONFLICT DO NOTHING` and roles/titles are
+last-writer-wins over an ordered replay — which is why `install_app.sh` can backfill it
+directly. Use the script only when the table is *not* empty and must be re-derived, e.g.
+after changing the authorization rules:
+
+```bash
+./scripts/rebuild_community_registry.sh
+```
+
+The range starts at Hivemind's community start block (37,500,000), not block 1: no account
+created before it is ever a community, so earlier blocks cannot contribute. `FROM_BLOCK` is
+not configurable, because roles are ordered state — an account can only grant a role it
+already holds — so a partial start would drop the grants that authorize later
+`setRole`/`updateProps` ops.
+
 ## API Endpoints
 
 All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
@@ -270,6 +318,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_health` | ✅ Live | — | Last processed block + version |
 | `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
 | `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
+| `GET /rpc/get_account_community_activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
 | `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
 | `GET /rpc/get_network_custom_json_usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
@@ -284,6 +333,93 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_network_top_accounts` | ✅ Live | *(reads financial + active-users tables)* | Top N accounts by rewards, transfer volume, HP balance, or op count |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
 | `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
+
+## Community Attribution
+
+Communities are hivemind state, and there is no hivemind schema on a HAF node running this
+app, so `get_account_community_activity` derives them from raw operations. The rules, taken
+from hivemind's `hive/indexer/community.py` and verified against live chain data:
+
+* A community is an account matching `^hive-[1-3][0-9]{4,6}$`, registered when that account
+  is **created at or after block 37,500,000** (hivemind's `start_block`). An identically
+  named account created earlier is never a community, so no pre-2019 content can belong to
+  one — the whole feature is a no-op over that history.
+* A **root post** belongs to the community named by its `parent_permlink` (its category),
+  when that community was already registered at the post's block. Note this is the
+  `parent_permlink`, *not* `json_metadata.community`: the old spec describes the latter, but
+  live frontends use the former (`@behiver/hivepulseapp-…` posts to `hive-139531` with an
+  empty `parent_author` and `parent_permlink = hive-139531`, and no `community` key in its
+  metadata).
+* A **reply** belongs to its **root post's** community, not its immediate parent's. Verified
+  on chain: `@blocktrades/ticn6q` sits at depth 6 with `parent_permlink =
+  re-blocktrades-2026717t192753168z`, yet carries `category: hive-139531` — the root's
+  community. A raw `comment_operation` names only its immediate parent, so every comment's
+  resolved community is stored on `comment_registry.community` and the next reply down
+  inherits it in one lookup.
+* **Titles** come from `custom_json` ops with `id: "community"` carrying
+  `["updateProps", {"community": …, "props": {"title": …}}]`, and are accepted only from a
+  signer holding owner/admin — otherwise any account could rename any community. Roles are
+  tracked from `setRole` ops, seeded with the community account itself as owner.
+
+Known divergences from hivemind, documented on the endpoint too:
+
+* **Deleted content.** We count creations; hivemind's `hive_posts` holds what is currently
+  live. This is the main reason a figure here can exceed hivemind's, and it is deliberate —
+  it is what makes the buckets reconcile with `get_account_content_stats`.
+* **Roles below admin.** Only owner/admin are modelled, since nothing but title
+  authorization needs them, so a title set through a `mod` grant is not reproduced.
+* **`type_id`** is derived from the community name at registration. Hivemind seeds it the
+  same way but lets a later `updateProps` change it; we do not follow that.
+
+Muting is explicitly **not** a divergence, contrary to a claim in an earlier revision of
+this document: hivemind's `process_community_post` resolves `community_id` from the
+category (root) or the parent (reply) *before* any role check, and a muted or non-member
+author only sets `hive_posts.is_muted`. The post still belongs to the community on both
+sides.
+
+### Checking the derivation against hivemind
+
+Hivemind is itself a HAF app, so on a node that runs it, `hivemind_app` sits in the **same
+database**. haf_stats deliberately does not read it — a hard dependency would break this
+app's standalone architecture, and hivemind counts currently-**live** content while we
+count **creations**, which is exactly what makes the endpoint's buckets sum to
+`get_account_content_stats`. But where it is present it makes an excellent **oracle**, and
+it is the only way to exercise the community path on real data (the CI replay is 2016
+history, which predates communities entirely):
+
+```bash
+psql -f tests/parity/community_vs_hivemind.sql      # also runs via run_verification.sh
+```
+
+Read-only, takes no locks, and skips cleanly when `hivemind_app` is absent. It fails on
+communities we attribute content to that hivemind does not know, communities hivemind
+registered that we missed, titles that disagree (the direct test of the owner/admin gate),
+and any (account, community) pair where we counted **fewer** than hivemind. It only reports
+— never fails on — the reverse, since our creations-based excess over hivemind's live
+content is expected and equals the deleted content. `tests/hivemind_oracle_fixture.sql`
+stubs a `hivemind_app` in the CI stack so the oracle's dynamic-SQL path is exercised there
+rather than lying dormant until it first meets a production node.
+
+### Real-data parity without a mainnet replay
+
+Everything the resolver consumes for a comment — `author`, `permlink`, `parent_author`,
+`parent_permlink` — is returned by `condenser_api.get_content` for any post, and hivemind
+hands over the **answer** in the same response: `category` is the thread root's community,
+propagated to every descendant. So real threads can be replayed as the raw
+`comment_operation`s they came from and checked against hivemind's own verdict, without a
+multi-TB mainnet HAF:
+
+```bash
+python3 tests/tools/gen_mainnet_community_fixture.py > tests/mainnet_community_fixture.sql
+```
+
+The generated fixture is **committed**, so CI needs no network. It currently holds 120 real
+nodes across 8 communities and 2 legacy tag categories, up to **depth 8** — replayed in a
+single batch, so most parent links resolve in-batch, which is the case a plain
+`comment_registry` lookup gets wrong. It asserts our derived community equals hivemind's for
+every node, and self-guards: it fails if a regenerated sample loses its deep replies, its
+community content, or its legacy-category negatives. The same nodes are mirrored into the
+`hivemind_app` stub, so the oracle above runs over real communities and accounts too.
 
 ## DApp Attribution
 

@@ -69,6 +69,8 @@ DECLARE
     _registry_diff BIGINT;
     _period_diff   BIGINT;
     _account_diff       BIGINT;
+    _community_diff     BIGINT;
+    _community_over     BIGINT;
     _acct_posts_delta   BIGINT;
     _acct_comments_delta BIGINT;
     _acct_replies_gap   BIGINT;
@@ -113,6 +115,10 @@ BEGIN
     CREATE TEMP TABLE _live_account ON COMMIT DROP AS
         SELECT account_id, day, posts, comments, votes_cast, votes_received, replies_received
         FROM haf_stats_backend.account_content_daily;
+    -- The community dimension (#47) is written by the same shared classified rows, so it is
+    -- subject to the identical drift risk and is rebuilt (not preserved) by this path.
+    CREATE TEMP TABLE _live_community ON COMMIT DROP AS
+        SELECT * FROM haf_stats_backend.account_community_daily;
 
     -- Corrupt the content columns first (simulate the stale raw-op over-report this rebuild
     -- exists to repair). The zeroing below must wipe it and the additive replay must restore
@@ -129,6 +135,7 @@ BEGIN
     TRUNCATE haf_stats_backend.network_content_daily;
     TRUNCATE haf_stats_backend.network_author_daily;
     TRUNCATE haf_stats_backend.comment_registry;
+    TRUNCATE haf_stats_backend.account_community_daily;
     UPDATE haf_stats_backend.account_content_daily
        SET posts = 0, comments = 0, replies_received = 0;
 
@@ -162,20 +169,55 @@ BEGIN
     ) a;
 
     -- The registry must land in the SAME state the live processor had at _to_block,
-    -- or the processor misclassifies edits as creates when it resumes.
+    -- or the processor misclassifies edits as creates when it resumes. `community` is
+    -- compared too (IS NOT DISTINCT semantics via EXCEPT, which treats NULLs as equal):
+    -- the rebuild re-derives it from scratch, so a resolver that only works on the live
+    -- path would surface here.
     SELECT COUNT(*) INTO _registry_diff FROM (
-        (SELECT author_id, permlink FROM haf_stats_backend.comment_registry
+        (SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry
          EXCEPT
-         SELECT author_id, permlink FROM _live_registry)
+         SELECT author_id, permlink, community FROM _live_registry)
         UNION ALL
-        (SELECT author_id, permlink FROM _live_registry
+        (SELECT author_id, permlink, community FROM _live_registry
          EXCEPT
-         SELECT author_id, permlink FROM haf_stats_backend.comment_registry)
+         SELECT author_id, permlink, community FROM haf_stats_backend.comment_registry)
     ) r;
 
-    IF _daily_diff <> 0 OR _author_diff <> 0 OR _registry_diff <> 0 THEN
-        RAISE EXCEPTION 'content_volume rebuild drift: % differing network_content_daily row(s), % differing network_author_daily row(s), % differing comment_registry row(s) through block %. process_content_volume has diverged from process_content_stats.',
-            _daily_diff, _author_diff, _registry_diff, _to_block;
+    SELECT COUNT(*) INTO _community_diff FROM (
+        (SELECT account_id, day, community, posts, comments
+           FROM haf_stats_backend.account_community_daily
+         EXCEPT
+         SELECT account_id, day, community, posts, comments FROM _live_community)
+        UNION ALL
+        (SELECT account_id, day, community, posts, comments FROM _live_community
+         EXCEPT
+         SELECT account_id, day, community, posts, comments
+           FROM haf_stats_backend.account_community_daily)
+    ) c;
+
+    IF _daily_diff <> 0 OR _author_diff <> 0 OR _registry_diff <> 0 OR _community_diff <> 0 THEN
+        RAISE EXCEPTION 'content_volume rebuild drift: % differing network_content_daily row(s), % differing network_author_daily row(s), % differing comment_registry row(s), % differing account_community_daily row(s) through block %. process_content_volume has diverged from process_content_stats.',
+            _daily_diff, _author_diff, _registry_diff, _community_diff, _to_block;
+    END IF;
+
+    -- The community buckets can never exceed the totals they are subtracted from: the
+    -- endpoint derives "Personal blog / No community" as account_content_daily minus these,
+    -- so a violation here would make that bucket go negative.
+    SELECT COUNT(*) INTO _community_over FROM (
+        SELECT acd.account_id, acd.day
+        FROM haf_stats_backend.account_community_daily acd
+        GROUP BY acd.account_id, acd.day
+        HAVING SUM(acd.posts) > COALESCE((
+                   SELECT t.posts FROM haf_stats_backend.account_content_daily t
+                   WHERE t.account_id = acd.account_id AND t.day = acd.day), -1)
+            OR SUM(acd.comments) > COALESCE((
+                   SELECT t.comments FROM haf_stats_backend.account_content_daily t
+                   WHERE t.account_id = acd.account_id AND t.day = acd.day), -1)
+    ) o;
+
+    IF _community_over <> 0 THEN
+        RAISE EXCEPTION 'account_community_daily exceeds account_content_daily for % (account, day) pair(s); get_account_community_activity would report a negative personal-blog bucket.',
+            _community_over;
     END IF;
 
     -- account_content_daily: process_content_volume now rebuilds its content columns.
@@ -305,13 +347,14 @@ BEGIN
             _siblings_before, _siblings_after;
     END IF;
 
-    RAISE NOTICE 'content_volume rebuild consistency OK through block %: % day rows / % author rows / % registry rows / % rollup rows / % account rows reproduced exactly (SUM(account.posts)==network, votes preserved); sibling vote/engagement tables untouched',
+    RAISE NOTICE 'content_volume rebuild consistency OK through block %: % day rows / % author rows / % registry rows / % rollup rows / % account rows / % community rows reproduced exactly (SUM(account.posts)==network, votes preserved, community <= totals); sibling vote/engagement tables untouched',
         _to_block,
         (SELECT COUNT(*) FROM haf_stats_backend.network_content_daily),
         (SELECT COUNT(*) FROM haf_stats_backend.network_author_daily),
         (SELECT COUNT(*) FROM haf_stats_backend.comment_registry),
         (SELECT COUNT(*) FROM haf_stats_backend.network_content_period_counts),
-        (SELECT COUNT(*) FROM haf_stats_backend.account_content_daily);
+        (SELECT COUNT(*) FROM haf_stats_backend.account_content_daily),
+        (SELECT COUNT(*) FROM haf_stats_backend.account_community_daily);
 END;
 $$;
 

@@ -278,7 +278,7 @@ DECLARE
           "Other"
         ],
         "summary": "Health check",
-        "description": "Returns service health and last processed block number.",
+        "description": "Returns service health, last processed block number, and whether the per-account community dimension has been backfilled.",
         "operationId": "haf_stats_endpoints.get_health",
         "responses": {
           "200": {
@@ -286,7 +286,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT)",
+                  "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)",
                   "type": "object",
                   "properties": {
                     "status": {
@@ -298,6 +298,10 @@ DECLARE
                     },
                     "version": {
                       "type": "string"
+                    },
+                    "community_data_ready": {
+                      "type": "boolean",
+                      "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
                     }
                   }
                 }
@@ -506,6 +510,84 @@ DECLARE
                       },
                       "author_reward_vests_nai": {
                         "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/{account}/community-activity": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account activity by community",
+        "description": "Per-account created posts and comments grouped by Hive community, for the Community Activity treemap. A post belongs to the community named by its category; a reply belongs to its ROOT post's community, not its immediate parent's, matching how the chain propagates a thread's category to every descendant. Content outside any community \u2014 personal-blog posts and the legacy tag categories that predate communities \u2014 is returned as a single bucket with a null community, so the buckets always sum to get_account_content_stats' posts and comments for the same range. Counts are creations only (edits excluded), counted at creation time, exactly as get_account_content_stats counts them \u2014 so content later deleted is still counted, which is the main reason a figure here can exceed what Hivemind currently shows as live. Muting does NOT change community membership: Hivemind assigns community_id before any role check and only flags the post as muted, so muted and non-member posts belong to the community for both Hivemind and this endpoint. Communities are recognised from block 37,500,000 onward (Hivemind's community start block); nothing before it can belong to a community. Community titles follow Hivemind's rules for owner/admin updateProps; roles below admin are not modelled, so a title set through a role this app does not track is not reflected.",
+        "operationId": "haf_stats_endpoints.get_account_community_activity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One row per community the account was active in, plus the no-community bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(community TEXT, title TEXT, post_count BIGINT, comment_count BIGINT)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "community": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Community account name (e.g. hive-139531), or null for the personal-blog / no-community bucket"
+                      },
+                      "title": {
+                        "type": "string",
+                        "description": "Community title as set on-chain by an owner/admin updateProps; falls back to the community name when none was ever set"
+                      },
+                      "post_count": {
+                        "type": "integer",
+                        "description": "Root posts created in this community"
+                      },
+                      "comment_count": {
+                        "type": "integer",
+                        "description": "Replies created anywhere in a thread rooted in this community"
                       }
                     }
                   }
@@ -2062,7 +2144,9 @@ $$;
     tags:
       - Other
     summary: Health check
-    description: Returns service health and last processed block number.
+    description: >-
+      Returns service health, last processed block number, and whether the per-account
+      community dimension has been backfilled.
     operationId: haf_stats_endpoints.get_health
     responses:
       '200':
@@ -2070,7 +2154,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT)"
+              x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)"
               type: object
               properties:
                 status:
@@ -2080,18 +2164,36 @@ $$;
                   type: integer
                 version:
                   type: string
+                community_data_ready:
+                  type: boolean
+                  description: >-
+                    False when this node has processed past the community start block
+                    (37,500,000) but holds no per-account community rows — i.e. it synced
+                    before the community feature and scripts/rebuild_content_volume.sh has
+                    not been run yet. get_account_community_activity still answers on such
+                    a node, but reports everything under the personal-blog bucket.
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_health()
-RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT)
+RETURNS TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)
 -- openapi-generated-code-end
 LANGUAGE sql STABLE
 AS $$
     SELECT
         'ok'::TEXT                                               AS status,
         s.last_processed_block,
-        (SELECT git_hash FROM haf_stats_app.app_version LIMIT 1) AS version
+        (SELECT git_hash FROM haf_stats_app.app_version LIMIT 1) AS version,
+        -- The community dimension is the one thing install cannot self-heal (it rides on
+        -- comment_registry's genesis create-vs-edit replay), so a node upgraded from an
+        -- older version answers get_account_community_activity with everything in the
+        -- personal-blog bucket until the rebuild runs — indistinguishable, to a caller,
+        -- from an account that genuinely never posted in a community. Surface it here so
+        -- that state is detectable rather than silently plausible.
+        (
+            s.last_processed_block < haf_stats_app.community_start_block()
+            OR EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily)
+        ) AS community_data_ready
     FROM haf_stats_app.app_status s
     LIMIT 1;
 $$;
@@ -2383,6 +2485,171 @@ BEGIN
     FROM content c
     FULL OUTER JOIN rewards r ON c.period = r.period
     ORDER BY 1;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: per-account activity by community (issue #47)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/account/{account}/community-activity:
+  get:
+    tags:
+      - Account
+    summary: Account activity by community
+    description: >-
+      Per-account created posts and comments grouped by Hive community, for the
+      Community Activity treemap. A post belongs to the community named by its category;
+      a reply belongs to its ROOT post's community, not its immediate parent's, matching
+      how the chain propagates a thread's category to every descendant. Content outside
+      any community — personal-blog posts and the legacy tag categories that predate
+      communities — is returned as a single bucket with a null community, so the buckets
+      always sum to get_account_content_stats' posts and comments for the same range.
+      Counts are creations only (edits excluded), counted at creation time, exactly as
+      get_account_content_stats counts them — so content later deleted is still counted,
+      which is the main reason a figure here can exceed what Hivemind currently shows as
+      live. Muting does NOT change community membership: Hivemind assigns community_id
+      before any role check and only flags the post as muted, so muted and non-member
+      posts belong to the community for both Hivemind and this endpoint.
+      Communities are recognised from block 37,500,000 onward (Hivemind's community start
+      block); nothing before it can belong to a community. Community titles follow
+      Hivemind's rules for owner/admin updateProps; roles below admin are not modelled, so
+      a title set through a role this app does not track is not reflected.
+    operationId: haf_stats_endpoints.get_account_community_activity
+    parameters:
+      - in: path
+        name: account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+    responses:
+      '200':
+        description: One row per community the account was active in, plus the no-community bucket
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(community TEXT, title TEXT, post_count BIGINT, comment_count BIGINT)"
+              type: array
+              items:
+                type: object
+                properties:
+                  community:
+                    type: string
+                    nullable: true
+                    description: Community account name (e.g. hive-139531), or null for the personal-blog / no-community bucket
+                  title:
+                    type: string
+                    description: Community title as set on-chain by an owner/admin updateProps; falls back to the community name when none was ever set
+                  post_count:
+                    type: integer
+                    description: Root posts created in this community
+                  comment_count:
+                    type: integer
+                    description: Replies created anywhere in a thread rooted in this community
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_community_activity;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_community_activity(
+    "account" TEXT,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL
+)
+RETURNS TABLE(community TEXT, title TEXT, post_count BIGINT, comment_count BIGINT)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _account_id INT;
+BEGIN
+    -- Genesis default (the #35 convention), not last-30-days: a treemap is an all-time
+    -- view, and a silent 30-day window is exactly what #35 had to undo elsewhere.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    SELECT id INTO _account_id FROM hafd.accounts WHERE name = "account";
+    IF _account_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    WITH per_community AS (
+        SELECT
+            acd.community            AS community,
+            SUM(acd.posts)::BIGINT   AS posts,
+            SUM(acd.comments)::BIGINT AS comments
+        FROM haf_stats_backend.account_community_daily acd
+        WHERE acd.account_id = _account_id
+          AND acd.day BETWEEN _from AND _to
+        GROUP BY acd.community
+    ),
+    -- The account's totals over the same range, from the table get_account_content_stats
+    -- reads. Both sides count the same creation events, so subtracting the community
+    -- buckets from these yields the no-community bucket without storing it.
+    totals AS (
+        SELECT
+            COALESCE(SUM(t.posts), 0)::BIGINT    AS posts,
+            COALESCE(SUM(t.comments), 0)::BIGINT AS comments
+        FROM haf_stats_backend.account_content_daily t
+        WHERE t.account_id = _account_id
+          AND t.day BETWEEN _from AND _to
+    ),
+    -- GREATEST guards the arithmetic rather than trusting it: a partially-rebuilt
+    -- deployment must under-report the personal bucket, never emit a negative count.
+    -- The ::BIGINT casts are required, not cosmetic: SUM() over BIGINT returns NUMERIC,
+    -- which would propagate through the UNION ALL and fail the declared RETURNS TABLE.
+    no_community AS (
+        SELECT
+            GREATEST(t.posts - s.posts, 0)::BIGINT       AS posts,
+            GREATEST(t.comments - s.comments, 0)::BIGINT AS comments
+        FROM totals t
+        CROSS JOIN (
+            SELECT
+                COALESCE(SUM(pc.posts), 0)    AS posts,
+                COALESCE(SUM(pc.comments), 0) AS comments
+            FROM per_community pc
+        ) s
+    ),
+    buckets AS (
+        SELECT pc.community, pc.posts, pc.comments
+        FROM per_community pc
+        UNION ALL
+        SELECT NULL::TEXT, nc.posts, nc.comments
+        FROM no_community nc
+        WHERE nc.posts > 0 OR nc.comments > 0
+    )
+    SELECT
+        b.community,
+        CASE
+            WHEN b.community IS NULL THEN 'Personal blog / No community'
+            ELSE COALESCE(cr.title, b.community)
+        END,
+        b.posts,
+        b.comments
+    FROM buckets b
+    LEFT JOIN haf_stats_backend.community_registry cr ON cr.community = b.community
+    -- Largest first for the treemap; the no-community bucket always sorts last, and the
+    -- name breaks ties so paging/diffing a response is stable.
+    ORDER BY (b.community IS NULL), (b.posts + b.comments) DESC, b.community;
 END;
 $$;
 
