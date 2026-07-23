@@ -1,0 +1,31 @@
+---
+test_name: Account community activity on real pre-community history is one personal-blog bucket
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+# The real-replay lane's counterpart to the synthetic community tests. The replay is 2016
+# chain history and communities did not exist until block 37,500,000, so on real data the
+# ONLY correct answer is a single null-community bucket — which is also the strongest
+# statement this lane can make: the community branch never fires spuriously (no legacy tag
+# category is ever mistaken for a community) and the bucket reconciles with
+# get_account_content_stats, since the endpoint derives it by subtraction.
+#
+# stellabelle authored 169 posts and 3223 comments over the replayed range; both figures
+# are exactly what get_account_content_stats reports for the same account and window.
+stages:
+  - name: GET /rpc/get_account_community_activity for stellabelle over the replayed range
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "stellabelle"
+        from_date: "2016-03-24"
+        to_date: "2016-09-15"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

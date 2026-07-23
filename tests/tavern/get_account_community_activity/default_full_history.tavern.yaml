@@ -1,0 +1,28 @@
+---
+test_name: Account community activity no-date default returns full history (issue #35)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Regression for #35: with no from_date the endpoint must default to chain genesis, like
+# the network endpoints — NOT the last 30 days. The fixture's only activity is dated
+# 2019-10-01, so a genesis default returns it while a NOW()-30d default would return [].
+# A treemap is an all-time view, which is exactly why this endpoint diverges from the
+# older account endpoints that still default to 30 days.
+stages:
+  - name: GET /rpc/get_account_community_activity with no date params
+    request:
+      url: "{api_url}/rpc/get_account_community_activity"
+      method: GET
+      params:
+        account: "alice"
+    response:
+      status_code: 200
+      json:
+        - community: "hive-100001"
+          title: "Test Community"
+          post_count: 3
+          comment_count: 1
