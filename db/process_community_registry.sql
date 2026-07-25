@@ -37,8 +37,11 @@ SET ROLE haf_stats_owner;
 -- ---------------------------------------------------------------------------
 -- Shared constants
 --
--- SQL-language + IMMUTABLE so the planner inlines them; is_community_name is applied
--- per-row in the content processor's hot path and must not become a function call.
+-- SQL-language + IMMUTABLE so the planner inlines them rather than paying a call per row.
+-- community_start_block() is the one with an out-of-file caller: process_content_stats.sql
+-- reads it in the comment scan (the community_stage block-number floor) and in the
+-- prepare/resolve short-circuit, which is why this file must load first. is_community_name
+-- is used only by pass 1's registration filter below.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION haf_stats_app.community_start_block()
@@ -94,6 +97,28 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.community_role (
 );
 
 GRANT SELECT ON haf_stats_backend.community_role TO haf_stats_user;
+
+-- How far install_app.sh's step-8a backfill has swept, so an interrupted sweep RESUMES
+-- instead of being skipped forever. The gate used to be "is community_registry empty?",
+-- which is true only before the first chunk commits: a sweep that died on chunk 5 of 50
+-- left the table non-empty, so every later install skipped step 8a and every community
+-- registered after that point stayed missing permanently — silently, since the content
+-- processor then classifies their posts as community-less and get_account_community_activity
+-- reports them under the personal blog bucket.
+--
+-- Seeded to start_block - 1, i.e. "no verified sweep", even on a node whose registry is
+-- already populated. process_community_registry is idempotent, so the first install after
+-- this change re-sweeps once and thereby REPAIRS any node left partial by the old gate;
+-- the watermark then suppresses the sweep on every subsequent install.
+CREATE TABLE IF NOT EXISTS haf_stats_app.community_backfill_status (
+    backfilled_through INT NOT NULL
+);
+
+INSERT INTO haf_stats_app.community_backfill_status (backfilled_through)
+SELECT haf_stats_app.community_start_block() - 1
+WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.community_backfill_status);
+
+GRANT SELECT ON haf_stats_app.community_backfill_status TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Processor
@@ -203,6 +228,19 @@ LOOP
     END IF;
 
     _community := _payload ->> 'community';
+
+    -- Hivemind's custom_op handler requires EXACTLY ONE posting auth and NO active auths
+    -- before a community op ever reaches CommunityOp; anything else is discarded outright.
+    -- Taking element 0 regardless of length would apply an op signed by
+    -- ["alice","bob"] (or one that also carries required_auths) that hivemind drops,
+    -- diverging our stored title from hivemind's - which check 3 of
+    -- tests/parity/community_vs_hivemind.sql then reports as a hard failure.
+    IF JSONB_TYPEOF(_rec.body_value -> 'required_posting_auths') <> 'array'
+       OR JSONB_ARRAY_LENGTH(_rec.body_value -> 'required_posting_auths') <> 1
+       OR COALESCE(JSONB_ARRAY_LENGTH(_rec.body_value -> 'required_auths'), 0) <> 0 THEN
+        CONTINUE;
+    END IF;
+
     _signer := _rec.body_value -> 'required_posting_auths' ->> 0;
 
     IF _community IS NULL OR _signer IS NULL THEN
@@ -239,9 +277,20 @@ LOOP
         -- any AssertionError aborts validate() and the WHOLE op is discarded. Truncating
         -- to fit (as an earlier revision did) would store titles no Hive frontend shows,
         -- and would make the hivemind oracle's title check fire and blame the role gate.
-        _title := _payload -> 'props' ->> 'title';
+        -- The value must BE a string. read_key_str asserts isinstance(str), so
+        -- {"title": 42} / true / [...] / {...} all abort validate() and discard the op -
+        -- whereas ->> would stringify them to '42' / 'true' and store a title hivemind
+        -- never accepted.
+        _title := CASE
+            WHEN JSONB_TYPEOF(_payload -> 'props' -> 'title') = 'string'
+                THEN _payload -> 'props' ->> 'title'
+        END;
+        -- "already stripped" is Python's str.strip(), which removes ALL whitespace -
+        -- space, \t, \n, \r, \v, \f - not just spaces. BTRIM(_title) with no character
+        -- set strips spaces only, so "\tHiveDevs" passed this gate here and was discarded
+        -- by hivemind.
         IF _title IS NOT NULL
-           AND _title = BTRIM(_title)
+           AND _title = BTRIM(_title, E' \t\n\r\v\f')
            AND LENGTH(_title) BETWEEN 1 AND 20
            AND LEFT(_title, 1) NOT IN ('@', '#') THEN
             UPDATE haf_stats_backend.community_registry

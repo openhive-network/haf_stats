@@ -1892,8 +1892,25 @@ AS $$
         -- personal-blog bucket until the rebuild runs — indistinguishable, to a caller,
         -- from an account that genuinely never posted in a community. Surface it here so
         -- that state is detectable rather than silently plausible.
+        --
+        -- The install watermark is the primary signal, NOT the presence of rows: a node
+        -- replaying from genesis with this feature installed crosses block 37,500,000 long
+        -- before the first hive-1NNNNN account exists, so account_community_daily is
+        -- legitimately empty for that whole stretch while the dimension is nonetheless
+        -- complete by construction. Reporting false there sent operators to a multi-hour
+        -- rebuild that repairs nothing. The EXISTS arm is kept as the "the rebuild has run"
+        -- signal for genuinely upgraded nodes (and for nodes that rebuilt before the
+        -- watermark existed).
         (
             s.last_processed_block < haf_stats_app.community_start_block()
+            -- COALESCE is load-bearing: an empty status table makes the subquery NULL, and
+            -- `FALSE OR NULL OR FALSE` is NULL, not FALSE — the flag would come back null
+            -- instead of reporting "not ready".
+            OR COALESCE((
+                SELECT cfs.installed_at_block < haf_stats_app.community_start_block()
+                FROM haf_stats_app.community_feature_status cfs
+                LIMIT 1
+            ), FALSE)
             OR EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily)
         ) AS community_data_ready
     FROM haf_stats_app.app_status s

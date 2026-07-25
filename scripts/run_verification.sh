@@ -30,7 +30,7 @@
 #                  `haf` container of docker-compose-test.yml (left up by
 #                  run_tests.sh --keep), over its local socket as haf_admin.
 #
-# Run from the repo root. Exits non-zero if either guard fails.
+# Run from the repo root. Exits non-zero if any guard fails.
 # =============================================================================
 set -euo pipefail
 
@@ -71,10 +71,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/3: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/4: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/3: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/4: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"

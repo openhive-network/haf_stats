@@ -37,7 +37,17 @@ source "${SCRIPT_DIR}/common.sh"
 # Community ops are a thin slice of the op stream, so batches can be large; the cost is
 # dominated by the per-batch index scan setup, not by the rows returned.
 : "${BATCH_SIZE:=100000}"
-: "${TO_BLOCK:=}"
+
+# TO_BLOCK is intentionally NOT configurable, and is deliberately absent from the environment
+# defaults above: the rebuild must end exactly at last_processed_block. A SHORT rebuild leaves
+# communities registered in (TO_BLOCK, tip] missing while the processor resumes at tip+1 and
+# never revisits them. Previously this was declared as a tunable that then rejected every value
+# except its own default, so the only thing an operator could achieve by setting it was exit 2.
+if [[ -n "${TO_BLOCK:-}" ]]; then
+    echo "TO_BLOCK is not configurable: the rebuild must end at the app's last processed block." >&2
+    echo "A short rebuild leaves communities registered in (TO_BLOCK, tip] missing; the processor resumes at tip+1 and never revisits them." >&2
+    exit 2
+fi
 
 # FROM_BLOCK is intentionally NOT configurable: the role replay is ORDERED state (an account can
 # only grant a role it already holds), so starting mid-history would lose the grants that
@@ -74,26 +84,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap on_exit EXIT
 
-require_number() {
-    local name="$1" value="$2"
-    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-        echo "${name} must be a non-negative integer; got '${value}'." >&2
-        exit 2
-    fi
-}
-
-# Detect a live processor. Scoped to THIS database (pg_stat_activity is cluster-wide). Matching a
-# leading CALL keeps this from matching its own SELECT.
-count_live_processors() {
-    psql_cmd -Atc "
-        SELECT COUNT(*)
-        FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND datname = current_database()
-          AND state <> 'idle'
-          AND BTRIM(query) ILIKE 'CALL%haf_stats_app.main%'
-    "
-}
+# require_number / count_live_processors / assert_no_live_processor come from common.sh.
 
 wait_for_postgres
 
@@ -116,21 +107,11 @@ app_block="$(
 )"
 require_number "app_status.last_processed_block" "${app_block}"
 
-if [[ -z "${TO_BLOCK}" ]]; then
-    TO_BLOCK="${app_block}"
-fi
-require_number "TO_BLOCK" "${TO_BLOCK}"
+# Always the app's head, per the TO_BLOCK note at the top of this file.
+readonly TO_BLOCK="${app_block}"
 
 if (( app_block < 1 )); then
     echo "The app has processed no blocks (last_processed_block=${app_block}); nothing to rebuild." >&2
-    exit 2
-fi
-
-# Equality, not "<=": a short rebuild leaves communities registered in (TO_BLOCK, tip] missing,
-# and the forward processor resumes at tip+1 and never revisits them.
-if (( TO_BLOCK != app_block )); then
-    echo "TO_BLOCK must equal the app's last processed block (${app_block}); got ${TO_BLOCK}." >&2
-    echo "A short rebuild leaves communities registered in (${TO_BLOCK}, ${app_block}] missing; the processor resumes at $((app_block + 1)) and never revisits them." >&2
     exit 2
 fi
 
@@ -139,16 +120,7 @@ if (( app_block < start_block )); then
     exit 0
 fi
 
-# Assign, then validate: `if (( $(cmd) > 0 ))` would FAIL OPEN if psql returned an empty string
-# (connection reset) — `(( > 0 ))` is a syntax error returning 1, and set -e is suppressed inside
-# an `if` condition, so the guard would silently conclude "no processor" and TRUNCATE while live.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor is still running; refusing to rebuild." >&2
-    echo "Stop it first: SELECT haf_stats_app.stop_processing();  (or stop the haf-stats-process container), then re-run." >&2
-    exit 2
-fi
+assert_no_live_processor "The haf_stats processor is still running; refusing to rebuild."
 
 log "Rebuilding the community registry over blocks ${start_block}-${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
@@ -176,13 +148,18 @@ done
 # The pre-flight check is TOCTOU over a multi-minute replay, so re-check: a processor started
 # mid-rebuild would have been writing head blocks onto a registry we were rebuilding from the
 # start block, so the ordered role replay could have seen grants out of sequence.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor STARTED DURING the rebuild; its head-block writes interleaved" >&2
-    echo "with the ordered role replay. Stop it and re-run this script." >&2
-    exit 2
-fi
+assert_no_live_processor "The haf_stats processor STARTED DURING the rebuild; its head-block writes interleaved with the ordered role replay. Stop it and re-run this script."
+
+# This sweep covered [start_block, app_block] from a truncated slate, so install_app.sh's
+# step-8a backfill has nothing left to do — record it, or the next install would re-sweep.
+# INSERT-if-missing before the UPDATE: an UPDATE against an empty table affects zero rows
+# and reports success, which would silently leave the watermark unset and make the next
+# install re-sweep all of history.
+psql_cmd -c "
+    INSERT INTO haf_stats_app.community_backfill_status (backfilled_through)
+    SELECT ${TO_BLOCK}
+    WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.community_backfill_status);
+    UPDATE haf_stats_app.community_backfill_status SET backfilled_through = ${TO_BLOCK};"
 
 rebuild_started=0
 log "Community registry rebuild complete: $(psql_cmd -Atc "SELECT COUNT(*) FROM haf_stats_backend.community_registry") communities registered."

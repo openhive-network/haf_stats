@@ -102,8 +102,30 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_community_daily (
 -- reason to copy it forward.)
 GRANT SELECT ON haf_stats_backend.account_community_daily TO haf_stats_user;
 
--- Drop it where a previous revision of this branch created it.
-DROP INDEX IF EXISTS haf_stats_backend.idx_acomd_account_day;
+-- Where the app's head stood when the community feature was FIRST installed. This is what
+-- separates the two states get_health's community_data_ready has to tell apart, which an
+-- "is account_community_daily non-empty?" probe alone cannot:
+--   * installed while still below the community start block (or on a fresh install) — the
+--     replay will cover all community-era history, so the dimension is complete BY
+--     CONSTRUCTION, even during the long window after crossing block 37,500,000 when no
+--     community has been created yet and the table is legitimately empty.
+--   * installed on a node already synced past it — history rides on comment_registry's
+--     genesis create-vs-edit replay, which install cannot self-heal, so the dimension is
+--     incomplete until scripts/rebuild_content_volume.sh runs.
+-- Without this, a healthy genesis replay reported community_data_ready = false and the
+-- documented remedy for that flag is a multi-hour rebuild that would repair nothing.
+CREATE TABLE IF NOT EXISTS haf_stats_app.community_feature_status (
+    installed_at_block INT NOT NULL
+);
+
+-- Stamped once, on the install that first creates this table; later installs leave the
+-- original watermark alone (an upgraded node must not look like a fresh one).
+INSERT INTO haf_stats_app.community_feature_status (installed_at_block)
+SELECT COALESCE(MAX(s.last_processed_block), 0)
+FROM haf_stats_app.app_status AS s
+WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.community_feature_status);
+
+GRANT SELECT ON haf_stats_app.community_feature_status TO haf_stats_user;
 
 -- Per-post engagement state for get_network_engagement.
 -- One row per unique root post (parent_author = ''). post_day is the FIRST
@@ -325,10 +347,25 @@ GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
 -- rebuild script's one-transaction-per-batch loop cleans up after itself.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION haf_stats_app.prepare_community_batch_stage()
+-- The zero-argument form must go before the defaulted one is created, or a bare
+-- prepare_community_batch_stage() call is ambiguous between the two overloads.
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_community_batch_stage();
+
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_community_batch_stage(
+    _last_block INT DEFAULT NULL
+)
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    -- Below hivemind's start block no comment can belong to a community, so the stage is
+    -- provably empty for the whole 2016-2019 replay and the two lookup indexes below have
+    -- nothing to serve. The tables themselves must still exist - the comment scan writes
+    -- to them unconditionally as a data-modifying CTE - but the indexes are skippable, and
+    -- resolve_community_batch() short-circuits on the empty stage. NULL means "caller did
+    -- not say", so build them (the safe default).
+    _pre_community BOOLEAN := (_last_block IS NOT NULL
+                               AND _last_block < haf_stats_app.community_start_block());
 BEGIN
     -- Probe first rather than leaning on IF NOT EXISTS: the tables survive for the life of
     -- the transaction, so a multi-batch rebuild loop would otherwise emit one "already
@@ -357,9 +394,12 @@ BEGIN
     ) ON COMMIT DROP;
 
     -- Both walk directions are index lookups; without these the resolver re-scans the
-    -- whole stage once per recursion level.
-    CREATE INDEX ON haf_stats_community_batch_stage (author_id, permlink, id);
-    CREATE INDEX ON haf_stats_community_batch_stage (parent_author_id, parent_permlink, id);
+    -- whole stage once per recursion level. Skipped entirely below the community start
+    -- block, where the stage can never receive a row.
+    IF NOT _pre_community THEN
+        CREATE INDEX ON haf_stats_community_batch_stage (author_id, permlink, id);
+        CREATE INDEX ON haf_stats_community_batch_stage (parent_author_id, parent_permlink, id);
+    END IF;
 
     -- Communities of comments this batch DELETED, captured before the row disappears.
     -- A reply created earlier in the same batch than its parent's deletion still belongs
@@ -385,6 +425,16 @@ LANGUAGE plpgsql
 SET jit = OFF
 AS $$
 BEGIN
+
+-- Nothing staged, nothing to resolve. This is the whole pre-2019 replay (no comment can
+-- address a community before hivemind's start block) and every later batch that created
+-- no content at all, so the WITH RECURSIVE below - plus its writes to comment_registry
+-- and account_community_daily - is skipped rather than run against an empty stage on
+-- every batch. One index probe on a temp table, against process_community_registry's
+-- equivalent "free on a pre-2019 replay" early return.
+IF NOT EXISTS (SELECT 1 FROM haf_stats_community_batch_stage) THEN
+    RETURN;
+END IF;
 
 WITH RECURSIVE resolved AS (
     -- Base 1: root creations. own_community is already the answer (NULL when the category
@@ -891,7 +941,7 @@ IF _first_block <= _high_water THEN
         USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
 END IF;
 
-PERFORM haf_stats_app.prepare_community_batch_stage();
+PERFORM haf_stats_app.prepare_community_batch_stage(_last_block);
 
 -- Comment ops: ONE scan, six outputs.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
@@ -1004,6 +1054,23 @@ classified AS (
 -- prepare_community_batch_stage.
 -- The block_num floor makes the whole community feature free for pre-2019 ranges: no
 -- community can exist before hivemind's start block, so nothing is staged at all.
+-- Resolve the parent names ONCE per distinct name, not once per creation op — the rule
+-- stated at the top of this file ("resolve hafd.accounts AFTER pre-aggregation") and
+-- followed by contrib/batch_replies below. A rebuild batch (BATCH_SIZE=1000000) carries
+-- millions of post-2019 creations across far fewer distinct parents, so probing per raw
+-- row is exactly the accounts-probe blowup that rule exists to prevent. Roots have
+-- parent_author = '' and match nothing, so they keep the NULL the LEFT JOIN gave them.
+community_parent_ids AS MATERIALIZED (
+    SELECT a.name, a.id
+    FROM hafd.accounts a
+    WHERE a.name IN (
+        SELECT DISTINCT c.parent_author
+        FROM classified c
+        WHERE c.is_create
+          AND c.parent_author <> ''
+          AND c.block_num >= haf_stats_app.community_start_block()
+    )
+),
 community_stage AS (
     INSERT INTO haf_stats_community_batch_stage
         (id, author_id, permlink, parent_author_id, parent_permlink,
@@ -1030,7 +1097,7 @@ community_stage AS (
                 THEN c.parent_permlink
         END
     FROM classified c
-    LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
+    LEFT JOIN community_parent_ids pa ON pa.name = c.parent_author
     WHERE c.is_create
       AND c.block_num >= haf_stats_app.community_start_block()
 ),
@@ -1404,7 +1471,7 @@ SET jit = OFF
 AS $$
 BEGIN
 
-PERFORM haf_stats_app.prepare_community_batch_stage();
+PERFORM haf_stats_app.prepare_community_batch_stage(_last_block);
 
 WITH comment_ops AS MATERIALIZED (
     SELECT
@@ -1509,6 +1576,23 @@ classified AS (
 -- prepare_community_batch_stage.
 -- The block_num floor makes the whole community feature free for pre-2019 ranges: no
 -- community can exist before hivemind's start block, so nothing is staged at all.
+-- Resolve the parent names ONCE per distinct name, not once per creation op — the rule
+-- stated at the top of this file ("resolve hafd.accounts AFTER pre-aggregation") and
+-- followed by contrib/batch_replies below. A rebuild batch (BATCH_SIZE=1000000) carries
+-- millions of post-2019 creations across far fewer distinct parents, so probing per raw
+-- row is exactly the accounts-probe blowup that rule exists to prevent. Roots have
+-- parent_author = '' and match nothing, so they keep the NULL the LEFT JOIN gave them.
+community_parent_ids AS MATERIALIZED (
+    SELECT a.name, a.id
+    FROM hafd.accounts a
+    WHERE a.name IN (
+        SELECT DISTINCT c.parent_author
+        FROM classified c
+        WHERE c.is_create
+          AND c.parent_author <> ''
+          AND c.block_num >= haf_stats_app.community_start_block()
+    )
+),
 community_stage AS (
     INSERT INTO haf_stats_community_batch_stage
         (id, author_id, permlink, parent_author_id, parent_permlink,
@@ -1535,7 +1619,7 @@ community_stage AS (
                 THEN c.parent_permlink
         END
     FROM classified c
-    LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
+    LEFT JOIN community_parent_ids pa ON pa.name = c.parent_author
     WHERE c.is_create
       AND c.block_num >= haf_stats_app.community_start_block()
 ),

@@ -41,7 +41,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 # Before process_content_stats: that file's community staging calls
-# haf_stats_app.is_community_name / community_start_block, defined here.
+# haf_stats_app.community_start_block(), defined here.
 run_sql_file "${SCRIPT_DIR}/../db/process_community_registry.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
@@ -149,24 +149,42 @@ psql_cmd -c "
 #     it returns immediately for ranges below the community start block, so a node still
 #     replaying 2016 skips it entirely.
 #
+#     RESUMABLE, which is the whole point of the watermark: the gate is
+#     community_backfill_status.backfilled_through, NOT "is community_registry empty?". The
+#     old emptiness gate meant an interrupted sweep (chunk 5 of 50) left the table non-empty
+#     and every subsequent install skipped step 8a entirely, stranding every community
+#     registered past that point — permanently and silently. Each chunk advances the
+#     watermark in the SAME transaction that does its work, so a crash can never record
+#     progress it did not make, and the next install picks up exactly where it stopped.
+#
 #     The per-comment community mapping is NOT self-healed here: it rides on comment_registry,
 #     whose create-vs-edit replay only works from genesis. Repairing it is
 #     scripts/rebuild_content_volume.sh (see README).
 : "${COMMUNITY_BACKFILL_BATCH:=1000000}"
-community_rows="$(psql_cmd -Atc "SELECT COUNT(*) FROM haf_stats_backend.community_registry")"
 community_start="$(psql_cmd -Atc "SELECT haf_stats_app.community_start_block()")"
 app_head="$(psql_cmd -Atc "SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status")"
+community_done="$(psql_cmd -Atc "SELECT COALESCE(MAX(backfilled_through), haf_stats_app.community_start_block() - 1) FROM haf_stats_app.community_backfill_status")"
 
-if [[ "${community_rows}" =~ ^[0-9]+$ && "${community_start}" =~ ^[0-9]+$ && "${app_head}" =~ ^[0-9]+$ ]] \
-   && (( community_rows == 0 )) && (( app_head >= community_start )); then
-    log "Backfilling the community registry over blocks ${community_start}-${app_head} in batches of ${COMMUNITY_BACKFILL_BATCH} (one transaction each)..."
+if [[ "${community_start}" =~ ^[0-9]+$ && "${app_head}" =~ ^[0-9]+$ && "${community_done}" =~ ^-?[0-9]+$ ]] \
+   && (( app_head >= community_start )) && (( community_done < app_head )); then
     cb_first="${community_start}"
+    if (( community_done >= community_start )); then
+        cb_first=$(( community_done + 1 ))
+        log "Resuming the community registry backfill from block ${cb_first} (previous sweep reached ${community_done})."
+    fi
+    log "Backfilling the community registry over blocks ${cb_first}-${app_head} in batches of ${COMMUNITY_BACKFILL_BATCH} (one transaction each)..."
     while (( cb_first <= app_head )); do
         cb_last=$(( cb_first + COMMUNITY_BACKFILL_BATCH - 1 ))
         if (( cb_last > app_head )); then
             cb_last="${app_head}"
         fi
-        psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.process_community_registry(${cb_first}, ${cb_last});"
+        # One -c string is one transaction: the watermark cannot outrun the work it records.
+        psql_cmd -c "SET ROLE haf_stats_owner;
+                     SELECT haf_stats_app.process_community_registry(${cb_first}, ${cb_last});
+                     INSERT INTO haf_stats_app.community_backfill_status (backfilled_through)
+                       SELECT ${cb_last}
+                       WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.community_backfill_status);
+                     UPDATE haf_stats_app.community_backfill_status SET backfilled_through = ${cb_last};"
         cb_first=$(( cb_last + 1 ))
     done
     log "Community registry backfill complete."

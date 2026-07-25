@@ -100,27 +100,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap on_exit EXIT
 
-require_number() {
-    local name="$1" value="$2"
-    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-        echo "${name} must be a non-negative integer; got '${value}'." >&2
-        exit 2
-    fi
-}
-
-# Detect a live processor. Scoped to THIS database (pg_stat_activity is cluster-wide, so
-# an unrelated HAF app running its own main() elsewhere must not block us). Matching on a
-# leading CALL keeps this from matching its own SELECT.
-count_live_processors() {
-    psql_cmd -Atc "
-        SELECT COUNT(*)
-        FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND datname = current_database()
-          AND state <> 'idle'
-          AND BTRIM(query) ILIKE 'CALL%haf_stats_app.main%'
-    "
-}
+# require_number / count_live_processors / assert_no_live_processor come from common.sh.
 
 wait_for_postgres
 
@@ -155,18 +135,7 @@ if (( TO_BLOCK != app_block )); then
     exit 2
 fi
 
-# Assign, then validate: `if (( $(cmd) > 0 ))` would FAIL OPEN if psql returned an empty
-# string (connection reset, server restart) — `(( > 0 ))` is an arithmetic syntax error
-# returning 1, and set -e is suppressed inside an `if` condition, so the guard would
-# silently conclude "no processor" and TRUNCATE while one is live.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor is still running; refusing to rebuild." >&2
-    echo "Stop it first: SELECT haf_stats_app.stop_processing();  (or stop the haf-stats-process container), then re-run." >&2
-    exit 2
-fi
+assert_no_live_processor "The haf_stats processor is still running; refusing to rebuild."
 
 log "Rebuilding content-volume + per-account content aggregates through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
@@ -217,14 +186,7 @@ done
 # main() return, so process_blocks.sh exits and the container can restart under its restart
 # policy, re-arming itself via allow_processing() — this is a plausible race, not a theoretical
 # one.) Assign-then-validate for the same fail-open reason as the pre-flight check.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor STARTED DURING the rebuild; its head-block writes have" >&2
-    echo "double-counted onto the rebuilt tables. Stop it and re-run this script." >&2
-    exit 2
-fi
+assert_no_live_processor "The haf_stats processor STARTED DURING the rebuild; its head-block writes have double-counted onto the rebuilt tables. Stop it and re-run this script."
 
 # Reseal the endpoint rollup from the rebuilt daily tables. psql runs a multi-statement
 # -c string as one implicit transaction, so readers see the old rollup until it commits,

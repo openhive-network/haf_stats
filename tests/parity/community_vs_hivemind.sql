@@ -93,13 +93,40 @@ BEGIN
     -- documented repair (stop processor -> rebuild -> restart, which the README budgets at
     -- 2-4h). Comparing our processed head against hivemind's tip would report every active
     -- author as an undercount and fail the verification run for a node that is simply behind.
-    SELECT COALESCE(MIN(last_processed_block), 0) INTO _our_head_block
+    -- MAX, matching every other read of app_status in this repo (install_app.sh,
+    -- the rebuild scripts, process_content_stats' recurrence guard). MIN would report
+    -- the LOWEST head across rows, which on a multi-row app_status understates how far
+    -- we have processed and silently narrows every bounded check below.
+    SELECT COALESCE(MAX(last_processed_block), 0) INTO _our_head_block
     FROM haf_stats_app.app_status;
+
+    -- A head of 0 means nothing has been processed at all. There is no block 0 in
+    -- hafd.blocks, so resolving a timestamp is impossible - but this is precisely the
+    -- "we produced nothing while hivemind has plenty" case the empty-table branch below
+    -- refuses to let pass silently. Returning here would reopen that exact door, so
+    -- handle it explicitly instead: it is only benign when hivemind is equally empty.
+    IF _our_head_block = 0 THEN
+        EXECUTE $q$
+            SELECT COUNT(*) FROM hivemind_app.hive_posts hp
+            WHERE hp.community_id IS NOT NULL AND hp.counter_deleted = 0
+        $q$ INTO _hm_in_range;
+
+        IF _hm_in_range > 0 THEN
+            RAISE EXCEPTION 'community oracle: haf_stats has processed no blocks (last_processed_block = 0), but hivemind holds % community post(s)/comment(s). The app is not running, or its state was reset - the derivation cannot be verified.',
+                _hm_in_range;
+        END IF;
+
+        RAISE NOTICE 'community oracle: nothing processed yet and hivemind is empty too - skipping.';
+        RETURN;
+    END IF;
 
     SELECT created_at INTO _our_head_time FROM hafd.blocks WHERE num = _our_head_block;
 
+    -- Distinct from the head = 0 case: a NON-zero head with no hafd.blocks row means the
+    -- block data is genuinely missing (a gap or partial replay), which is an environment
+    -- fault rather than a derivation result. Skipping is right, but say so loudly.
     IF _our_head_time IS NULL THEN
-        RAISE NOTICE 'community oracle: cannot resolve the timestamp of our processed head block % - skipping.', _our_head_block;
+        RAISE NOTICE 'community oracle: cannot resolve the timestamp of our processed head block % (no hafd.blocks row) - skipping.', _our_head_block;
         RETURN;
     END IF;
 
@@ -155,15 +182,44 @@ BEGIN
     --    process_community_registry: hivemind applies the same authorization rules, so
     --    where we recorded a title it must be hivemind's. Communities we have no title
     --    for (no updateProps seen) are skipped, as is hivemind's '' default.
+    --
+    --    Bounded by our head, for the same reason checks 2 and 4 are. Title is
+    --    last-writer-wins state, not an append-only count: hivemind sits at the chain tip
+    --    and we sit at _our_head_block, so a community RENAMED in between legitimately
+    --    disagrees - hivemind has indexed the rename and we have not. Comparing unbounded
+    --    made a correct derivation fail the whole verification run, and blamed the role
+    --    gate while doing it. hive_communities carries no per-title timestamp, so bound by
+    --    the only thing that is comparable: skip communities whose title-setting activity
+    --    could postdate our head, i.e. those with a 'community' custom_json op after it.
     -- ---------------------------------------------------------------------
-    EXECUTE $q$
+    EXECUTE FORMAT($q$
+        WITH renamed_after_our_head AS (
+            -- ONE scan of the post-head 'community' ops, not one per community. The name is
+            -- pulled with a regex on the raw json TEXT rather than a ::jsonb cast: the
+            -- payload is free-form and may be malformed, and a cast would abort the check
+            -- (the same hazard process_community_registry traps per row). Regex is also
+            -- PG14-safe, which the CI stub gate requires.
+            SELECT DISTINCT
+                SUBSTRING(ov.body_value ->> 'json' FROM '"community"[[:space:]]*:[[:space:]]*"([^"]+)"') AS community
+            FROM hive.operations_view ov
+            JOIN hafd.blocks b ON b.num = ov.block_num
+            WHERE ov.op_type_id = 18
+              AND ov.body_value ->> 'id' = 'community'
+              AND b.created_at > %L
+        )
         SELECT COUNT(*)
         FROM haf_stats_backend.community_registry cr
         JOIN hivemind_app.hive_communities hc ON hc.name = cr.community
         WHERE cr.title IS NOT NULL
           AND hc.title <> ''
           AND cr.title IS DISTINCT FROM hc.title
-    $q$ INTO _title_mismatches;
+          AND cr.community NOT IN (
+              -- NOT IN over a subquery containing NULL returns NO rows, which would silently
+              -- disable this entire check the moment one unparseable payload appears. The
+              -- WHERE guarantees no NULL reaches it.
+              SELECT r.community FROM renamed_after_our_head r WHERE r.community IS NOT NULL
+          )
+    $q$, _our_head_time) INTO _title_mismatches;
 
     -- ---------------------------------------------------------------------
     -- 4. Per-(account, community) counts over a sample of the most active community
