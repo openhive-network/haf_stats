@@ -49,7 +49,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_hp_distribution.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_hp_distribution_snapshot();" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SET custom.swagger_url = 'localhost';" -f /endpoint_schema.sql &&
-        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_backend TO haf_stats_user; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;"
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_backend TO haf_stats_user; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;" &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /interactions_cap.sql
     volumes:
       - ../tests/ci_setup.sql:/ci_setup.sql:ro
       - ../db/process_block_range.sql:/process_block_range.sql:ro
@@ -66,6 +67,9 @@ services:
       # Real mainnet threads replayed as raw ops, checked against hivemind's own verdict.
       - ../tests/mainnet_community_fixture.sql:/mainnet_community_fixture.sql:ro
       - ../tests/parity/community_vs_hivemind.sql:/community_vs_hivemind.sql:ro
+      # Executes the op-ceiling guard, which no tavern test can reach (the corpus is far
+      # below any sane ceiling), so the truncation path does not ship unexecuted.
+      - ../tests/parity/interactions_cap.sql:/interactions_cap.sql:ro
       - ../db/seed_data.sql:/seed_data.sql:ro
       - ../db/process_account_cohorts.sql:/process_account_cohorts.sql:ro
       - ../db/process_governance_concentration.sql:/process_governance_concentration.sql:ro

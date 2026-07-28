@@ -1,0 +1,14 @@
+[
+  {"interaction_type": "reply", "partner": "dollarvigilante", "interaction_count": 2, "partner_rank": 1, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "reply", "partner": "condra", "interaction_count": 1, "partner_rank": 2, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "reply", "partner": "emancipatedhuman", "interaction_count": 1, "partner_rank": 3, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "reply", "partner": null, "interaction_count": 3, "partner_rank": 4, "partners_merged": 3, "covered_from": "2016-03-24"},
+  {"interaction_type": "vote", "partner": "larkenrose", "interaction_count": 4, "partner_rank": 1, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "vote", "partner": "dollarvigilante", "interaction_count": 3, "partner_rank": 2, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "vote", "partner": "barrycooper", "interaction_count": 2, "partner_rank": 3, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "vote", "partner": null, "interaction_count": 14, "partner_rank": 4, "partners_merged": 11, "covered_from": "2016-03-24"},
+  {"interaction_type": "follow", "partner": "acidyo", "interaction_count": 1, "partner_rank": 1, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "follow", "partner": "barrycooper", "interaction_count": 1, "partner_rank": 2, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "follow", "partner": "ben", "interaction_count": 1, "partner_rank": 3, "partners_merged": 1, "covered_from": "2016-03-24"},
+  {"interaction_type": "follow", "partner": null, "interaction_count": 21, "partner_rank": 4, "partners_merged": 21, "covered_from": "2016-03-24"}
+]

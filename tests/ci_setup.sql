@@ -94,6 +94,13 @@ INSERT INTO hafd.accounts (id, name) VALUES (1, 'hiveio') ON CONFLICT DO NOTHING
 INSERT INTO hafd.accounts (id, name) VALUES (2001, 'dapptester') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (3001, 'rctester') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (4001, 'cattester') ON CONFLICT DO NOTHING;
+-- get_account_interactions fixture account (#48) plus its counterparties. Partner names are
+-- read straight from the op bodies and never joined to hafd.accounts, so the partners do not
+-- strictly need rows here — they are seeded anyway so the fixture reads like real chain data.
+INSERT INTO hafd.accounts (id, name) VALUES (5001, 'ixtester') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (5002, 'ixalice') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (5003, 'ixbob') ON CONFLICT DO NOTHING;
+INSERT INTO hafd.accounts (id, name) VALUES (5004, 'ixcarol') ON CONFLICT DO NOTHING;
 
 -- Op type names for the get_network_rc_utilization + get_account_rc_footprint synthetic tests
 -- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
@@ -191,6 +198,115 @@ VALUES
 (4001, 4001, 4000, 18, 2, 4000000002),
 (4001, 4001, 4000, 18, 3, 4000000003)
 ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- get_account_interactions fixture (#48), account ixtester (5001), block 5000.
+--
+-- These rows use the REAL HAF op-type numbering (0 vote, 1 comment, 2 transfer, 18
+-- custom_json) because this endpoint reads op semantics, not just cost: the other fixtures
+-- above only price by op_type_id, so their "vote (op 1)" labelling is irrelevant to them but
+-- would be actively wrong here.
+--
+-- Every row is body-joined (operation_id set), because a NULL operation_id row is dropped by
+-- the endpoint's inner join to hive.operations_view and would silently vanish from the
+-- fixture. operation_id encodes block 5000 as hafd.operation_id(5000, seq) = 5000*1e6 + seq;
+-- account_op_seq_no is dense and monotonic with block, which account_op_seq_range's binary
+-- search requires.
+--
+-- The fixture is built so every band AND every exclusion rule is exercised. Expected result
+-- for ixtester over the full window:
+--   reply    -> ixalice 2, ixbob 1     (ixalice gets THREE comment ops but only two count:
+--                                       r1 is created then EDITED — the edit reuses r1's
+--                                       permlink and is not a second interaction — plus r4)
+--   vote     -> ixalice 2, ixbob 1        (raw op count: a re-vote IS a second interaction)
+--   transfer -> ixbob 1
+--   reblog   -> ixalice 1                 (two ops, same (author, permlink): idempotent state)
+--   follow   -> ixbob 2  (TWO follow ops for the SAME partner in the SAME block: a follow is
+--                         an event, not idempotent state, so both count), ixcarol 1
+--                        (ixalice's unfollow and the mute do NOT count)
+-- Excluded by construction: the self-vote, the self-reply, the root post (no parent_author),
+-- the received vote (transacting <> account), the delegation (op 40), the DApp custom_json,
+-- the malformed payload, and the four ixdave-targeted rows below (unvote, un-reblog,
+-- actor-mismatch follow, follow under a third id) — no 'ixdave' partner may ever appear.
+INSERT INTO hive.account_operations_view
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no, operation_id)
+VALUES
+(5001, 5001, 5000,  1,  1, 5000000101),   -- reply -> ixalice (create r1)
+(5001, 5001, 5000,  1,  2, 5000000102),   -- EDIT of r1: same permlink, not a new interaction
+(5001, 5001, 5000,  1,  3, 5000000103),   -- reply -> ixbob
+(5001, 5001, 5000,  1,  4, 5000000104),   -- ROOT post (parent_author '') -> not an interaction
+(5001, 5001, 5000,  1,  5, 5000000105),   -- self-reply -> excluded
+(5001, 5001, 5000,  0,  6, 5000000106),   -- vote -> ixalice
+(5001, 5001, 5000,  0,  7, 5000000107),   -- vote -> ixalice again (re-vote counts)
+(5001, 5001, 5000,  0,  8, 5000000108),   -- vote -> ixbob
+(5001, 5001, 5000,  0,  9, 5000000109),   -- self-vote -> excluded
+(5001, 9999, 5000,  0, 10, 5000000110),   -- RECEIVED vote (transacting <> account) -> excluded
+(5001, 5001, 5000,  2, 11, 5000000111),   -- transfer -> ixbob
+(5001, 5001, 5000, 40, 12, 5000000112),   -- delegate_vesting_shares -> never counted
+(5001, 5001, 5000, 18, 13, 5000000113),   -- follow -> ixbob      (bare-object payload)
+(5001, 5001, 5000, 18, 14, 5000000114),   -- follow -> ixcarol    (ARRAY-wrapped payload)
+(5001, 5001, 5000, 18, 15, 5000000115),   -- UNFOLLOW ixalice (what: []) -> excluded
+(5001, 5001, 5000, 18, 16, 5000000116),   -- MUTE ixalice (what: ["ignore"]) -> excluded
+(5001, 5001, 5000, 18, 17, 5000000117),   -- reblog ixalice/p1    (bare-object payload)
+(5001, 5001, 5000, 18, 18, 5000000118),   -- reblog ixalice/p1 AGAIN -> idempotent, counts once
+(5001, 5001, 5000, 18, 19, 5000000119),   -- DApp custom_json (sm_) -> no counterparty
+(5001, 5001, 5000, 18, 20, 5000000120),   -- MALFORMED json -> try_jsonb returns NULL, dropped
+(5001, 5001, 5000,  1, 21, 5000000121),   -- second DISTINCT reply -> ixalice (permlink r4)
+(5001, 5001, 5000, 18, 22, 5000000122),   -- SECOND follow of ixbob, SAME block (regression)
+(5001, 5001, 5000,  0, 23, 5000000123),   -- UNVOTE (weight 0) -> retraction, excluded
+(5001, 5001, 5000, 18, 24, 5000000124),   -- UN-REBLOG (delete key) -> retraction, excluded
+(5001, 5001, 5000, 18, 25, 5000000125),   -- follow whose payload actor is NOT the signer
+(5001, 5001, 5000, 18, 26, 5000000126)    -- follow published under a THIRD custom_json id
+ON CONFLICT DO NOTHING;
+
+-- Bodies for the rows above. The two custom_json payload SHAPES both appear because both are
+-- common on chain (measured over the first 5,000,000 blocks: 67% bare object, 33% array-wrapped
+-- ["follow", {...}]), and a parser that assumes one silently drops the other. Note the reblog at
+-- seq 17 arrives under id 'follow': the custom_json id is NOT a reliable discriminator, so the
+-- operation is identified from the payload KEYS, and this row proves it.
+INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
+(5000000101, 1, '{"author": "ixtester", "permlink": "r1", "parent_author": "ixalice", "parent_permlink": "p1"}'),
+(5000000102, 1, '{"author": "ixtester", "permlink": "r1", "parent_author": "ixalice", "parent_permlink": "p1"}'),
+(5000000103, 1, '{"author": "ixtester", "permlink": "r2", "parent_author": "ixbob", "parent_permlink": "p2"}'),
+(5000000104, 1, '{"author": "ixtester", "permlink": "root1", "parent_author": "", "parent_permlink": "hive-100001"}'),
+(5000000105, 1, '{"author": "ixtester", "permlink": "r3", "parent_author": "ixtester", "parent_permlink": "root1"}'),
+(5000000106, 0, '{"voter": "ixtester", "author": "ixalice", "permlink": "p1", "weight": 10000}'),
+(5000000107, 0, '{"voter": "ixtester", "author": "ixalice", "permlink": "p9", "weight": 5000}'),
+(5000000108, 0, '{"voter": "ixtester", "author": "ixbob", "permlink": "p2", "weight": 10000}'),
+(5000000109, 0, '{"voter": "ixtester", "author": "ixtester", "permlink": "root1", "weight": 10000}'),
+(5000000110, 0, '{"voter": "ixwhale", "author": "ixtester", "permlink": "root1", "weight": 10000}'),
+(5000000111, 2, '{"from": "ixtester", "to": "ixbob", "amount": {"amount": "1000", "precision": 3, "nai": "@@000000021"}}'),
+(5000000112, 40, '{"delegator": "ixtester", "delegatee": "ixalice", "vesting_shares": {"amount": "1", "precision": 6, "nai": "@@000000037"}}'),
+(5000000113, 18, '{"id": "follow", "json": "{\"follower\":\"ixtester\",\"following\":\"ixbob\",\"what\":[\"blog\"]}"}'),
+(5000000114, 18, '{"id": "follow", "json": "[\"follow\",{\"follower\":\"ixtester\",\"following\":\"ixcarol\",\"what\":[\"blog\"]}]"}'),
+(5000000115, 18, '{"id": "follow", "json": "{\"follower\":\"ixtester\",\"following\":\"ixalice\",\"what\":[]}"}'),
+(5000000116, 18, '{"id": "follow", "json": "{\"follower\":\"ixtester\",\"following\":\"ixalice\",\"what\":[\"ignore\"]}"}'),
+(5000000117, 18, '{"id": "follow", "json": "{\"account\":\"ixtester\",\"author\":\"ixalice\",\"permlink\":\"p1\"}"}'),
+(5000000118, 18, '{"id": "reblog", "json": "[\"reblog\",{\"account\":\"ixtester\",\"author\":\"ixalice\",\"permlink\":\"p1\"}]"}'),
+(5000000119, 18, '{"id": "sm_claim_daily", "json": "{\"type\":\"daily\"}"}'),
+(5000000120, 18, '{"id": "follow", "json": "{not valid json at all"}'),
+(5000000121, 1, '{"author": "ixtester", "permlink": "r4", "parent_author": "ixalice", "parent_permlink": "p1"}'),
+-- Regression guard: a follow is an EVENT, so a second follow of the SAME partner in the SAME
+-- block must count twice. An earlier revision keyed every op-18 row on (author, permlink) --
+-- absent from a follow payload, so the key was NULL and collapsed to one shared fallback per
+-- block, silently merging these two into one (293 real follows lost over the first 5M blocks).
+(5000000122, 18, '{"id": "follow", "json": "{\"follower\":\"ixtester\",\"following\":\"ixbob\",\"what\":[\"blog\"]}"}'),
+-- Four exclusion rules that would otherwise ship UNEXECUTED — every one of them targets ixdave,
+-- so if any predicate is inverted or deleted an 'ixdave' partner appears and the expectations
+-- above fail loudly. Without these the suite stayed green with the weight-0 and `delete` checks
+-- removed entirely.
+--   weight 0  -> an unvote withdraws a vote; a retraction is not an interaction.
+(5000000123, 0, '{"voter": "ixtester", "author": "ixdave", "permlink": "p5", "weight": 0}'),
+--   delete    -> hivemind's un-reblog payload; same shape as a reblog plus a delete key.
+(5000000124, 18, '{"id": "reblog", "json": "[\"reblog\",{\"account\":\"ixtester\",\"author\":\"ixdave\",\"permlink\":\"p6\",\"delete\":\"delete\"}]"}'),
+--   actor mismatch -> the payload names someone else as the follower. hivemind returns early on
+--   this, so the follow does not exist on chain and must not be graphed to the signer.
+(5000000125, 18, '{"id": "follow", "json": "{\"follower\":\"ixalice\",\"following\":\"ixdave\",\"what\":[\"blog\"]}"}'),
+--   third id  -> the payload parse is gated on id IN ('follow','reblog'). That gate is a
+--   deliberate scope limit (parsing every custom_json would reinstate the per-op cost the gate
+--   removes), and this row pins the boundary so it cannot change silently.
+(5000000126, 18, '{"id": "notify", "json": "{\"follower\":\"ixtester\",\"following\":\"ixdave\",\"what\":[\"blog\"]}"}')
+ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
 (4000000001, 18, '{"id": "sm_claim_daily"}'),

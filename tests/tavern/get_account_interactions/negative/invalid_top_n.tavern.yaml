@@ -1,0 +1,60 @@
+---
+test_name: Account interactions rejects invalid top_n
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+# The EMPTY top_n stage is the one that matters most. PostgREST passes an empty query param
+# through as SQL NULL, and a guard written as `IF top_n < 1 OR top_n > 50` evaluates to NULL
+# for it — so it never fires, and the ranking filters downstream (rn <= top_n / rn > top_n)
+# then yield NULL for every row. The endpoint would answer HTTP 200 with an EMPTY body for a
+# valid account, which no assertion about row values would ever catch. The guard leads with
+# `top_n IS NULL OR ...` precisely to turn that into this 400.
+stages:
+  - name: Reject zero top_n (lower bound)
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        top_n: "0"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true
+
+  - name: Reject over-max top_n (upper bound)
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        top_n: "51"
+    response:
+      status_code: 400
+
+  - name: Reject negative top_n
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        top_n: "-1"
+    response:
+      status_code: 400
+
+  - name: Reject empty top_n (NULL) instead of silently returning no rows
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        top_n: ""
+    response:
+      status_code: 400

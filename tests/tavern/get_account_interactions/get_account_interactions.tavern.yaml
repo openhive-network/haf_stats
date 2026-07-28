@@ -1,0 +1,232 @@
+---
+test_name: Account interactions groups outgoing activity by type and counterparty
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Values come from the ixtester fixture in tests/ci_setup.sql, which seeds RAW ops (real HAF
+# op numbering: 0 vote, 1 comment, 2 transfer, 18 custom_json) plus their bodies, so this
+# exercises the endpoint's actual derivation rather than a pre-aggregated table.
+#
+# An explicit date range is required here, not a stylistic choice: the stub's block numbers
+# are NOT monotonic with created_at (the community fixture seeds block 37,500,000 dated 2019
+# alongside block 6000 dated 2021), so the full-history default resolves to an inverted block
+# range and correctly returns nothing. Real HAF guarantees that monotonicity. The sibling
+# rc-footprint tests pin their dates for the same reason; the default-window path is covered
+# on a real node instead.
+#
+# ixtester's 26 seeded ops reduce to exactly these interactions:
+#   reply    ixalice 2  — THREE comment ops: r1 created, r1 EDITED (same permlink, so not a
+#                         second interaction), and r4. This is the de-duplication.
+#            ixbob 1
+#   vote     ixalice 2  — TWO vote ops, both counted: a re-vote is a genuine second act, so
+#                         votes are deliberately NOT de-duplicated the way replies are.
+#            ixbob 1
+#   transfer ixbob 1    — amount never affects the count
+#   reblog   ixalice 1  — TWO reblog ops for the same (author, permlink); reblog is idempotent
+#                         state in Hivemind, so it counts once. One of them arrives under
+#                         id='follow', proving the custom_json id is not the discriminator.
+#   follow   ixbob 2  — TWO follow ops for the SAME partner in the SAME block. A follow is an
+#                       EVENT, not idempotent state like a reblog, so both count. This is a
+#                       regression guard: an earlier revision keyed every op-18 row on
+#                       (author, permlink), which a follow payload does not carry, so the key
+#                       was NULL and every follow in a block shared one fallback key — merging
+#                       these two into one (293 real follows lost over the first 5M blocks).
+#            ixcarol 1 — bare-object (ixbob) AND array-wrapped (ixcarol) payload shapes
+#
+# No 'ixdave' partner may EVER appear: four seeded rows target that account and every one of
+# them must be excluded (a weight-0 unvote, an un-reblog carrying `delete`, a follow whose
+# payload names a different actor than the signer, and a follow published under a third
+# custom_json id). Inverting any of those predicates makes ixdave surface here.
+#
+# Never present, each proving a separate exclusion rule: the self-vote and self-reply
+# (self-interactions), the root post (no parent_author), the received vote (transacting
+# account <> account, i.e. incoming), the delegate_vesting_shares op (delegations belong to
+# the Influence & Delegation Map), the unfollow (what: []) and mute (what: ["ignore"]), the
+# DApp custom_json (sm_claim_daily has no counterparty), and the malformed JSON payload.
+stages:
+  - name: GET /rpc/get_account_interactions returns every band for ixtester
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+    response:
+      status_code: 200
+      json:
+        - interaction_type: "reply"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "reply"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "transfer"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "reblog"
+          partner: "ixalice"
+          interaction_count: 1
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "follow"
+          partner: "ixbob"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "follow"
+          partner: "ixcarol"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+
+  # top_n collapses the tail into a single Others band whose partners_merged reports how many
+  # partners it absorbed. The per-type TOTAL must not change — Top-N re-slices, never re-counts.
+  - name: top_n=1 collapses each type's tail into an Others band
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+        top_n: "1"
+    response:
+      status_code: 200
+      json:
+        - interaction_type: "reply"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        # reply total stays 2 + 1 = 3, same as with the default top_n.
+        - interaction_type: "reply"
+          partner: null
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: null
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        # transfer and reblog have exactly one partner each, so NO Others row is emitted —
+        # an empty band must never appear as a zero row.
+        - interaction_type: "transfer"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "reblog"
+          partner: "ixalice"
+          interaction_count: 1
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "follow"
+          partner: "ixbob"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "follow"
+          partner: null
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+
+  - name: type_filter narrows to a single band
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+        type_filter: "follow"
+    response:
+      status_code: 200
+      json:
+        - interaction_type: "follow"
+          partner: "ixbob"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "follow"
+          partner: "ixcarol"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+
+  # The dates are REQUIRED for this stage to mean anything. Without them the window defaults to
+  # genesis..today, which in the stub resolves to an inverted block range (its block numbers are
+  # not monotonic with their dates), so the function returns at the range guard BEFORE the
+  # account lookup is reached — and the stage would pass identically with the
+  # `IF _account_id IS NULL THEN RETURN` guard deleted outright. Pinning the same window the
+  # stages above use forces execution to actually reach the account lookup.
+  - name: an unknown account returns empty rather than erroring
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "no-such-account-48"
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+    response:
+      status_code: 200
+      json: []
+
+  # The account has ops, but none in this window. Distinct from the unknown-account path
+  # above: this one gets past the account lookup and returns empty from the seq range.
+  - name: a window with no operations returns empty
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-01"
+    response:
+      status_code: 200
+      json: []

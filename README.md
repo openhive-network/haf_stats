@@ -20,6 +20,7 @@ Only endpoints with **no equivalent in any existing HAF API**. Before adding any
 | `get_account_rc_footprint` | RC cost by op type and DApp — not in any existing API |
 | `get_account_content_stats` | Per-account posting & engagement (posts/comments/votes/replies) + author rewards — not aggregated in any existing API |
 | `get_account_community_activity` | Per-account posts/comments grouped by community — hivemind's `bridge` API returns paginated post *lists* with a community field, never per-community counts |
+| `get_account_interactions` | Per-account outgoing interactions grouped by counterparty — every existing API groups an account's activity by op type or DApp, never by *who it was with* |
 | `get_network_rc_utilization` | Network-wide RC consumption by category — not in any existing API |
 | `get_network_custom_json_usage` | Per-`id` network custom_json usage time-series (op counts, bytes, estimated RC) — no existing API breaks custom_json out by id |
 | `get_network_top_custom_json` | Leaderboard of most-used custom_json ids / DApps / categories — no existing API ranks custom_json actions |
@@ -319,6 +320,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
 | `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /rpc/get_account_community_activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
+| `GET /rpc/get_account_interactions` | ✅ Live | *(on-demand, no processor)* | Per-account outgoing interactions by type (reply/vote/transfer/reblog/follow) and counterparty; Top-N partners per type plus an `Others` band |
 | `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
 | `GET /rpc/get_network_custom_json_usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
@@ -420,6 +422,152 @@ single batch, so most parent links resolve in-batch, which is the case a plain
 every node, and self-guards: it fails if a regenerated sample loses its deep replies, its
 community content, or its legacy-category negatives. The same nodes are mirrored into the
 `hivemind_app` stub, so the oracle above runs over real communities and accounts too.
+
+## Interaction Graph
+
+`get_account_interactions` (#48, backend for `block_explorer_ui#762`) answers "to whom do my
+interactions flow?" — per-account **outgoing** interactions grouped by `(type, partner)` for
+`reply`, `vote`, `transfer`, `reblog` and `follow`, as Top-N partners per type plus an
+`Others` band. The unit is always an interaction **count**; transfer amounts and vote weights
+never affect it, so the bands stay comparable.
+
+It is the app's first **on-demand** aggregate — no table, no processor, no backfill. That is a
+deliberate reversal of the usual pattern here, forced by measurement: over blocks 4,000,000–5,000,000
+there are 1,924,303 vote ops but 715,119 distinct `(voter, author)` pairs and **1,455,953**
+distinct `(voter, author, day)` rows — a daily rollup would compress the op stream only
+**1.32×**, because the social graph is mostly a long tail (66% of pairs occur exactly once).
+Extrapolated to mainnet that is a ~1-billion-row table for votes alone, to serve a widget that
+only ever renders a handful of partners. Reading the ops directly instead reuses the same
+`hive.account_operations_view` + `haf_stats_app.account_op_seq_range` path
+`get_account_rc_footprint` already relies on.
+
+**Budget the cold cache, not the warm one.** The cost is a random heap fetch per op, and those
+bodies are scattered across the account's whole history. On a fully-resident test database a
+50,000-op ceiling looked like ~0.5 s; measured on a full multi-TB node it cost ~0.6–0.9 ms/op
+of random I/O, putting a *moderate* account (~43k ops) at **28 s cold** and heavy accounts near
+**90 s** — past any sane proxy read timeout, and the exact random-read profile that starves
+co-tenant apps on a shared node. Arbitrary account lookups on a multi-TB node are cold far more
+often than warm, so the cold figure is the one that governs.
+
+The ceiling is **4,000 ops per op type**, and the number that matters is `ntypes × cap`: a
+default request budgets op types 0/1/2/18 independently, so its worst case is **16,000** bodies,
+~10–14 s cold — inside the API `statement_timeout` with margin. (Per-type budgeting is what keeps
+a band consistent with its own `type_filter` drill-down, but it does multiply the total: the same
+structure at a 10,000 ceiling would be 40,000 ops, which straddles the timeout.)
+
+When the ceiling bites, the oldest day inside the served set was only *partially* scanned, so its
+ops are **dropped rather than counted**. Paying for rows and then discarding them is deliberate:
+it makes the counts and the disclosed window describe exactly the same period, so re-deriving
+totals over `[covered_from, to_date]` reproduces the endpoint's own answer.
+`tests/parity/interactions_cap.sql` asserts precisely that, per band.
+
+Rules worth knowing, all of them chosen against measurements rather than taste:
+
+* **Outgoing** means the account SIGNED the op (`transacting_account_id = account_id`) — the
+  same predicate the RC footprint uses for "who paid". Verified exact against a direct
+  `hafd.operations` scan for all four op types, with no loss and no double count.
+* **Self-interactions are excluded.** A `You → vote → You` ribbon is a self-loop the sankey
+  cannot draw, and for some accounts self-votes would dominate the top partners.
+  `network_vote_daily.self_votes` still reports them.
+* **Delegations are excluded** — they belong to the Influence & Delegation Map. Only op types
+  0/1/2/18 are ever scanned, so `delegate_vesting_shares` (40) cannot leak in.
+* **`reply` and `reblog` are de-duplicated; `vote`, `transfer` and `follow` are not.** An edit
+  reuses its comment's permlink, so raw op counts overstate replies by ~11% network-wide
+  (18.6% for the account measured) — the same edits-are-not-creations rule `#13` established
+  for content stats. A reblog is idempotent state in Hivemind. A re-vote or a
+  follow→unfollow→re-follow, by contrast, is a genuinely repeated act. The de-dup key always
+  includes the **partner**: `@calva`'s permlink `bitcoin-the-end-of-money-as-we-know-it` was
+  created under one parent, deleted, then re-created under another — two real interactions
+  with two different partners that a permlink-only key would silently collapse into one.
+* **Retractions never count, in any band.** An unfollow (`what: []`), a mute
+  (`what: ["ignore"]`), an un-reblog (the `delete` key) and an **unvote** (`weight = 0`,
+  22,593 of the first 5M blocks' vote ops) all withdraw an action rather than perform one.
+  `post_engagement` already refuses to count weight-0 votes as engagement; this applies the
+  same rule uniformly.
+* De-duplication is **window-scoped**, so an edit of a reply created before the window looks
+  like an in-window creation. Measured at 0.012% of reply edges over 30 days and 0.195% over
+  one day, and exactly zero for the default full-history window.
+
+### Follows and reblogs without hivemind
+
+Both are `custom_json`, which the issue flagged as possibly needing a hivemind join. They do
+not: the counterparty is in the payload, and the same standalone-derivation argument as
+[Community Attribution](#community-attribution) applies. Two shapes occur in real data and
+**neither is rare** — over the first 5,000,000 blocks the split is **67% bare object** vs
+**33% array-wrapped** `["follow", {...}]`, so a parser assuming either one drops a third to
+two-thirds of the data:
+
+```json
+{"follower":"alice","following":"bob","what":["blog"]}
+["reblog",{"account":"alice","author":"bob","permlink":"..."}]
+```
+
+The custom_json `id` is **not** a reliable discriminator (a reblog arrives under `id: "follow"`
+in real data), so the operation is identified from the payload keys. Only a real follow counts,
+and the test matches Hivemind's: it reads `what[0]` lower-cased, **not** "does `what` contain
+blog". Containment would count `["posts","blog"]` — 254 such ops in the first 5M blocks — as a
+follow, where Hivemind reads `posts` and does nothing. Hivemind also requires the payload's
+self-declared actor (`follower` / `account`) to BE the signer and returns early otherwise, so
+that check is applied too — without it the graph would be inflatable by the very account being
+graphed, by signing a payload that names someone else.
+
+Payloads are parsed with `haf_stats_app.try_jsonb`, a plpgsql exception trap — **not** SQL/JSON
+`IS JSON`. That predicate is PostgreSQL 16+, and the stub endpoint-test gate runs
+`postgres:14-alpine`; using it would fail `CREATE FUNCTION` there under `ON_ERROR_STOP` and take
+down every stub-lane test, not just this endpoint's.
+
+### Coverage disclosure
+
+Because the work is done at read time, a very active account over a wide window could scan more
+ops than is reasonable. Rather than failing such a request, the endpoint serves the most recent
+`haf_stats_app.max_interaction_ops()` operations and reports the window it actually covered in
+`covered_from` — partial **disclosure** rather than silent truncation, the pattern `#46`
+established for author retention. Truncation is detected by **counting** the rows fetched (the
+page asks for one more than the ceiling), not by comparing block numbers: when the boundary fell
+inside a single block, "oldest kept" equalled "oldest available" and a truncated answer reported
+full coverage. And because the boundary block's own day is only partly scanned, `covered_from`
+starts the day *after* it rather than presenting a partial day as complete.
+
+PostgREST's own connection carries a `statement_timeout` (`options=-c statement_timeout=30s` in
+`PGRST_DB_URI`), so a pathological request fails cleanly instead of holding one of its 20 pool
+slots for minutes while the client has already given up — PostgreSQL never notices a disconnect,
+since `client_connection_check_interval` defaults to 0.
+
+It has to be on the **connection**, and the two obvious alternatives both silently do nothing:
+
+* A `SET statement_timeout` **function attribute never arms** — the timer is set when the
+  top-level statement begins, and changing the GUC from inside that statement does not re-arm it.
+  Verified: a 2 s `pg_sleep` runs to completion under a 200 ms in-statement timeout.
+* **`ALTER ROLE haf_stats_user SET statement_timeout` is dead config** in the production stack.
+  Role settings apply at login, and PostgreSQL explicitly does not process them for `SET ROLE`;
+  PostgREST logs in as `haf_stats_owner` and switches roles per request.
+
+The connection form is verified to arm (a 2 s sleep cancelled at 200 ms), and it bounds API
+queries only — the block processor uses its own connection, and its batches legitimately run
+long.
+
+Every op type carries its **own** budget. A shared budget made the answer depend on the query:
+votes sharing a page with replies and transfers reported a lower count than the same account
+queried with `type_filter=vote`, where votes had the page to themselves — a band disagreeing with
+its own drill-down. Per-type budgets also stop DApp `custom_json` (which yields no counterparty at
+all) from ever evicting the vote, reply or transfer bands. The ceiling is a function rather than a
+literal specifically so `tests/parity/interactions_cap.sql` can lower it and prove the guard both
+fires and discloses — the busiest account in the CI corpus is far below any production-sane value,
+so a hardcoded constant would leave the whole truncation path shipping unexecuted.
+
+One limit is inherent: **`reblog` and `follow` both ride `custom_json`**, and share that budget
+with every DApp `custom_json` the account signs. An account whose recent `custom_json` is
+dominated by game or token traffic can lose both bands entirely, because the `id` that would let
+us filter them lives in the op body — the very thing the budget exists to avoid fetching. Rather
+than let that vanish silently, an empty band over a truncated window is reported as a single row
+with a null partner, `interaction_count` 0 and `partners_merged` 0, carrying the `covered_from`
+of the window that *was* scanned.
+
+Read that row as *"nothing of this type inside the covered window, and the window is short"* — it
+does **not** assert data was lost, because once the budget is exhausted the endpoint genuinely
+cannot tell an account with no follows from one whose follows fell outside it. The guarantee runs
+the other way: a band empty over a **fully covered** window emits no row at all, so an
+unqualified absence is a real zero.
 
 ## DApp Attribution
 

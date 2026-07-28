@@ -1,0 +1,27 @@
+---
+test_name: Account interactions rejects an unknown interaction type
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+# 'delegation' is the instructive rejection: delegations are deliberately NOT an interaction
+# type (they belong to the Influence & Delegation Map), so asking for them must be a clear
+# 400 rather than a silently empty band.
+stages:
+  - name: Reject an interaction type the endpoint does not model
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "ixtester"
+        type_filter: "delegation"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

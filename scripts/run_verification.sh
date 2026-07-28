@@ -21,6 +21,12 @@
 #        the only check that can exercise the community path on real data — the CI
 #        replay is 2016 history, which predates communities entirely. Read-only,
 #        and skips cleanly when hivemind_app is absent.
+#   5. tests/parity/interactions_cap.sql (issue #48)
+#        Lowers get_account_interactions' op ceiling inside a rolled-back
+#        transaction and asserts the guard both fires AND discloses the truncated
+#        window. No tavern test can reach the ceiling (the busiest account in the
+#        replay corpus is far below any sane value), so without this the whole
+#        truncation path would ship unexecuted.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -30,7 +36,7 @@
 #                  `haf` container of docker-compose-test.yml (left up by
 #                  run_tests.sh --keep), over its local socket as haf_admin.
 #
-# Run from the repo root. Exits non-zero if either guard fails.
+# Run from the repo root. Exits non-zero if any guard fails.
 # =============================================================================
 set -euo pipefail
 
@@ -71,10 +77,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/3: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/5: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/3: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/5: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
@@ -98,10 +104,13 @@ else
   fi
 fi
 
-echo "===== Guard 3/4: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/5: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Guard 4/4: community derivation vs hivemind (issue #47) ====="
+echo "===== Guard 4/5: community derivation vs hivemind (issue #47) ====="
 run_sql_file tests/parity/community_vs_hivemind.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle) ====="
+echo "===== Guard 5/5: interactions op-ceiling guard (issue #48) ====="
+run_sql_file tests/parity/interactions_cap.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap) ====="

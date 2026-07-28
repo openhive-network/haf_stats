@@ -307,13 +307,17 @@ sync:
       fi
 
       cd "${CI_PROJECT_DIR}/docker"
+      # PGRST_DB_URI below carries options=-c statement_timeout: it must be repeated on every
+      # path that DEFINES the variable, because the docker-compose.yml default is bypassed
+      # whenever it is set. Without it CI runs the endpoints against real data with no query
+      # timeout at all, which is exactly where a runaway would matter most. (#48)
       cat > ci.env <<EOF
       HAF_IMAGE_NAME=${HAF_IMAGE_NAME}
       HAF_STATS_IMAGE=${HAF_STATS_IMAGE}
       POSTGREST_IMAGE=${POSTGREST_IMAGE}
       HAF_DATA_DIRECTORY=${HAF_DATA_DIRECTORY}
       HAF_SHM_DIRECTORY=${HAF_SHM_DIRECTORY}
-      PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log
+      PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s
       PGRST_DB_SCHEMA=haf_stats_endpoints
       PGRST_DB_ANON_ROLE=haf_stats_user
       PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app

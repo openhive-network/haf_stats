@@ -1,0 +1,44 @@
+---
+test_name: Account interactions match the 5M replay (raw-payload derivation on real ops)
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+# The ONLY lane that exercises this endpoint against real chain data. Everything else it ships
+# is marked `synthetic` or `negative`, and the real lane runs
+# `pytest -m "not negative and not synthetic"` (docker/docker-compose-test.yml), so without this
+# file zero tests for this endpoint would execute against a replay.
+#
+# That matters more here than for its siblings: every other account endpoint reads a
+# processor-maintained table, whereas this one derives all five bands from RAW op payloads at
+# read time. A regression in the `payload -> 1` array unwrapping, the
+# `id IN ('follow','reblog')` parse gate, the `LOWER(what->>0) = 'blog'` predicate or the
+# per-partner dedup key would sail through a stub fixture, because that fixture was authored
+# from the same assumptions as the code it is meant to check.
+#
+# chorlacher is chosen deliberately: within the first 5,000,000 blocks the account has real
+# replies, real votes and 24 real follows whose payloads are the BARE-OBJECT shape, and it is
+# small enough that top_n=3 leaves a meaningful Others band in three separate types (so the
+# residual arithmetic is checked on real data too, not just the fixture).
+#
+# No transfer or reblog band appears for this account in this window; those are covered by the
+# synthetic fixture, which can seed shapes the 2016 chain simply does not contain.
+#
+# Full history is requested WITHOUT date params on purpose: this is the default request shape
+# the UI actually sends, and it is unreachable in the stub gate (whose block numbers are not
+# monotonic with their dates), so this is the only place it gets tested at all.
+stages:
+  - name: Full-history interaction graph for chorlacher, top 3 partners per type
+    request:
+      url: "{api_url}/rpc/get_account_interactions"
+      method: GET
+      params:
+        account: "chorlacher"
+        top_n: "3"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern

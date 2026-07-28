@@ -89,7 +89,13 @@ services:
       # Auto-configured by the common-ci templates from HAF_APP_ROLE_PREFIX=haf_stats
       # (owner role connects for schema introspection, anon role serves requests);
       # the defaults keep a plain `docker compose up` working outside CI.
-      PGRST_DB_URI:                      ${PGRST_DB_URI:-postgresql://haf_stats_owner@haf:5432/haf_block_log}
+      # statement_timeout rides on PostgREST's CONNECTION, not on a role and not on the
+      # function. A `SET statement_timeout` function attribute never arms (the timer is set
+      # before the statement begins), and role config is ignored under SET ROLE - PostgREST
+      # logs in as haf_stats_owner and switches to haf_stats_user per request, so an
+      # ALTER ROLE haf_stats_user would be dead config here. This bounds API queries only;
+      # the block processor uses its own connection and is deliberately unaffected. (#48)
+      PGRST_DB_URI:                      ${PGRST_DB_URI:-postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s}
       PGRST_DB_SCHEMA:                   ${PGRST_DB_SCHEMA:-haf_stats_endpoints}
       PGRST_DB_ANON_ROLE:                ${PGRST_DB_ANON_ROLE:-haf_stats_user}
       PGRST_DB_EXTRA_SEARCH_PATH:        ${PGRST_DB_EXTRA_SEARCH_PATH:-haf_stats_app}
