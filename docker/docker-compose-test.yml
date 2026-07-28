@@ -98,7 +98,8 @@ services:
       # avoid clashes with other local services on 3001.
       - "${TEST_API_PORT:-3001}:3000"
     environment:
-      PGRST_DB_URI:       "postgres:///haf_block_log?user=haf_stats_user&host=/var/run/postgresql"
+      # See docker-compose.yml for why the timeout rides on the connection. (#48)
+      PGRST_DB_URI:       "postgres:///haf_block_log?user=haf_stats_user&host=/var/run/postgresql&options=-c%20statement_timeout%3D30s"
       PGRST_DB_SCHEMA:    "haf_stats_endpoints"
       PGRST_DB_ANON_ROLE: "haf_stats_user"
       PGRST_DB_POOL:      "5"

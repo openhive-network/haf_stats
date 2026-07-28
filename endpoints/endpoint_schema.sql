@@ -53,6 +53,117 @@ $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
+-- #48: parse a free-form custom_json payload without aborting the query.
+--
+-- custom_json.json is an arbitrary caller-supplied STRING, so a malformed payload is a
+-- normal on-chain occurrence and a bare ::JSONB cast would kill the whole request. The
+-- exception trap is the idiom this repo already uses for exactly this hazard
+-- (haf_stats_app.get_required_authorities_safe, and the per-row BEGIN/EXCEPTION in
+-- process_community_registry's role replay).
+--
+-- Deliberately NOT `IS JSON`: that predicate is PostgreSQL 16+, and the stub endpoint-test
+-- gate runs postgres:14-alpine (docker/docker-compose-ci.yml). Loading this file there under
+-- ON_ERROR_STOP would fail at CREATE FUNCTION — plpgsql raw-parses embedded SQL when
+-- check_function_bodies is on — taking down every stub-lane test, not just this endpoint's.
+-- JSON_QUERY(... NULL ON ERROR) is PG17+ and is worse. Keep this PG14-safe.
+--
+-- Co-located here (not db/) for the same reason as to_filter_date above: the stub stack
+-- loads only this file, so a helper in an unmounted db/*.sql would not exist there.
+CREATE OR REPLACE FUNCTION haf_stats_app.try_jsonb(_txt TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+BEGIN
+    RETURN _txt::JSONB;
+EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.try_jsonb(TEXT) TO haf_stats_user;
+
+-- #48: per-op-type ceiling on how many of an account's operations get_account_interactions
+-- will resolve bodies for. The cost driver is a random heap fetch of each op's body, and those
+-- bodies are scattered across the account's whole history; the index scan that selects them is
+-- ~200x cheaper.
+--
+-- The number to reason about is ntypes x cap, NOT cap: a default (unfiltered) request budgets
+-- op types 0/1/2/18 independently, so it can fetch FOUR pages. 4 x 4,000 = 16,000 bodies worst
+-- case, ~10-14s cold at the rates below, comfortably inside the API statement_timeout. (An
+-- earlier revision set 10,000 here and claimed a 5x cold improvement over the previous shared
+-- 50,000 budget; per-type that is really 40,000 ops, i.e. ~1.25x, and it straddled the timeout.)
+--
+-- 4,000 is set from COLD-cache measurements on a full multi-TB node, not from a test box.
+-- An earlier 50,000 was calibrated against a 16 GB database resident in a 32 GB buffer cache,
+-- where it looked like ~0.5s — on a real node the same ceiling cost ~0.6-0.9 ms/op of random
+-- I/O, putting a merely moderate account (~43k ops) at 28s cold and heavy accounts near 90s.
+-- That is past any sane proxy read timeout and is exactly the random-read profile that starves
+-- co-tenant apps on a shared node. Cold cost scales roughly linearly with ops fetched. A Sankey
+-- renders a handful of partners, and covered_from discloses the shorter window, so the picture
+-- barely changes for the vast majority of accounts.
+--
+-- A FUNCTION rather than a literal so tests can lower it and prove the guard fires: the
+-- busiest account in the entire 5M-block CI replay corpus signs ~25,000 relevant ops, well
+-- under any production-sane ceiling, so a hardcoded constant would be untestable in both CI
+-- lanes — the vacuous-pass trap. Same inlinable-constant shape as
+-- haf_stats_app.community_start_block().
+CREATE OR REPLACE FUNCTION haf_stats_app.max_interaction_ops()
+RETURNS INT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT 4000;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.max_interaction_ops() TO haf_stats_user;
+
+-- Date range -> block range, for the on-demand account endpoints that then translate blocks
+-- into an account_op_seq_no window.
+--
+-- Two single-row indexed probes, NOT MIN/MAX over a created_at filter: a combined aggregate
+-- cannot use the created_at index and seq-scans hafd.blocks (~71s on a full node). num is
+-- monotonic with created_at, so the earliest block at/after _from and the latest before
+-- _to + 1 ARE the range bounds. (#33 perf)
+--
+-- Extracted because this pair was copy-pasted into three endpoints and the copies had already
+-- drifted: only the newest carried the inverted-range guard, so an inverted range
+-- short-circuited there while falling through to the seq binary search in the other two.
+-- Returns NULLs when the range selects no blocks or comes out inverted, so every caller
+-- short-circuits identically.
+CREATE OR REPLACE FUNCTION haf_stats_app.block_range_for_dates(_from DATE, _to DATE)
+RETURNS TABLE (from_block INT, to_block INT)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _fb INT;
+    _tb INT;
+BEGIN
+    SELECT b.num INTO _fb FROM hafd.blocks b
+        WHERE b.created_at >= _from::timestamp ORDER BY b.created_at ASC LIMIT 1;
+    SELECT b.num INTO _tb FROM hafd.blocks b
+        WHERE b.created_at < (_to + 1)::timestamp ORDER BY b.created_at DESC LIMIT 1;
+
+    IF _fb IS NULL OR _tb IS NULL OR _fb > _tb THEN
+        RETURN;
+    END IF;
+
+    from_block := _fb;
+    to_block := _tb;
+    RETURN NEXT;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.block_range_for_dates(DATE, DATE) TO haf_stats_user;
+
+-- Superseded by the count-based truncation detection inside get_account_interactions: the old
+-- helper compared block numbers, which cannot distinguish "cap held everything" from "cap
+-- boundary landed inside the earliest block". Dropped here so no deployed node keeps it.
+DROP FUNCTION IF EXISTS haf_stats_app.interaction_covered_from(INT, BIGINT, BIGINT, INT[], INT, DATE);
+
+-- ---------------------------------------------------------------------------
 -- custom_json id -> DApp name resolution (single source of truth).
 -- Longest registered app_id_pattern that is a prefix of the id wins; a secondary
 -- sort by pattern makes equal-length ties deterministic; unmatched ids fall back
@@ -588,6 +699,123 @@ DECLARE
                       "comment_count": {
                         "type": "integer",
                         "description": "Replies created anywhere in a thread rooted in this community"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/{account}/interactions": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Account interaction graph",
+        "description": "Per-account OUTGOING interactions grouped by type and counterparty, for the Social Interaction Sankey (You -> type -> top partners). Five interaction types are counted: reply, vote, transfer, reblog and follow. The unit is always an interaction COUNT \u2014 transfer amounts and vote weights never affect it \u2014 so the bands are directly comparable. Each type returns its top_n partners by count plus a single \"Others\" band (partner null) aggregating the remaining partners, so the rows for a type always sum to that type's total regardless of top_n. Only operations the account itself SIGNED are counted, which is what makes the graph outgoing; interactions it merely received are not. Self-interactions (self-votes, transfers to yourself, replying to your own post) are excluded \u2014 they are a self-loop the sankey cannot render, and network_vote_daily.self_votes already reports them. Delegations are deliberately excluded: they belong to the Influence & Delegation Map, not to the interaction graph. Reply and reblog are DE-DUPLICATED, vote/transfer/follow are raw counts. A comment_operation that edits an existing reply reuses its permlink, so counting raw ops would report an edited reply as a second interaction (~11% inflation measured network-wide); reblog is idempotent state in Hivemind, so re-submitting it is not a new interaction. A vote and a follow, by contrast, are genuine repeatable events (vote -> unvote -> re-vote is two votes). The de-duplication is scoped to the requested window, so an edit of a reply created BEFORE the window is indistinguishable from an in-window creation; the effect is under 0.2% even at one-day windows and zero for the default full-history window. Follows are derived natively from the raw follow/reblog custom_json payloads rather than from Hivemind, and only a real follow counts \u2014 an unfollow (what:[]) or a mute (what:[\"ignore\"]) is a retraction, not an interaction. covered_from reports the window actually scanned. A request whose op count exceeds the server ceiling is answered from the most recent ops within budget rather than failing, and covered_from then reports the later start date. Each OP TYPE carries its own budget, so heavy DApp custom_json traffic can never displace the vote, reply or transfer bands. Note that reblog and follow BOTH ride custom_json, and share that budget with every DApp custom_json the account signs: an account whose recent custom_json is dominated by game or token traffic can therefore have its reblog and follow bands truncated away entirely. Whenever a band comes back empty AND its op type was truncated, it is reported as a single row with a null partner, interaction_count 0 and partners_merged 0, carrying the covered_from of the window that WAS scanned. Read it as \"no interactions of this type inside the covered window, and the window is shorter than you asked for\" \u2014 it does NOT assert that data was lost, because once the budget is exhausted the endpoint genuinely cannot tell an account with no follows from one whose follows fell outside it. A band that is empty over a FULLY covered window emits no row, so an unqualified absence still means a real zero.",
+        "operationId": "haf_stats_endpoints.get_account_interactions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Hive account name"
+          },
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "top_n",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "minimum": 1,
+              "maximum": 50
+            },
+            "description": "Number of named partners returned per interaction type (1-50); the rest are aggregated into the Others band"
+          },
+          {
+            "in": "query",
+            "name": "type_filter",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string",
+              "enum": [
+                "reply",
+                "vote",
+                "transfer",
+                "reblog",
+                "follow"
+              ]
+            },
+            "description": "Restrict the response to a single interaction type; omit for all five"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Top partners per interaction type, each type followed by its Others band",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(interaction_type TEXT, partner TEXT, interaction_count BIGINT, partner_rank INT, partners_merged INT, covered_from DATE)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "interaction_type": {
+                        "type": "string",
+                        "description": "One of reply, vote, transfer, reblog, follow"
+                      },
+                      "partner": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Counterparty account name, or null for the Others band"
+                      },
+                      "interaction_count": {
+                        "type": "integer",
+                        "description": "Interactions with this partner (or absorbed into Others)"
+                      },
+                      "partner_rank": {
+                        "type": "integer",
+                        "description": "1..top_n for a named partner; top_n + 1 for the Others band"
+                      },
+                      "partners_merged": {
+                        "type": "integer",
+                        "description": "1 for a named partner; for Others, how many distinct partners it absorbs; 0 on a coverage-disclosure row (empty band over a truncated window)"
+                      },
+                      "covered_from": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "Start of the window actually scanned; equals from_date unless the server op ceiling truncated it"
                       }
                     }
                   }
@@ -2654,6 +2882,533 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Feature: per-account interaction graph (#48, backend for block_explorer_ui#762)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/account/{account}/interactions:
+  get:
+    tags:
+      - Account
+    summary: Account interaction graph
+    description: >-
+      Per-account OUTGOING interactions grouped by type and counterparty, for the Social
+      Interaction Sankey (You -> type -> top partners). Five interaction types are counted:
+      reply, vote, transfer, reblog and follow. The unit is always an interaction COUNT —
+      transfer amounts and vote weights never affect it — so the bands are directly
+      comparable. Each type returns its top_n partners by count plus a single "Others" band
+      (partner null) aggregating the remaining partners, so the rows for a type always sum
+      to that type's total regardless of top_n.
+      Only operations the account itself SIGNED are counted, which is what makes the graph
+      outgoing; interactions it merely received are not. Self-interactions (self-votes,
+      transfers to yourself, replying to your own post) are excluded — they are a
+      self-loop the sankey cannot render, and network_vote_daily.self_votes already
+      reports them.
+      Delegations are deliberately excluded: they belong to the Influence & Delegation Map,
+      not to the interaction graph.
+      Reply and reblog are DE-DUPLICATED, vote/transfer/follow are raw counts. A
+      comment_operation that edits an existing reply reuses its permlink, so counting raw
+      ops would report an edited reply as a second interaction (~11% inflation measured
+      network-wide); reblog is idempotent state in Hivemind, so re-submitting it is not a
+      new interaction. A vote and a follow, by contrast, are genuine repeatable events
+      (vote -> unvote -> re-vote is two votes). The de-duplication is scoped to the
+      requested window, so an edit of a reply created BEFORE the window is indistinguishable
+      from an in-window creation; the effect is under 0.2% even at one-day windows and zero
+      for the default full-history window.
+      Follows are derived natively from the raw follow/reblog custom_json payloads rather
+      than from Hivemind, and only a real follow counts — an unfollow (what:[]) or a mute
+      (what:["ignore"]) is a retraction, not an interaction.
+      covered_from reports the window actually scanned. A request whose op count exceeds the
+      server ceiling is answered from the most recent ops within budget rather than failing,
+      and covered_from then reports the later start date. Each OP TYPE carries its own budget,
+      so heavy DApp custom_json traffic can never displace the vote, reply or transfer bands.
+      Note that reblog and follow BOTH ride custom_json, and share that budget with every DApp
+      custom_json the account signs: an account whose recent custom_json is dominated by game
+      or token traffic can therefore have its reblog and follow bands truncated away entirely.
+      Whenever a band comes back empty AND its op type was truncated, it is reported as a single
+      row with a null partner, interaction_count 0 and partners_merged 0, carrying the
+      covered_from of the window that WAS scanned. Read it as "no interactions of this type
+      inside the covered window, and the window is shorter than you asked for" — it does NOT
+      assert that data was lost, because once the budget is exhausted the endpoint genuinely
+      cannot tell an account with no follows from one whose follows fell outside it. A band that
+      is empty over a FULLY covered window emits no row, so an unqualified absence still means
+      a real zero.
+    operationId: haf_stats_endpoints.get_account_interactions
+    parameters:
+      - in: path
+        name: account
+        required: true
+        schema:
+          type: string
+        description: Hive account name
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: top_n
+        required: false
+        schema:
+          type: integer
+          default: 10
+          minimum: 1
+          maximum: 50
+        description: Number of named partners returned per interaction type (1-50); the rest are aggregated into the Others band
+      - in: query
+        name: type_filter
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+          enum: [reply, vote, transfer, reblog, follow]
+        description: Restrict the response to a single interaction type; omit for all five
+    responses:
+      '200':
+        description: Top partners per interaction type, each type followed by its Others band
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(interaction_type TEXT, partner TEXT, interaction_count BIGINT, partner_rank INT, partners_merged INT, covered_from DATE)"
+              type: array
+              items:
+                type: object
+                properties:
+                  interaction_type:
+                    type: string
+                    description: One of reply, vote, transfer, reblog, follow
+                  partner:
+                    type: string
+                    nullable: true
+                    description: Counterparty account name, or null for the Others band
+                  interaction_count:
+                    type: integer
+                    description: Interactions with this partner (or absorbed into Others)
+                  partner_rank:
+                    type: integer
+                    description: 1..top_n for a named partner; top_n + 1 for the Others band
+                  partners_merged:
+                    type: integer
+                    description: >-
+                      1 for a named partner; for Others, how many distinct partners it absorbs;
+                      0 on a coverage-disclosure row (empty band over a truncated window)
+                  covered_from:
+                    type: string
+                    format: date
+                    description: Start of the window actually scanned; equals from_date unless the server op ceiling truncated it
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_interactions;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_interactions(
+    "account" TEXT,
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "top_n" INT = 10,
+    "type_filter" TEXT = NULL
+)
+RETURNS TABLE(interaction_type TEXT, partner TEXT, interaction_count BIGINT, partner_rank INT, partners_merged INT, covered_from DATE)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _account_id INT;
+    _from_block INT;
+    _to_block INT;
+    _lo_seq BIGINT;
+    _hi_seq BIGINT;
+    _type TEXT;
+    _cap INT;
+    -- Op types worth scanning at all, given type_filter. Each gets its OWN budget below.
+    _types INT[];
+BEGIN
+    -- Genesis default, not last-30-days: an interaction graph is an all-time view of who an
+    -- account deals with, and #35 is the standing ruling against silent 30-day windows.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- `top_n IS NULL OR` is load-bearing, not defensive noise. Without it the guard is
+    -- `NULL < 1 OR NULL > 50` = NULL, `IF NULL THEN` does not fire, and the ranking filters
+    -- below (rn <= top_n / rn > top_n) then yield NULL for every row — returning HTTP 200
+    -- with an EMPTY body for a perfectly valid account. Wax sends JSON-encoded and empty
+    -- params (#22), so a null top_n is reachable from the real client.
+    IF "top_n" IS NULL OR "top_n" < 1 OR "top_n" > 50 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid top_n: ' || COALESCE("top_n"::TEXT, '(null)'),
+            HINT = 'Must be between 1 and 50';
+    END IF;
+
+    -- NULL means "all five types"; '' is treated as absent too. Tolerate Wax's JSON-encoded
+    -- quoting (#22). Compared below as (_type IS NULL OR kind = _type) — never a bare
+    -- kind = _type, which would return nothing at all for the default request.
+    _type := NULLIF(TRIM('"' FROM COALESCE("type_filter", '')), '');
+    IF _type IS NOT NULL AND _type NOT IN ('reply', 'vote', 'transfer', 'reblog', 'follow') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid type_filter: ' || _type,
+            HINT = 'Must be one of: reply, vote, transfer, reblog, follow';
+    END IF;
+
+    SELECT a.id INTO _account_id FROM hafd.accounts a WHERE a.name = "account";
+    IF _account_id IS NULL THEN
+        RETURN;   -- unknown account -> empty result, same contract as the sibling endpoints
+    END IF;
+
+    -- COALESCE because LIMIT NULL means NO LIMIT in PostgreSQL: if the ceiling function is
+    -- ever replaced with one returning NULL (the cap test does replace it, to prove the guard
+    -- fires), an unguarded LIMIT would silently become the unbounded whale scan this cap
+    -- exists to prevent.
+    _cap := COALESCE(haf_stats_app.max_interaction_ops(), 4000);
+
+    SELECT r.from_block, r.to_block INTO _from_block, _to_block
+    FROM haf_stats_app.block_range_for_dates(_from, _to) r;
+    IF _from_block IS NULL OR _to_block IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- Block range -> this account's account_op_seq_no range. account_operations.block_num is
+    -- computed and unindexed, so only the seq bound can actually restrict the scan; the
+    -- helper binary-searches the (account_id, account_op_seq_no) index. (#33/#40)
+    SELECT r.lo_seq, r.hi_seq INTO _lo_seq, _hi_seq
+    FROM haf_stats_app.account_op_seq_range(_account_id, _from_block, _to_block) r;
+    IF _lo_seq IS NULL OR _hi_seq IS NULL OR _lo_seq > _hi_seq THEN
+        RETURN;   -- no ops in the window
+    END IF;
+
+    -- One budget PER OP TYPE, not per band group. A shared budget made the answer depend on
+    -- type_filter: an account whose votes+replies+transfers shared one 50,000-op page
+    -- reported fewer votes than the same account queried with type_filter=vote, where votes
+    -- had the page to themselves — a band and its own drill-down disagreeing for identical
+    -- inputs. Per-type budgets also keep DApp custom_json traffic (which yields no
+    -- counterparty at all) from ever displacing the vote, reply or transfer bands.
+    _types := CASE _type
+        WHEN 'vote'     THEN ARRAY[0]
+        WHEN 'reply'    THEN ARRAY[1]
+        WHEN 'transfer' THEN ARRAY[2]
+        WHEN 'reblog'   THEN ARRAY[18]
+        WHEN 'follow'   THEN ARRAY[18]
+        ELSE ARRAY[0, 1, 2, 18]
+    END;
+
+    RETURN QUERY
+    WITH wanted AS (
+        SELECT UNNEST(_types) AS op_type_id
+    ),
+    -- _cap + 1 rows per type: the extra row is how truncation is DETECTED without a second
+    -- scan. Counting rows is exact, where the previous block-number comparison was not — when
+    -- the cap boundary fell inside the earliest matching block, "oldest kept" equalled
+    -- "oldest available" and the guard wrongly concluded nothing had been dropped, reporting
+    -- full coverage for a truncated answer.
+    page_raw AS MATERIALIZED (
+        SELECT w.op_type_id AS t, p.operation_id, p.account_op_seq_no, p.block_num
+        FROM wanted w
+        CROSS JOIN LATERAL (
+            SELECT ao.operation_id, ao.account_op_seq_no, ao.block_num
+            FROM hive.account_operations_view ao
+            WHERE ao.account_id = _account_id
+              AND ao.transacting_account_id = ao.account_id   -- signed it => outgoing
+              AND ao.op_type_id = w.op_type_id
+              AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
+            ORDER BY ao.account_op_seq_no DESC
+            LIMIT _cap + 1
+        ) p
+    ),
+    -- Ranking happens over the already-bounded _cap + 1 rows, so it costs nothing; putting the
+    -- window function inside the LATERAL above would have forced a scan of every matching
+    -- index entry instead of stopping at the limit.
+    ranked_page AS MATERIALIZED (
+        SELECT
+            pr.t,
+            pr.operation_id,
+            bl.created_at::DATE AS day,
+            ROW_NUMBER() OVER (PARTITION BY pr.t ORDER BY pr.account_op_seq_no DESC) AS rn,
+            COUNT(*) OVER (PARTITION BY pr.t) AS fetched
+        FROM page_raw pr
+        JOIN hafd.blocks bl ON bl.num = pr.block_num
+    ),
+    -- Per-type coverage AND the boundary day, computed together because the two must agree.
+    coverage AS (
+        SELECT
+            b.t,
+            b.truncated,
+            b.boundary_day,
+            CASE WHEN NOT b.truncated THEN _from ELSE b.boundary_day + 1 END AS covered_from
+        FROM (
+            SELECT
+                rp.t,
+                MAX(rp.fetched) > _cap AS truncated,
+                MIN(rp.day) FILTER (WHERE rp.rn <= _cap) AS boundary_day
+            FROM ranked_page rp
+            GROUP BY rp.t
+        ) b
+    ),
+    -- The served set. When the cap bit, the oldest day inside it was only PARTIALLY scanned, so
+    -- its ops are dropped rather than counted: otherwise the response would report interactions
+    -- from a day that covered_from excludes, and a client re-deriving totals over
+    -- [covered_from, to_date] would get a smaller number than the endpoint just gave it. Paying
+    -- for rows we then discard is deliberate — it is what makes the counts and the disclosed
+    -- window describe exactly the same period.
+    page AS MATERIALIZED (
+        SELECT rp.t, rp.operation_id
+        FROM ranked_page rp
+        JOIN coverage c ON c.t = rp.t
+        WHERE rp.rn <= _cap
+          AND (NOT c.truncated OR rp.day > c.boundary_day)
+    ),
+    -- MATERIALIZED is load-bearing on the three CTEs below, not a hint. Each is referenced
+    -- once, so PostgreSQL would inline them — and inlining duplicates the try_jsonb() call
+    -- into every downstream expression that touches the parsed payload. EXPLAIN VERBOSE showed
+    -- ~200 copies of it in the projection, turning one plpgsql exception-trapped parse per row
+    -- into hundreds (1.86s vs 187ms on a 13,277-op account). Materialising forces exactly one
+    -- parse per row, which is what the payload-restricted parse below was written to achieve.
+    -- MATERIALIZED is load-bearing on the CTEs below, not a hint. Each is referenced once, so
+    -- PostgreSQL would inline them — and inlining duplicates the try_jsonb() call into every
+    -- downstream expression that touches the parsed payload. EXPLAIN VERBOSE showed ~200 copies
+    -- of it in the projection, turning one plpgsql exception-trapped parse per row into hundreds
+    -- (1.86s vs 187ms on a 13,277-op account). Materialising forces exactly one parse per row.
+    --
+    -- Only the five scalars actually read are projected — never body_value itself. A
+    -- comment_operation body carries the whole post markdown plus json_metadata (~2-3 KB), so
+    -- carrying it through two materialised tuplestores would put tens of MB per request into
+    -- work_mem (4 MB by default) and spill to temp files, adding disk I/O to the exact path the
+    -- op ceiling exists to keep cheap — and multiplying that across PostgREST's 20 pool slots.
+    ops AS MATERIALIZED (
+        SELECT
+            p.t,
+            ov.body_value ->> 'author'        AS body_author,
+            ov.body_value ->> 'permlink'      AS body_permlink,
+            ov.body_value ->> 'parent_author' AS body_parent_author,
+            ov.body_value ->> 'to'            AS body_to,
+            ov.body_value ->> 'weight'        AS body_weight,
+            -- Parse the payload only for the two ids that can carry an edge. This keeps the
+            -- exception-trapping parse (a subtransaction per call) off the vote/comment/
+            -- transfer stream entirely, and off DApp custom_json.
+            --
+            -- This IS a scope limit, and a deliberate one: the id is not trusted to say WHICH
+            -- operation a payload holds (a reblog really does arrive under id='follow', which is
+            -- why the operation is identified from the payload KEYS below), but it is used to
+            -- decide WHETHER to parse at all. A follow or reblog published under some third id
+            -- is therefore out of scope — parsing every custom_json to find them would reinstate
+            -- the per-op cost this gate removes.
+            CASE
+                WHEN p.t = 18 AND ov.body_value ->> 'id' IN ('follow', 'reblog')
+                    THEN haf_stats_app.try_jsonb(ov.body_value ->> 'json')
+            END AS payload
+        FROM page p
+        -- Bodies come from hive.operations_view, NOT hafd.operations: account_operations_view
+        -- UNION ALLs a reversible branch whose bodies live in hafd.operations_reversible, so
+        -- joining the irreversible table alone would silently drop every op at the chain head.
+        JOIN hive.operations_view ov ON ov.id = p.operation_id
+    ),
+    -- Both real-world payload shapes occur and neither is an edge case: measured over the
+    -- first 5,000,000 blocks, 67% are the bare object {"follower":...} and 33% are the
+    -- array-wrapped ["follow", {...}]. Unwrap to the inner object either way, then classify
+    -- ONCE — kind is derived here and every later expression switches on it, rather than each
+    -- re-testing the payload keys and drifting apart.
+    unwrapped AS MATERIALIZED (
+        SELECT
+            o.t,
+            o.body_author,
+            o.body_permlink,
+            o.body_parent_author,
+            o.body_to,
+            o.body_weight,
+            cj.cj,
+            CASE o.t
+                WHEN 0 THEN 'vote'
+                WHEN 1 THEN 'reply'
+                WHEN 2 THEN 'transfer'
+                ELSE CASE
+                    -- hivemind's follow/reblog handlers BOTH require the payload's self-declared
+                    -- actor to be the signing account and return early otherwise, so an op that
+                    -- names someone else creates nothing on chain. Without this check the graph
+                    -- was inflatable by the very account being graphed: signing
+                    -- {"follower":"someone-else","following":"C"} would have drawn A -> C.
+                    -- (Zero such ops exist below block 5,000,000 — this is forward defence.)
+                    WHEN cj.cj ? 'following' AND cj.cj ->> 'follower' = "account" THEN 'follow'
+                    -- A reblog DELETE ("un-reblog") carries the same author/permlink plus a
+                    -- `delete` key. It removes content, so it is a retraction exactly like an
+                    -- unfollow, and must not draw an edge.
+                    WHEN cj.cj ? 'author' AND cj.cj ? 'permlink' AND NOT (cj.cj ? 'delete')
+                         AND cj.cj ->> 'account' = "account" THEN 'reblog'
+                END
+            END AS kind
+        FROM ops o
+        CROSS JOIN LATERAL (
+            SELECT CASE
+                WHEN JSONB_TYPEOF(o.payload) = 'array'  THEN o.payload -> 1
+                WHEN JSONB_TYPEOF(o.payload) = 'object' THEN o.payload
+            END AS cj
+        ) cj
+    ),
+    -- One row per candidate interaction: its type, its counterparty, and the key that
+    -- de-duplicates it. dedup_key MUST be paired with the partner, never used alone:
+    -- @calva's permlink 'bitcoin-the-end-of-money-as-we-know-it' was created under parent
+    -- @sebhaj, deleted, then re-created under @socialleadninja — two real interactions with
+    -- two different partners that a permlink-only dedup would collapse into one, keeping a
+    -- nondeterministic winner.
+    events AS MATERIALIZED (
+        SELECT
+            u.t,
+            u.kind,
+            CASE u.kind
+                -- weight = 0 is an UNVOTE: the vote is withdrawn, so it is a retraction, not
+                -- an interaction. Excluded for the same reason as an unfollow, and matching
+                -- post_engagement, which already refuses to count weight-0 votes as engagement.
+                WHEN 'vote' THEN CASE WHEN COALESCE(u.body_weight::INT, 0) <> 0
+                                      THEN u.body_author END
+                WHEN 'reply' THEN NULLIF(u.body_parent_author, '')   -- '' => a root post
+                WHEN 'transfer' THEN u.body_to
+                -- hivemind reads what[0] and lowercases it, so it acts on the FIRST element
+                -- only. Containment (@>) instead treated ["posts","blog"] as a follow where
+                -- hivemind sees "posts" and does nothing — 254 such ops in the first 5,000,000
+                -- blocks. An unfollow (what: []) and a mute (what: ["ignore"]) fall out here.
+                WHEN 'follow' THEN CASE WHEN LOWER(u.cj -> 'what' ->> 0) = 'blog'
+                                        THEN u.cj ->> 'following' END
+                WHEN 'reblog' THEN u.cj ->> 'author'
+            END AS partner,
+            CASE u.kind
+                -- An edit reuses the reply's permlink, so the permlink identifies the reply.
+                WHEN 'reply' THEN u.body_permlink
+                -- A reblog IS idempotent state in hivemind: the same (author, permlink)
+                -- reblogged twice is one interaction.
+                WHEN 'reblog' THEN (u.cj ->> 'author') || '/' || (u.cj ->> 'permlink')
+                -- vote / transfer / FOLLOW: every op is its own event. A re-vote and a
+                -- follow -> unfollow -> re-follow are genuinely repeated acts, so these fall
+                -- through to the per-op key in `filtered`.
+                ELSE NULL
+            END AS dedup_key
+        FROM unwrapped u
+    ),
+    -- Drop non-edges: root posts (no parent), DApp custom_json, unfollows/mutes/un-reblogs,
+    -- unvotes, malformed payloads (try_jsonb returned NULL so cj is NULL and every ? test is
+    -- false), and self-interactions. Partner names come straight from the op body and are
+    -- never joined to hafd.accounts, so a counterparty that exists only in
+    -- hafd.accounts_reversible is still counted.
+    filtered AS (
+        SELECT
+            e.t,
+            e.kind,
+            e.partner,
+            -- Give the "count every op" types a unique key so ONE aggregation path serves all
+            -- five types. ROW_NUMBER() OVER () is already unique across this set; the '#'
+            -- prefix keeps a synthetic key from ever colliding with a real permlink or
+            -- author/permlink pair, neither of which can contain '#'.
+            COALESCE(e.dedup_key, '#' || ROW_NUMBER() OVER ()) AS dedup_key
+        FROM events e
+        WHERE e.kind IS NOT NULL
+          AND e.partner IS NOT NULL
+          AND e.partner <> ''
+          AND e.partner <> "account"
+          AND (_type IS NULL OR e.kind = _type)
+    ),
+    per_partner AS (
+        SELECT f.t, f.kind, f.partner, COUNT(DISTINCT f.dedup_key)::BIGINT AS cnt
+        FROM filtered f
+        GROUP BY f.t, f.kind, f.partner
+    ),
+    ranked AS (
+        SELECT
+            pp.t,
+            pp.kind,
+            pp.partner,
+            pp.cnt,
+            -- Partner name breaks count ties so paging and response diffing are stable.
+            ROW_NUMBER() OVER (PARTITION BY pp.kind ORDER BY pp.cnt DESC, pp.partner) AS rn
+        FROM per_partner pp
+    ),
+    named AS (
+        SELECT r.t, r.kind, r.partner, r.cnt, r.rn::INT AS rn, 1 AS merged
+        FROM ranked r
+        WHERE r.rn <= "top_n"
+    ),
+    -- The five bands this request asked for, with the op type each is budgeted under. reblog
+    -- and follow BOTH ride op 18, which is what makes the eviction below possible.
+    requested_kinds AS (
+        SELECT v.kind, v.t
+        FROM (VALUES ('reply', 1), ('vote', 0), ('transfer', 2), ('reblog', 18), ('follow', 18))
+             AS v(kind, t)
+        WHERE _type IS NULL OR v.kind = _type
+    ),
+    -- A band can be scanned and still come back empty because the budget for its op type was
+    -- consumed by ops of a DIFFERENT band. reblog and follow share op 18 with ALL DApp
+    -- custom_json, so an account whose most recent op-18 ops are entirely sm_*/dcity traffic
+    -- loses both bands — and with no rows to carry covered_from, that was invisible.
+    --
+    -- The row means "empty band, over a window we could not fully cover". It deliberately does
+    -- NOT claim data was lost: once the budget is exhausted the endpoint cannot distinguish an
+    -- account with no follows from one whose follows fell outside the window, and pretending
+    -- otherwise would be the same over-claim the covered_from arithmetic exists to avoid. What
+    -- it does guarantee is the converse — an empty band over a FULLY covered window emits
+    -- nothing, so an unqualified absence is a real zero.
+    evicted AS (
+        SELECT
+            rk.t,
+            rk.kind,
+            NULL::TEXT AS partner,
+            0::BIGINT AS cnt,
+            ("top_n" + 1) AS rn,
+            0 AS merged
+        FROM requested_kinds rk
+        JOIN coverage c ON c.t = rk.t
+        WHERE c.truncated
+          AND NOT EXISTS (SELECT 1 FROM ranked r WHERE r.kind = rk.kind)
+    ),
+    -- One Others band per type, emitted only when something is actually absorbed, so a type
+    -- with fewer partners than top_n returns no zero row.
+    others AS (
+        SELECT
+            MIN(r.t) AS t,
+            r.kind,
+            NULL::TEXT AS partner,
+            SUM(r.cnt)::BIGINT AS cnt,
+            ("top_n" + 1) AS rn,
+            COUNT(*)::INT AS merged
+        FROM ranked r
+        WHERE r.rn > "top_n"
+        GROUP BY r.kind
+    )
+    SELECT
+        b.kind,
+        b.partner,
+        b.cnt,
+        b.rn::INT,
+        b.merged,
+        -- Coverage is per OP TYPE, because the budget is: reblog and follow share op 18, while
+        -- reply, vote and transfer each have their own.
+        c.covered_from
+    FROM (
+        SELECT named.t, named.kind, named.partner, named.cnt, named.rn, named.merged FROM named
+        UNION ALL
+        SELECT others.t, others.kind, others.partner, others.cnt, others.rn, others.merged FROM others
+        UNION ALL
+        SELECT evicted.t, evicted.kind, evicted.partner, evicted.cnt, evicted.rn, evicted.merged FROM evicted
+    ) b
+    LEFT JOIN coverage c ON c.t = b.t
+    -- Types in a stable order so the sankey's bands do not reshuffle between calls, then
+    -- rank within a type (Others always last, since its rank is top_n + 1).
+    ORDER BY
+        CASE b.kind
+            WHEN 'reply' THEN 1 WHEN 'vote' THEN 2 WHEN 'transfer' THEN 3
+            WHEN 'reblog' THEN 4 ELSE 5
+        END,
+        b.rn;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Feature: per-account RC footprint
 -- ---------------------------------------------------------------------------
 
@@ -2778,10 +3533,8 @@ BEGIN
     -- cannot use the created_at index and seq-scans hafd.blocks (~71s on a full node). The
     -- earliest block at/after _from (and latest before _to+1) is a single indexed lookup; num
     -- is monotonic with created_at, so that row's num is the range bound. (#33 perf)
-    SELECT num INTO _from_block FROM hafd.blocks
-        WHERE created_at >= _from::timestamp ORDER BY created_at ASC LIMIT 1;
-    SELECT num INTO _to_block FROM hafd.blocks
-        WHERE created_at < (_to + 1)::timestamp ORDER BY created_at DESC LIMIT 1;
+    SELECT r.from_block, r.to_block INTO _from_block, _to_block
+    FROM haf_stats_app.block_range_for_dates(_from, _to) r;
     IF _from_block IS NULL OR _to_block IS NULL THEN
         RETURN;
     END IF;
@@ -3112,10 +3865,8 @@ BEGIN
     -- Window bounding (same as get_account_rc_footprint): date range -> block range -> this
     -- account's account_op_seq_no range (binary search), so a narrow window rides the indexed
     -- (account_id, seq) scan instead of the whole history.
-    SELECT num INTO _from_block FROM hafd.blocks
-        WHERE created_at >= _from::timestamp ORDER BY created_at ASC LIMIT 1;
-    SELECT num INTO _to_block FROM hafd.blocks
-        WHERE created_at < (_to + 1)::timestamp ORDER BY created_at DESC LIMIT 1;
+    SELECT r.from_block, r.to_block INTO _from_block, _to_block
+    FROM haf_stats_app.block_range_for_dates(_from, _to) r;
     IF _from_block IS NULL OR _to_block IS NULL THEN
         RETURN;
     END IF;
