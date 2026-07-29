@@ -324,7 +324,7 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
 | `GET /rpc/get_network_custom_json_usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
-| `GET /rpc/get_network_top_custom_json` | ✅ Live | process_network_custom_json.sql | Most-used custom_json ids/DApps/categories by op_count, op_bytes, or estimated RC (`group_by=id/app/category`) |
+| `GET /rpc/get_network_top_custom_json` | ✅ Live | process_network_custom_json.sql | Most-used custom_json ids/DApps/categories by op_count, op_bytes, or estimated RC (`group_by=id/app/category`); `app`/`category` partition the window, so they append an `Others` band for everything past `limit_count` and always sum to the window total |
 | `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
 | `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
 | `GET /rpc/get_governance_influence_concentration` | ✅ Live | process_governance_concentration.sql | Current HP concentration snapshot: Gini, top 1%/10% share, holder count, median and mean HP |

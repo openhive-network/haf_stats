@@ -756,15 +756,24 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_op_stats_daily (
 );
 GRANT SELECT ON haf_stats_backend.rc_op_stats_daily TO haf_stats_user;
 
+CREATE INDEX IF NOT EXISTS idx_rc_op_stats_op_type_day
+ON haf_stats_backend.rc_op_stats_daily (op_type_id, day);
+
 -- Per-day rate accessors (mirror db/process_rc.sql, which the stub does not load) - used by
--- get_account_rc_footprint on-demand.
+-- get_account_rc_footprint on-demand. The two-probe as-of pick and the (op_type_id, day) index
+-- above are the issue #49 form; see db/process_rc.sql for why it is value-identical to the
+-- three-key ORDER BY it replaced.
 CREATE OR REPLACE FUNCTION haf_stats_app.rc_avg_cost(_op_type_id SMALLINT, _day DATE)
 RETURNS BIGINT LANGUAGE sql STABLE AS $$
     SELECT COALESCE((
-        SELECT r.avg_cost_rc FROM haf_stats_backend.rc_op_stats_daily r
-        WHERE r.op_type_id = _op_type_id
-        ORDER BY (r.day <= _day) DESC, CASE WHEN r.day <= _day THEN r.day END DESC, r.day ASC
-        LIMIT 1
+        SELECT pick.avg_cost_rc FROM (
+            (SELECT 0 AS pri, r.avg_cost_rc FROM haf_stats_backend.rc_op_stats_daily r
+             WHERE r.op_type_id = _op_type_id AND r.day <= _day ORDER BY r.day DESC LIMIT 1)
+            UNION ALL
+            (SELECT 1 AS pri, r.avg_cost_rc FROM haf_stats_backend.rc_op_stats_daily r
+             WHERE r.op_type_id = _op_type_id ORDER BY r.day ASC LIMIT 1)
+        ) pick
+        ORDER BY pick.pri LIMIT 1
     ), 120000000::BIGINT)
 $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_avg_cost(SMALLINT, DATE) TO haf_stats_user;
@@ -774,10 +783,14 @@ RETURNS TABLE (base_rc BIGINT, byte_rc NUMERIC) LANGUAGE sql STABLE AS $$
     SELECT COALESCE(r.base_rc, 23428456::BIGINT), COALESCE(r.byte_rc, 475000::NUMERIC)
     FROM (SELECT 1) z(x)
     LEFT JOIN LATERAL (
-        SELECT rr.base_rc, rr.byte_rc FROM haf_stats_backend.rc_op_stats_daily rr
-        WHERE rr.op_type_id = _op_type_id
-        ORDER BY (rr.day <= _day) DESC, CASE WHEN rr.day <= _day THEN rr.day END DESC, rr.day ASC
-        LIMIT 1
+        SELECT pick.base_rc, pick.byte_rc FROM (
+            (SELECT 0 AS pri, rr.base_rc, rr.byte_rc FROM haf_stats_backend.rc_op_stats_daily rr
+             WHERE rr.op_type_id = _op_type_id AND rr.day <= _day ORDER BY rr.day DESC LIMIT 1)
+            UNION ALL
+            (SELECT 1 AS pri, rr.base_rc, rr.byte_rc FROM haf_stats_backend.rc_op_stats_daily rr
+             WHERE rr.op_type_id = _op_type_id ORDER BY rr.day ASC LIMIT 1)
+        ) pick
+        ORDER BY pick.pri LIMIT 1
     ) r ON TRUE
 $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_user;
@@ -864,12 +877,12 @@ ON CONFLICT DO NOTHING;
 
 -- Network activity on two days spanning the rate boundary: 06-05 ops use the cheap rate,
 -- 06-10 the pricey one. Per day, vote rc = count*base + bytes*byte, custom_json likewise.
---   06-05: vote 100*50+1000*5=10000, custom_json 20*100+200*10=4000 -> total 14000
+--   06-05: vote 100*50+1000*5=10000, custom_json 25*100+250*10=5000 -> total 15000
 --   06-10: vote  50*500+500*50=50000, custom_json 10*1000+100*100=20000 -> total 70000
 INSERT INTO haf_stats_backend.network_op_daily (day, op_type_id, op_count, op_bytes)
 VALUES
 ('2020-06-05', 1, 100, 1000),
-('2020-06-05', 18, 20, 200),
+('2020-06-05', 18, 25, 250),
 ('2020-06-10', 1, 50, 500),
 ('2020-06-10', 18, 10, 100)
 ON CONFLICT DO NOTHING;
@@ -879,10 +892,17 @@ ON CONFLICT DO NOTHING;
 -- get_network_top_custom_json. Keyed by the raw custom_json id, priced at read time by the
 -- op-18 rc_op_stats_daily rates seeded above (2020-06-01: 100/10, 2020-06-08: 1000/100).
 -- Rows are chosen so each day's (op_count, op_bytes) total equals the op-18 network_op_daily
--- row above (06-05 -> 20/200, 06-10 -> 10/100), demonstrating the cross-rollup invariant
+-- row above (06-05 -> 25/250, 06-10 -> 10/100), demonstrating the cross-rollup invariant
 -- SUM(network_custom_json_daily) == network_op_daily[op_type_id=18] per day. Ids resolve via
 -- the seeded registry: follow -> Hivemind Follow/Social Graph, sm_claim_daily -> Splinterlands
--- (prefix sm_)/Gaming - so group_by=id/app/category all return distinct, deterministic rows.
+-- (prefix sm_)/Gaming, actifit -> Actifit/Community & Social DApps - so group_by=id/app/category
+-- all return distinct, deterministic rows.
+--
+-- THREE ids, in three different categories, is the minimum that makes the get_network_top_custom_json
+-- Others band meaningful: with two, the band at limit_count=1 holds a single group and its totals
+-- are indistinguishable from that group's own, so a bug that mis-summed the tail would still pass.
+-- With three, limit_count=1 folds two groups into one band (13 ops / 130 bytes / 2600 rc) that
+-- matches no individual group, and limit_count=2 exercises the boundary.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_custom_json_daily (
     day DATE NOT NULL,
     json_id TEXT NOT NULL,
@@ -896,6 +916,7 @@ INSERT INTO haf_stats_backend.network_custom_json_daily (day, json_id, op_count,
 VALUES
 ('2020-06-05', 'follow', 12, 120),
 ('2020-06-05', 'sm_claim_daily', 8, 80),
+('2020-06-05', 'actifit', 5, 50),
 ('2020-06-10', 'follow', 10, 100)
 ON CONFLICT DO NOTHING;
 

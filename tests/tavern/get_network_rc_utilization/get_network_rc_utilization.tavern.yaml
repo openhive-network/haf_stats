@@ -25,10 +25,10 @@ stages:
       status_code: 200
       json:
         - period: "2020-06-05"
-          rc_total: 14000
+          rc_total: 15000
           by_label:
             vote_operation: 10000
-            custom_json_operation: 4000
+            custom_json_operation: 5000
         - period: "2020-06-10"
           rc_total: 70000
           by_label:
@@ -47,7 +47,7 @@ stages:
       status_code: 200
       json:
         - period: "2020-06-01"
-          rc_total: 84000
+          rc_total: 85000
           by_label:
             vote_operation: 60000
-            custom_json_operation: 24000
+            custom_json_operation: 25000
