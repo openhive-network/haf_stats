@@ -8,9 +8,10 @@ includes:
   - !include ../common.yaml
 
 # Reads network_custom_json_daily over the window, prices RC per day at the op-18 rate, and ranks.
-# ci_setup seeds follow (22 ops / 220 bytes / rc 22400 -> Hivemind Follow, Social Graph) and
-# sm_claim_daily (8 ops / 80 bytes / rc 1600 -> Splinterlands via the sm_ prefix, Gaming). With no
-# date params the window defaults to full history (issue #35), covering both 2020-06 fixture days.
+# ci_setup seeds three ids in three categories: follow (22 ops / 220 bytes / rc 22400 -> Hivemind
+# Follow, Social Graph), sm_claim_daily (8 / 80 / 1600 -> Splinterlands via the sm_ prefix, Gaming)
+# and actifit (5 / 50 / 1000 -> Actifit, Community & Social DApps). With no date params the window
+# defaults to full history (issue #35), covering both 2020-06 fixture days.
 stages:
   - name: group_by=id (default) ranks raw ids by op_count with resolved app + category
     request:
@@ -31,6 +32,12 @@ stages:
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+        - json_id: "actifit"
+          app_name: "Actifit"
+          category: "Community & Social DApps"
+          op_count: 5
+          op_bytes: 50
+          rc_estimate: 1000
 
   - name: group_by=category rolls ids up to their category (json_id + app_name null)
     request:
@@ -53,6 +60,12 @@ stages:
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+        - json_id: null
+          app_name: null
+          category: "Community & Social DApps"
+          op_count: 5
+          op_bytes: 50
+          rc_estimate: 1000
 
   - name: group_by=app rolls ids up to the registered DApp (json_id null)
     request:
@@ -75,6 +88,12 @@ stages:
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+        - json_id: null
+          app_name: "Actifit"
+          category: "Community & Social DApps"
+          op_count: 5
+          op_bytes: 50
+          rc_estimate: 1000
 
   - name: limit_count truncates to the single top row
     request:
@@ -91,3 +110,145 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+
+  # group_by=app/category PARTITION the window, so limit_count keeps the top N and folds the rest
+  # into one Others band rather than dropping it - the rows still sum to the window total
+  # (35 ops / 350 bytes / rc 25000). Before issue #49 this branch ignored limit_count entirely and
+  # returned every group, so these stages fail on the old code.
+  #
+  # limit_count=1 is the stage that actually exercises the SUM: the band absorbs two groups
+  # (8+5 ops, 80+50 bytes, 1600+1000 rc), so 13/130/2600 matches no individual group and a band
+  # that dropped or double-counted a group could not produce it.
+  - name: limit_count=1 on group_by=app folds the remaining TWO groups into one Others band
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "app"
+        limit_count: "1"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: "Others"
+          category: null
+          op_count: 13
+          op_bytes: 130
+          rc_estimate: 2600
+
+  - name: limit_count=1 on group_by=category folds two categories, Others carries the label
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "category"
+        limit_count: "1"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: null
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: null
+          category: "Others"
+          op_count: 13
+          op_bytes: 130
+          rc_estimate: 2600
+
+  # The boundary: one group named short of the total, so the band holds exactly the last group.
+  - name: limit_count=2 names two groups and bands only the third
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "app"
+        limit_count: "2"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: "Splinterlands"
+          category: "Gaming"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600
+        - json_id: null
+          app_name: "Others"
+          category: null
+          op_count: 5
+          op_bytes: 50
+          rc_estimate: 1000
+
+  # The band is emitted only when it actually absorbs something: with limit_count at or above the
+  # group count every group is named and no zero-filled band appears.
+  - name: no Others band when every group fits inside limit_count
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "app"
+        limit_count: "3"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: "Splinterlands"
+          category: "Gaming"
+          op_count: 8
+          op_bytes: 80
+          rc_estimate: 1600
+        - json_id: null
+          app_name: "Actifit"
+          category: "Community & Social DApps"
+          op_count: 5
+          op_bytes: 50
+          rc_estimate: 1000
+
+  # order_by=rc_estimate on the app branch: the only path that ranks a top-N on a NUMERIC metric,
+  # and the one where a tie-break bug would surface. follow's mid-window rate step (2400 on 06-05
+  # + 20000 on 06-10) is what makes 22400 discriminating here.
+  - name: group_by=app ranked by rc_estimate keeps the same order and totals
+    request:
+      url: "{api_url}/rpc/get_network_top_custom_json"
+      method: GET
+      params:
+        group_by: "app"
+        order_by: "rc_estimate"
+        limit_count: "1"
+    response:
+      status_code: 200
+      json:
+        - json_id: null
+          app_name: "Hivemind Follow"
+          category: "Social Graph"
+          op_count: 22
+          op_bytes: 220
+          rc_estimate: 22400
+        - json_id: null
+          app_name: "Others"
+          category: null
+          op_count: 13
+          op_bytes: 130
+          rc_estimate: 2600

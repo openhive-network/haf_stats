@@ -218,6 +218,42 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_category(TEXT) TO haf_stats_user;
 
+-- ---------------------------------------------------------------------------
+-- Both labels of a custom_json id in ONE registry probe (issue #49).
+--
+-- resolve_dapp_name and resolve_dapp_category run the identical longest-prefix match and
+-- differ only in the column they project and the fallback they apply, so an endpoint that
+-- needs both - which is every endpoint that groups by app OR category - paid the probe twice.
+-- Worse, neither scalar can be inlined: their bodies are COALESCE(<SubLink>, ...), and
+-- inline_function rejects a body containing a SubLink, so each call is also a full function
+-- invocation. This set-returning form has a FROM clause instead, which SQL SRF inlining DOES
+-- accept, so CROSS JOIN LATERAL resolve_dapp(id) expands into a plain lateral join with no
+-- call overhead at all.
+--
+-- Always returns exactly one row (the (SELECT 1) z(x) driver), so a CROSS JOIN LATERAL never
+-- drops its driving row. Returns the same labels as the two scalars for every input, fallbacks
+-- included; keep all three in step if the match rule ever changes.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp(_json_id TEXT)
+RETURNS TABLE (app_name TEXT, category TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT
+        COALESCE(r.app_name, _json_id)        AS app_name,
+        COALESCE(r.category, 'Uncategorized') AS category
+    FROM (SELECT 1) z(x)
+    LEFT JOIN LATERAL (
+        SELECT reg.app_name, reg.category
+        FROM haf_stats_backend.custom_json_app_registry reg
+        WHERE starts_with(_json_id, reg.app_id_pattern)
+        ORDER BY LENGTH(reg.app_id_pattern) DESC, reg.app_id_pattern
+        LIMIT 1
+    ) r ON TRUE
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp(TEXT) TO haf_stats_user;
+
 -- get_network_top_accounts window decomposition (issue #37). Splits [_from, _to]
 -- into the full interior months served from the *_monthly rollups plus the partial
 -- leading/trailing months served from the daily tables. Extracted from the endpoint
@@ -1434,7 +1470,7 @@ DECLARE
           "Network"
         ],
         "summary": "Most-used custom_json ids / DApps",
-        "description": "Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked by op_count (or op_bytes / rc_estimate), returning at most limit_count rows. group_by=id ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app collapses an app's ids to the registered DApp; group_by=category rolls up one level further (json_id is null for app, json_id and app_name are null for category). RC is a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day). Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.",
+        "description": "Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked by op_count (or op_bytes / rc_estimate), returning at most limit_count ranked rows. group_by=id ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app collapses an app's ids to the registered DApp; group_by=category rolls up one level further (json_id is null for app, json_id and app_name are null for category). group_by=app and group_by=category PARTITION the window, so they append one extra Others row aggregating every group beyond limit_count, sorted last and emitted only when something is actually absorbed - the rows therefore always sum to the window total regardless of limit_count. Identify that row by its CATEGORY, which is null for group_by=app and Others for group_by=category: a real DApp id can itself resolve to the name Others, so app_name is not a reliable marker. group_by=id is a plain top-N and has no Others row. RC is a calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day). Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.",
         "operationId": "haf_stats_endpoints.get_network_top_custom_json",
         "parameters": [
           {
@@ -1469,7 +1505,7 @@ DECLARE
               "minimum": 1,
               "maximum": 100
             },
-            "description": "Number of rows to return (1-100)"
+            "description": "Number of ranked rows to return (1-100); group_by=app/category may append one extra Others row"
           },
           {
             "in": "query",
@@ -1521,11 +1557,12 @@ DECLARE
                       "app_name": {
                         "type": "string",
                         "nullable": true,
-                        "description": "Resolved DApp name (null when group_by=category)"
+                        "description": "Resolved DApp name; Others on the aggregated tail row, which is identified by category rather than by this name (null when group_by=category)"
                       },
                       "category": {
                         "type": "string",
-                        "description": "DApp category (Uncategorized if unregistered)"
+                        "nullable": true,
+                        "description": "DApp category (Uncategorized if unregistered). Marks the aggregated tail row - null when group_by=app, since that band spans categories, and Others when group_by=category"
                       },
                       "op_count": {
                         "type": "integer",
@@ -4133,26 +4170,27 @@ BEGIN
     -- back to the earliest sample, and an empty rate table to the seeded constants, so the
     -- estimate is never zeroed. The rate is resolved ONCE per distinct activity day (not per
     -- (json_id, day) row) so cost stays bounded as the rate history grows.
-    WITH day_rate AS (
+    --
+    -- AS MATERIALIZED is what makes that last sentence true rather than merely likely: a
+    -- single-reference CTE is inlined, and the planner may then pull the lateral back above the
+    -- day join and resolve per (json_id, day) row after all. It collapsed anyway on the data
+    -- tested here, but only by the planner's choice (issue #49).
+    WITH day_rate AS MATERIALIZED (
         SELECT
             d.day,
-            COALESCE(rate.base_rc, 23428456) AS base_rc,
-            COALESCE(rate.byte_rc, 475000)   AS byte_rc
+            dr.base_rc,
+            dr.byte_rc
         FROM (
             SELECT DISTINCT acj.day
             FROM haf_stats_backend.account_custom_json_daily acj
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
         ) d
-        LEFT JOIN LATERAL (
-            SELECT r.base_rc, r.byte_rc
-            FROM haf_stats_backend.rc_op_stats_daily r
-            WHERE r.op_type_id = 18
-            ORDER BY (r.day <= d.day) DESC,
-                     CASE WHEN r.day <= d.day THEN r.day END DESC,
-                     r.day ASC
-            LIMIT 1
-        ) rate ON TRUE
+        -- Was a hand-inlined copy of the as-of rule (with the same fallback constants); folded
+        -- back onto the shared accessor so there is one definition to fix, and so this endpoint
+        -- inherits its index-seekable form (issue #49). rc_rate applies the same COALESCE
+        -- defaults the copy did, hence none here.
+        CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, d.day) dr
     ),
     -- Price each (json_id, day) row at its day's rate and roll up to json_id, then resolve
     -- each to its registered app + category via a longest-prefix starts_with match against
@@ -4394,25 +4432,22 @@ BEGIN
             HINT = 'Must be one of: day, week, month';
     END IF;
     RETURN QUERY
-    -- Resolve each op type's rate schedule into [valid_from, valid_to) intervals ONCE (the rate
-    -- is a step function -- rc_op_stats_daily holds only a handful of dated samples per op type),
-    -- then range-join each network_op_daily row to the interval covering its day and price it.
+    -- Price each network_op_daily row at its op type's rate effective on/before its day.
     -- RC = op_count*base_rc + op_bytes*byte_rc. Days before the earliest sample use that earliest
-    -- sample (rn = 1); days with no rate row at all fall back to generic constants via COALESCE.
-    -- This replaces a per-(op_type, day) LATERAL that re-scanned the rate table once per pair
-    -- (~100k times over full history) and dominated the latency; the as-of join is ~10x faster
-    -- with identical output (issue #35).
-    WITH rate_iv AS (
-        SELECT
-            r.op_type_id,
-            r.base_rc,
-            r.byte_rc,
-            r.day                                                            AS valid_from,
-            LEAD(r.day)    OVER (PARTITION BY r.op_type_id ORDER BY r.day)    AS valid_to,
-            ROW_NUMBER()   OVER (PARTITION BY r.op_type_id ORDER BY r.day)    AS rn
-        FROM haf_stats_backend.rc_op_stats_daily r
-    ),
-    priced AS (
+    -- sample; days with no rate row at all fall back to generic constants via COALESCE.
+    --
+    -- The as-of row is picked by the same two btree-seekable probes as haf_stats_app.rc_rate
+    -- (see db/process_rc.sql), NOT by calling it: this endpoint's no-sample fallback is
+    -- 120000000, not rc_rate's custom_json-calibrated 23428456, and that fallback is the live
+    -- path for every op type the sampler has not reached yet.
+    --
+    -- Issue #35 replaced a per-(op_type, day) LATERAL with a window-function interval join
+    -- because the LATERAL re-scanned the whole rate table per pair. That reasoning expired with
+    -- idx_rc_op_stats_op_type_day: the interval join is O(rows x samples-per-op-type) - it grew
+    -- with the rate history exactly like the defect issue #49 is about - while the probes are
+    -- now O(log n) index scans and flat forever. The driving relation is already one row per
+    -- (op_type, day), so there is nothing to hoist here; only the per-call cost changes.
+    WITH priced AS (
         SELECT
             DATE_TRUNC(granularity, nod.day)                                AS period,
             COALESCE(replace(ot.name, 'hive::protocol::', ''),
@@ -4420,10 +4455,28 @@ BEGIN
             (nod.op_count  * COALESCE(ri.base_rc, 120000000)
              + nod.op_bytes * COALESCE(ri.byte_rc, 475000))::BIGINT         AS rc
         FROM haf_stats_backend.network_op_daily nod
-        LEFT JOIN rate_iv ri
-               ON ri.op_type_id = nod.op_type_id
-              AND (nod.day < ri.valid_to OR ri.valid_to IS NULL)
-              AND (nod.day >= ri.valid_from OR ri.rn = 1)
+        LEFT JOIN LATERAL (
+            SELECT pick.base_rc, pick.byte_rc
+            FROM (
+                (
+                    SELECT 0 AS pri, r.base_rc, r.byte_rc
+                    FROM haf_stats_backend.rc_op_stats_daily r
+                    WHERE r.op_type_id = nod.op_type_id AND r.day <= nod.day
+                    ORDER BY r.day DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                (
+                    SELECT 1 AS pri, r.base_rc, r.byte_rc
+                    FROM haf_stats_backend.rc_op_stats_daily r
+                    WHERE r.op_type_id = nod.op_type_id
+                    ORDER BY r.day ASC
+                    LIMIT 1
+                )
+            ) pick
+            ORDER BY pick.pri
+            LIMIT 1
+        ) ri ON TRUE
         LEFT JOIN hafd.operation_types ot ON ot.id = nod.op_type_id
         WHERE nod.day BETWEEN _from AND _to
     ),
@@ -4589,10 +4642,16 @@ $$;
     summary: Most-used custom_json ids / DApps
     description: >-
       Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked
-      by op_count (or op_bytes / rc_estimate), returning at most limit_count rows. group_by=id
+      by op_count (or op_bytes / rc_estimate), returning at most limit_count ranked rows. group_by=id
       ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app
       collapses an app's ids to the registered DApp; group_by=category rolls up one level further
-      (json_id is null for app, json_id and app_name are null for category). RC is a calibrated
+      (json_id is null for app, json_id and app_name are null for category). group_by=app and
+      group_by=category PARTITION the window, so they append one extra Others row aggregating
+      every group beyond limit_count, sorted last and emitted only when something is actually
+      absorbed - the rows therefore always sum to the window total regardless of limit_count.
+      Identify that row by its CATEGORY, which is null for group_by=app and Others for
+      group_by=category: a real DApp id can itself resolve to the name Others, so app_name is
+      not a reliable marker. group_by=id is a plain top-N and has no Others row. RC is a calibrated
       ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day).
       Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.
     operationId: haf_stats_endpoints.get_network_top_custom_json
@@ -4621,7 +4680,7 @@ $$;
           default: 25
           minimum: 1
           maximum: 100
-        description: Number of rows to return (1-100)
+        description: Number of ranked rows to return (1-100); group_by=app/category may append one extra Others row
       - in: query
         name: group_by
         required: false
@@ -4656,10 +4715,11 @@ $$;
                   app_name:
                     type: string
                     nullable: true
-                    description: Resolved DApp name (null when group_by=category)
+                    description: Resolved DApp name; Others on the aggregated tail row, which is identified by category rather than by this name (null when group_by=category)
                   category:
                     type: string
-                    description: DApp category (Uncategorized if unregistered)
+                    nullable: true
+                    description: DApp category (Uncategorized if unregistered). Marks the aggregated tail row - null when group_by=app, since that band spans categories, and Others when group_by=category
                   op_count:
                     type: integer
                     description: Number of custom_json ops in the window
@@ -4717,20 +4777,44 @@ BEGIN
     -- approach the BIGINT ceiling (~9.2e18) as custom_json volume grows, and this is a coarse
     -- estimate, so precision beyond that is irrelevant. per_id prices each (json_id, day) at the
     -- op-18 rate effective on/before it (byte_rc is NUMERIC, so the sum is already NUMERIC).
+    --
+    -- Both branches resolve that rate ONCE PER DISTINCT DAY in day_rate rather than once per
+    -- (json_id, day) row. A wide window holds ~120 ids/day, so the old per-row LATERAL called
+    -- rc_rate ~300k times over full history and WAS this endpoint's entire latency - and it grew
+    -- with the length of the rate history, not with the data, so it got slower every day the
+    -- sampler ran (issue #49). Same day_rate shape get_account_dapp_footprint already uses.
+    --
+    -- AS MATERIALIZED is load-bearing: inlined, the planner is free to pull the lateral back
+    -- above the day join and silently restore per-row evaluation. The INNER JOIN loses nothing -
+    -- rc_rate always yields exactly one row, and day_rate is built from the same table under the
+    -- same day predicate in the same snapshot, so it is 1:1 with the days actually scanned.
+    --
+    -- Do not "simplify" the SUM into SUM(op_count) * base_rc + SUM(op_bytes) * byte_rc: it is
+    -- per-DAY pricing, and PostgREST prints NUMERIC verbatim, so re-associating the arithmetic
+    -- would change the printed scale even where the value is unchanged.
     IF group_by = 'id' THEN
         -- Fast path: rank the raw ids, then resolve the DApp name/category for ONLY the returned
-        -- page. resolve_dapp_name/category each probe the registry, so resolving every distinct id
-        -- in a wide window before the LIMIT would be wasted work. json_id is unique, so it is a
-        -- complete tiebreak on its own.
+        -- page. resolve_dapp probes the registry, so resolving every distinct id in a wide window
+        -- before the LIMIT would be wasted work. json_id is unique, so it is a complete tiebreak
+        -- on its own.
         RETURN QUERY
-        WITH per_id AS (
+        WITH day_rate AS MATERIALIZED (
+            SELECT d.day, dr.base_rc, dr.byte_rc
+            FROM (
+                SELECT DISTINCT ncj.day
+                FROM haf_stats_backend.network_custom_json_daily ncj
+                WHERE ncj.day BETWEEN _from AND _to
+            ) d
+            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, d.day) dr
+        ),
+        per_id AS (
             SELECT
                 ncj.json_id,
                 SUM(ncj.op_count)::BIGINT                                  AS op_count,
                 SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
                 SUM(ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc) AS rc_estimate
             FROM haf_stats_backend.network_custom_json_daily ncj
-            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
+            JOIN day_rate dr ON dr.day = ncj.day
             WHERE ncj.day BETWEEN _from AND _to
             GROUP BY ncj.json_id
         ),
@@ -4746,12 +4830,13 @@ BEGIN
         )
         SELECT
             t.json_id,
-            haf_stats_app.resolve_dapp_name(t.json_id),
-            haf_stats_app.resolve_dapp_category(t.json_id),
+            res.app_name,
+            res.category,
             t.op_count,
             t.op_bytes,
             t.rc_estimate
         FROM top t
+        CROSS JOIN LATERAL haf_stats_app.resolve_dapp(t.json_id) res
         ORDER BY
             CASE WHEN order_by = 'op_bytes'    THEN t.op_bytes
                  WHEN order_by = 'rc_estimate' THEN t.rc_estimate
@@ -4760,27 +4845,40 @@ BEGIN
     ELSE
         -- group_by = 'app' or 'category': the DApp / category IS the group key, so resolution must
         -- happen before grouping (resolved once per distinct id, since per_id already collapsed the
-        -- days). json_id is null for both dimensions; app_name is null for category.
+        -- days). json_id is null for both dimensions; app_name is null for category. resolve_dapp
+        -- returns both labels from ONE registry probe, where the two scalar resolvers ran the same
+        -- longest-prefix match twice per id - and neither of them can be inlined (issue #49).
         RETURN QUERY
-        WITH per_id AS (
+        WITH day_rate AS MATERIALIZED (
+            -- See the group_by = 'id' branch above: one rc_rate call per DISTINCT activity day.
+            SELECT d.day, dr.base_rc, dr.byte_rc
+            FROM (
+                SELECT DISTINCT ncj.day
+                FROM haf_stats_backend.network_custom_json_daily ncj
+                WHERE ncj.day BETWEEN _from AND _to
+            ) d
+            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, d.day) dr
+        ),
+        per_id AS (
             SELECT
                 ncj.json_id,
                 SUM(ncj.op_count)::BIGINT                                  AS op_count,
                 SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
                 SUM(ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc) AS rc_estimate
             FROM haf_stats_backend.network_custom_json_daily ncj
-            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
+            JOIN day_rate dr ON dr.day = ncj.day
             WHERE ncj.day BETWEEN _from AND _to
             GROUP BY ncj.json_id
         ),
         keyed AS (
             SELECT
-                haf_stats_app.resolve_dapp_name(pid.json_id)     AS app_name,
-                haf_stats_app.resolve_dapp_category(pid.json_id) AS category,
+                res.app_name,
+                res.category,
                 pid.op_count,
                 pid.op_bytes,
                 pid.rc_estimate
             FROM per_id pid
+            CROSS JOIN LATERAL haf_stats_app.resolve_dapp(pid.json_id) res
         ),
         grouped AS (
             SELECT
@@ -4793,20 +4891,70 @@ BEGIN
             GROUP BY
                 CASE WHEN group_by = 'app' THEN k.app_name END,
                 k.category
+        ),
+        -- These two dimensions PARTITION the window - every op is counted in exactly one group -
+        -- so a bare LIMIT would have turned a complete breakdown into a truncated leaderboard,
+        -- and any share-of-total a client computed from the response would silently be wrong.
+        -- Instead the tail is aggregated into one Others band, as get_account_interactions does
+        -- for its per-type partners, so the rows still sum to the window total at any
+        -- limit_count. Until issue #49 this branch ignored limit_count altogether and returned
+        -- every group (21,939 rows / 3.2 MB over full history).
+        ranked AS (
+            SELECT
+                g.app_name, g.category, g.op_count, g.op_bytes, g.rc_estimate,
+                ROW_NUMBER() OVER (
+                    ORDER BY
+                        CASE WHEN order_by = 'op_bytes'    THEN g.op_bytes
+                             WHEN order_by = 'rc_estimate' THEN g.rc_estimate
+                             ELSE g.op_count END DESC,
+                        g.category, g.app_name
+                ) AS rn
+            FROM grouped g
+        ),
+        named AS (
+            SELECT 0 AS is_others, r.app_name, r.category, r.op_count, r.op_bytes, r.rc_estimate
+            FROM ranked r
+            WHERE r.rn <= "limit_count"
+        ),
+        -- HAVING on an ungrouped aggregate: exactly one row when the tail is non-empty, none
+        -- when every group already fit, so a window with few apps returns no zero-filled band.
+        -- The band spans categories, so category is null for group_by=app - it is the one row
+        -- whose label is not a registry value.
+        others AS (
+            SELECT
+                1 AS is_others,
+                CASE WHEN group_by = 'app' THEN 'Others' END::TEXT AS app_name,
+                CASE WHEN group_by = 'app' THEN NULL ELSE 'Others' END::TEXT AS category,
+                SUM(r.op_count)::BIGINT  AS op_count,
+                SUM(r.op_bytes)::BIGINT  AS op_bytes,
+                SUM(r.rc_estimate)       AS rc_estimate
+            FROM ranked r
+            WHERE r.rn > "limit_count"
+            HAVING COUNT(*) > 0
+        ),
+        -- (category, app_name) is grouped's group key, so it is unique across the named rows and
+        -- the ordering is total - the page is deterministic. is_others leads it because the tail
+        -- aggregate routinely outweighs the largest single group and would otherwise sort into
+        -- the middle of the leaderboard.
+        banded AS (
+            SELECT * FROM named
+            UNION ALL
+            SELECT * FROM others
         )
         SELECT
             NULL::TEXT,
-            g.app_name,
-            g.category,
-            g.op_count,
-            g.op_bytes,
-            g.rc_estimate
-        FROM grouped g
+            b.app_name,
+            b.category,
+            b.op_count,
+            b.op_bytes,
+            b.rc_estimate
+        FROM banded b
         ORDER BY
-            CASE WHEN order_by = 'op_bytes'    THEN g.op_bytes
-                 WHEN order_by = 'rc_estimate' THEN g.rc_estimate
-                 ELSE g.op_count END DESC,
-            g.category, g.app_name;
+            b.is_others,
+            CASE WHEN order_by = 'op_bytes'    THEN b.op_bytes
+                 WHEN order_by = 'rc_estimate' THEN b.rc_estimate
+                 ELSE b.op_count END DESC,
+            b.category, b.app_name;
     END IF;
 END;
 $$;
