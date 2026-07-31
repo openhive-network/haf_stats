@@ -94,6 +94,142 @@ find_haf_image:
   variables:
     UPSTREAM_BRANCH: "develop"
     HAF_PATTERNS_REF: "develop"
+    # A registry miss must not take the whole pipeline down (haf_stats#51, upstream
+    # hive/haf#335). The template's 25-commit develop walk stays the preferred path; the
+    # step below handles the miss it would otherwise die on, and still fails hard when
+    # nothing at all resolves — so we never export an image name that cannot be pulled.
+    UPSTREAM_REQUIRE_HIT: "false"
+    # Tried in order, ONLY when no develop commit image resolves. `latest` and `stable` are
+    # pointers upstream maintains, so this list keeps working even once retention purges the
+    # numbered releases too (it purged the per-commit images that caused #51). Keep the
+    # numbered tags in step with docker/.env's HAF_VERSION when you bump either.
+    HAF_FALLBACK_TAGS: "latest stable 1.28.7 1.28.6"
+    # Set true on a manual pipeline to exercise the fallback without waiting for an outage.
+    HAF_FORCE_FALLBACK: "false"
+    # Only used if hive/haf's source-patterns.sh becomes unfetchable (see before_script).
+    HAF_DEFAULT_SOURCE_PATTERNS: "src/,hive/,cmake/,CMakeLists.txt,Dockerfile,Dockerfile.sql-overlay,docker/,scripts/haf/,scripts/maintenance-scripts/,scripts/setup_ubuntu.sh,scripts/generate_extension_sql.sh,common_includes/,.gitmodules"
+  # Same three steps as .find_haf_image's before_script, except the source-patterns fetch is
+  # not fatal. Upstream exits 1 when HAF_PATTERNS_REF is "develop" and the file cannot be
+  # fetched, which would kill this job before the fallback below ever runs — and hive/haf
+  # moving that file is the same class of upstream churn that caused #51. A stale pattern
+  # list only changes which commits the walk considers, so degrading is strictly better.
+  before_script:
+    - |
+      PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/${HAF_PATTERNS_REF}/scripts/ci-helpers/source-patterns.sh"
+      echo "Fetching HAF source patterns from: $PATTERNS_URL"
+      UPSTREAM_PATTERNS="$(curl -sf "$PATTERNS_URL" | sh || true)"
+      if [ -z "$UPSTREAM_PATTERNS" ] && [ "$HAF_PATTERNS_REF" != "develop" ]; then
+        echo "WARNING: HAF_PATTERNS_REF '$HAF_PATTERNS_REF' not found, falling back to develop"
+        UPSTREAM_PATTERNS="$(curl -sf "https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh" | sh || true)"
+      fi
+      if [ -z "$UPSTREAM_PATTERNS" ]; then
+        UPSTREAM_PATTERNS="$HAF_DEFAULT_SOURCE_PATTERNS"
+        echo "WARNING: could not fetch source-patterns.sh from HAF; using this repo's pinned copy."
+        echo "         If this persists, hive/haf moved the file and the list needs refreshing."
+      fi
+      echo "Loaded patterns: $UPSTREAM_PATTERNS"
+      export UPSTREAM_PATTERNS
+    - |
+      if [ -n "$HAF_IMAGE_TYPE" ]; then
+        export UPSTREAM_IMAGE="$HAF_IMAGE_TYPE"
+        echo "Looking for HAF $HAF_IMAGE_TYPE image"
+      else
+        echo "Looking for HAF mainnet image"
+      fi
+    - |
+      if [ -n "$HAF_IMAGE_TYPE" ]; then
+        export UPSTREAM_OUTPUT="haf_${HAF_IMAGE_TYPE}_image.env"
+      else
+        export UPSTREAM_OUTPUT="haf_image.env"
+      fi
+  script:
+    - !reference [.find_haf_image, script]
+    - |
+      # Registry retention purged every per-commit develop image in July 2026 while HAF
+      # develop itself sat frozen, so all 25 candidates 404'd and this job — and with it
+      # every job that needs: it — stayed red for ~12 days (haf_stats#51 / hive/haf#335).
+      # Prefer the develop image; fall back only when there is genuinely nothing to find.
+      #
+      # Residual: the referenced step above can still exit non-zero on its own (a failed
+      # clone of hive/haf, or no commit matching the source patterns), and set -e kills the
+      # job there, before this runs. Those mean "cannot even ask the question", unlike the
+      # empty-registry case this handles.
+      PREFIX="${HAF_VAR_PREFIX:-HAF}"
+      ENV_FILE="${UPSTREAM_OUTPUT:-haf_image.env}"
+      # Fail closed: the flag has to be there and be explicit. If upstream renames it (those
+      # scripts are fetched from an unpinned develop ref) we must not read the absence as a
+      # miss and silently serve the fallback on every run from then on.
+      STATE="$(grep -m1 "^${PREFIX}_UPSTREAM_CACHE_HIT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+      if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" != "true" ] && [ "$STATE" != "false" ]; then
+        echo "ERROR: $ENV_FILE has no usable ${PREFIX}_UPSTREAM_CACHE_HIT line (got: '${STATE}')."
+        echo "       The upstream resolver changed its output; this job's fallback logic needs updating."
+        exit 1
+      fi
+      if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" = "true" ]; then
+        echo "find_haf_image: resolved a develop commit image; no fallback needed."
+      else
+        if [ "${HAF_FORCE_FALLBACK}" = "true" ]; then
+          echo "HAF_FORCE_FALLBACK=true - exercising the fallback path deliberately."
+        else
+          echo "WARNING: no develop commit image for any of the last ${UPSTREAM_MAX_SEARCH} source commits."
+        fi
+        echo "         Falling back, newest first: ${HAF_FALLBACK_TAGS}"
+        BASE="${UPSTREAM_REGISTRY}"
+        if [ -n "${UPSTREAM_IMAGE:-}" ]; then BASE="${UPSTREAM_REGISTRY}/${UPSTREAM_IMAGE}"; fi
+        RESOLVED=""
+        for TAG in ${HAF_FALLBACK_TAGS}; do
+          REF="${BASE}:${TAG}"
+          # One probe answers both "does it exist" and "what is its digest". Resolving the
+          # digest is mandatory, not best-effort: HAF_COMMIT is the replay cache key, so a
+          # mutable tag as the key would let a datadir replayed by one HAF version be served
+          # to a stack running another, with nothing able to detect it. A tag we cannot pin
+          # is therefore skipped, not accepted.
+          DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            # Second source, in case buildx is absent or too old for --format.
+            DIGEST="$(docker manifest inspect --verbose "$REF" 2>/dev/null | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 || true)"
+          fi
+          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            echo "  skip: $REF (absent, or no verifiable digest)"
+            continue
+          fi
+          IMAGE="${BASE}@${DIGEST}"
+          # Key the cache by the commit the image was BUILT from, not by the tag: that is the
+          # same key the develop walk uses, so falling back to an image the walk would have
+          # picked anyway reuses its replay cache instead of stranding a second multi-GB copy.
+          REV="$(docker buildx imagetools inspect "$REF" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+          if printf '%s' "$REV" | grep -qE '^[0-9a-f]{40}$'; then
+            KEY="$REV"
+          else
+            KEY="${TAG}_$(printf '%s' "${DIGEST#sha256:}" | cut -c1-12)"
+            echo "  note: no revision label on $REF; keying the cache by digest instead"
+          fi
+          echo "  hit:  $REF -> $IMAGE (${PREFIX}_COMMIT=$KEY)"
+          {
+            echo "${PREFIX}_UPSTREAM_BRANCH=${UPSTREAM_BRANCH}"
+            # Upstream's own flag means "an older develop COMMIT was used" — a benign timing
+            # race. Ours means "no develop image existed at all". Keep them distinct so a
+            # surrender to a release tag is visible downstream and in the dotenv artifact.
+            echo "${PREFIX}_UPSTREAM_FALLBACK=false"
+            echo "${PREFIX}_UPSTREAM_TAG_FALLBACK=true"
+            echo "${PREFIX}_UPSTREAM_CACHE_HIT=true"
+            echo "${PREFIX}_UPSTREAM_COMMIT=${KEY}"
+            echo "${PREFIX}_UPSTREAM_TAG=${TAG}"
+            echo "${PREFIX}_UPSTREAM_IMAGE=${IMAGE}"
+            echo "${PREFIX}_UPSTREAM_REGISTRY=${BASE}"
+            echo "${PREFIX}_IMAGE_NAME=${IMAGE}"
+            echo "${PREFIX}_COMMIT=${KEY}"
+          } > "$ENV_FILE"
+          RESOLVED="$TAG"
+          break
+        done
+        if [ -z "$RESOLVED" ]; then
+          echo "ERROR: no develop commit image and no fallback tag resolved - cannot continue."
+          exit 1
+        fi
+        echo "Variables in $ENV_FILE:"
+        cat "$ENV_FILE"
+      fi
 
 # Inherits HAF_APP_SKIP_PATTERNS from the top-level variables: SQL/scripts/docker/
 # Dockerfile changes DO require a re-sync; only docs/tests/CI-yaml are safe to skip.
