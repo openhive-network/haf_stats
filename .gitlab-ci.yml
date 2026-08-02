@@ -270,7 +270,10 @@ hadolint:
   image: hadolint/hadolint:latest-alpine
   needs: []
   script:
-    - hadolint --ignore DL3006 --ignore DL3002 Dockerfile
+    # DL3066 (non-numeric user-id): "USER root" is deliberate (DL3002 is already
+    # ignored for the same reason); the rule appeared in a newer hadolint and the
+    # unpinned latest-alpine image made it start failing without a repo change.
+    - hadolint --ignore DL3006 --ignore DL3002 --ignore DL3066 Dockerfile
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
