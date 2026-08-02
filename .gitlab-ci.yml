@@ -328,6 +328,31 @@ docker-build:
     # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
+# Build + push the PostgREST URL rewriter image (Dockerfile.rewriter: openresty
+# serving clean REST URLs that map to /rpc/ calls, per the rules generated from
+# the OpenAPI annotations). Published as $CI_REGISTRY_IMAGE/rewriter:<sha> so a
+# downstream stack (haf_api_node) can pin it alongside the app image.
+docker-build-rewriter:
+  stage: build
+  image: docker:24
+  needs: []
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - docker build -f Dockerfile.rewriter
+        --build-arg GIT_COMMIT_SHA="$CI_COMMIT_SHA"
+        --build-arg GIT_CURRENT_BRANCH="$CI_COMMIT_REF_NAME"
+        --build-arg GIT_LAST_LOG_MESSAGE="$CI_COMMIT_TITLE"
+        --build-arg BUILD_TIME="$CI_JOB_STARTED_AT"
+        -t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
 # Replay the 5M reference chain ONCE and cache the HAF datadir (cache type `haf`,
 # keyed by HAF_COMMIT). Shared across all app commits — cache-hit runs are instant.
 prepare_haf_data:
