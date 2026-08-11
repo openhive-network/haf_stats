@@ -1,0 +1,24 @@
+---
+test_name: Sync status endpoint returns last block num and timestamp
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: GET /rpc/get_sync_status
+    request:
+      url: "{api_url}/rpc/get_sync_status"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+        cache-control: "public, max-age=0"
+      json:
+        # The uniform HAF-app sync-status shape: block number plus its UTC
+        # timestamp (YYYY-MM-DDTHH:MM:SS), so a consumer can compute staleness
+        # with a single call. Values depend on how far the CI replay has been
+        # processed, so assert shape/format rather than exact numbers (the
+        # get_health test does the same for last_processed_block).
+        last_block_num: !anyint
+        last_block_time: !re_fullmatch '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
