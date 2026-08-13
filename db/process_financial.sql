@@ -48,12 +48,21 @@ WHERE direction NOT IN ('incoming', 'outgoing');
 ALTER TABLE haf_stats_backend.account_financial_daily
 VALIDATE CONSTRAINT account_financial_daily_direction_check;
 
-CREATE INDEX IF NOT EXISTS idx_afd_account_day
-ON haf_stats_backend.account_financial_daily (account_id, day DESC);
+-- No (account_id, day) index: the primary key leads with exactly that, so it serves
+-- both per-account reads on its own (get_account_financial_summary, the rewards CTE
+-- of get_account_content_stats); refresh_financial_monthly has no account_id
+-- predicate and rides the index below instead. Nothing orders these rows by day, so
+-- the DESC on the old idx_afd_account_day bought nothing. Dropped rather than just
+-- deleted so deployed nodes reclaim its 3.8 GB on the next install (issue #53);
+-- CONCURRENTLY is permitted here for the same reason as idx_acm_created_at in
+-- process_account_cohorts.sql. Re-running this finishes an interrupted drop.
+DROP INDEX CONCURRENTLY IF EXISTS haf_stats_backend.idx_afd_account_day;
 
 -- Leaderboard access path (get_network_top_accounts): a category + direction +
 -- day-range scan across ALL accounts, which the account_id-leading PK cannot
--- serve. Columns are a subset of the PK, so this index adds no new HOT-blocking
+-- serve. Two dependants, not one: refresh_financial_monthly below drives its
+-- account-wide category scan off this index too.
+-- Columns are a subset of the PK, so this index adds no new HOT-blocking
 -- attributes to the additive nai/op_count upserts.
 CREATE INDEX IF NOT EXISTS idx_afd_category_direction_day
 ON haf_stats_backend.account_financial_daily (category, direction, day);
