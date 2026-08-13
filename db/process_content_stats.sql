@@ -33,8 +33,14 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     PRIMARY KEY (account_id, day)
 );
 
-CREATE INDEX IF NOT EXISTS idx_acd_account_day
-ON haf_stats_backend.account_content_daily (account_id, day DESC);
+-- No secondary index: the primary key (account_id, day) already serves the
+-- endpoint's predicate (account_id = X AND day BETWEEN a AND b) and nothing orders
+-- these rows by day, so the DESC on the old idx_acd_account_day bought nothing a
+-- btree cannot get from a backward scan. Dropped rather than just deleted so
+-- deployed nodes reclaim its 4.0 GB on the next install (issue #53); CONCURRENTLY
+-- is permitted here for the same reason as idx_acm_created_at in
+-- process_account_cohorts.sql. Re-running this finishes an interrupted drop.
+DROP INDEX CONCURRENTLY IF EXISTS haf_stats_backend.idx_acd_account_day;
 
 GRANT SELECT ON haf_stats_backend.account_content_daily TO haf_stats_user;
 
@@ -98,8 +104,8 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_community_daily (
 -- No secondary index: the primary key (account_id, day, community) already leads with the
 -- endpoint's predicate (account_id = X AND day BETWEEN a AND b), so an (account_id, day)
 -- index would be a redundant prefix that only costs write throughput on the hottest
--- processor path. (account_content_daily carries exactly that redundancy; it is not a
--- reason to copy it forward.)
+-- processor path. (account_content_daily carried exactly that redundancy until issue
+-- #53 dropped it; it was never a reason to copy it forward.)
 GRANT SELECT ON haf_stats_backend.account_community_daily TO haf_stats_user;
 
 -- Drop it where a previous revision of this branch created it.
