@@ -1,0 +1,43 @@
+---
+test_name: Witness missed blocks rejects an invalid date
+
+# from_date/to_date accept "a block number OR a date" via haf_stats_app.to_filter_date, which is
+# an explicit clause of this endpoint's contract. Both rejection paths are pinned here so a
+# to_filter_date regression cannot turn a malformed input into a 500, or into a silent 200 []
+# indistinguishable from a legitimately empty window (synthetic_empty_results asserts [] for four
+# different inputs, so absence of rows proves nothing on its own).
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Reject an unparseable from_date
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "not-a-date"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true
+
+  - name: Reject a non-positive block number
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        to_date: "0"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true
+          pattern_file: "invalid_block_number.pat.json"

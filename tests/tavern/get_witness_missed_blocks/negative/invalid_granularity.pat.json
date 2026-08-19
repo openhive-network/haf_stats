@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be one of: day, week, month (omit for the per-witness leaderboard)",
+  "message": "invalid granularity: hour"
+}

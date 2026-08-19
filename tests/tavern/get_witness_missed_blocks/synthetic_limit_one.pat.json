@@ -1,0 +1,13 @@
+[
+  {
+    "period": null,
+    "producer": "wtncarol",
+    "missed_count": 3,
+    "produced_count": 0,
+    "rate": 1.0,
+    "first_missed_block": 7004,
+    "last_missed_block": 7502,
+    "first_missed_at": "2021-06-01T00:00:12",
+    "last_missed_at": "2021-06-15T12:00:06"
+  }
+]

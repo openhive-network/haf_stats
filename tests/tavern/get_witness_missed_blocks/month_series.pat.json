@@ -1,0 +1,13 @@
+[
+    {
+        "period": "2016-04-01",
+        "producer": null,
+        "missed_count": 21444,
+        "produced_count": 842422,
+        "rate": 0.024823,
+        "first_missed_block": 214746,
+        "last_missed_block": 1052051,
+        "first_missed_at": "2016-04-01T04:08:54",
+        "last_missed_at": "2016-04-30T23:53:00"
+    }
+]

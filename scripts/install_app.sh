@@ -48,6 +48,7 @@ run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_custom_json.sql"
+run_sql_file "${SCRIPT_DIR}/../db/process_witness_blocks.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_top_accounts_alltime.sql"
@@ -103,6 +104,24 @@ psql_cmd -c "
         'haf_stats_backend.network_custom_json_daily',
         'hafd.operations',
         'SELECT haf_stats_app.process_network_custom_json(1, (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
+    -- witness_blocks_daily is derived the same way (hafd.blocks + producer_missed ops), so its
+    -- one-time backfill is likewise the processor over every already-processed block.
+    --
+    -- SIZING IS UNMEASURED AT MAINNET SCALE - treat the following as a lower bound, not an
+    -- estimate. The 5M-corpus timing (2.71 s) is a fully-cached scan: hafd.blocks was resident in
+    -- shared_buffers, read=0. On mainnet hafd.blocks is ~30 GB, the produced arm becomes a cold
+    -- seq scan of it, and the missed arm is an indexed op-type scan PLUS one random PK probe back
+    -- into that same table per producer_missed op PLUS a hash build over every account - none of
+    -- which the cached figure includes. It is also NOT cheaper than the custom_json backfill above
+    -- (2.71 s vs 2.11 s over the identical range, ~29% more).
+    --
+    -- Step 8 runs as ONE implicit transaction, which pins the xmin horizon for its whole duration
+    -- (the hazard that got the community registry batched out into 8a). If a real mainnet install
+    -- shows this taking more than a few minutes, move it to a batched step modelled on 8a.
+    SELECT haf_stats_app.backfill_rollup_if_empty(
+        'haf_stats_backend.witness_blocks_daily',
+        'hafd.blocks',
+        'SELECT haf_stats_app.process_witness_blocks(1, (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.engagement_period_counts',
         'haf_stats_backend.post_engagement',

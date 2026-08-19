@@ -342,6 +342,8 @@ tags:
     description: Per-account analytics
   - name: Network
     description: Network-wide statistics
+  - name: Witnesses
+    description: Witness block production and reliability
   - name: Other
     description: Health and version endpoints
 servers:
@@ -385,6 +387,10 @@ DECLARE
     {
       "name": "Network",
       "description": "Network-wide statistics"
+    },
+    {
+      "name": "Witnesses",
+      "description": "Witness block production and reliability"
     },
     {
       "name": "Other",
@@ -2392,6 +2398,157 @@ DECLARE
                       },
                       "op_count": {
                         "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/witnesses/missed-blocks": {
+      "get": {
+        "tags": [
+          "Witnesses"
+        ],
+        "summary": "Witness missed blocks and reliability",
+        "description": "Missed versus produced blocks per witness over [from_date, to_date]. Omit granularity for a LEADERBOARD (one row per producer, period null); set it for a TIME SERIES (one row per period, producer null unless witness is given). Every producer with any activity in the window is included, INCLUDING those that missed nothing, so rate is a meaningful reliability figure and a witness= query returns a row whenever that witness was scheduled; the active set is NOT filtered server-side, since backup witnesses are exactly the ones that miss. rate is missed_count / (produced_count + missed_count), a fraction in [0,1] rounded to 6 decimals - not a percentage, because at 2 decimals a witness that missed 1 of 28,800 slots would print 0.00. A witness whose only activity in the window was a miss has produced_count 0 and rate 1. Reads the witness_blocks_daily rollup only, so numerator and denominator always share one clock (the app's last processed block) and counts never include blocks the app has not processed yet; /sync-status discloses that lag. from_date/to_date select whole UTC days, so the newest day holds only the blocks processed so far - \"today so far\". In series mode every period OVERLAPPING the window is returned at its full-period value, so a from_date or to_date landing mid-week or mid-month yields that whole period rather than a partial slice labelled as a full one (same rule as the other network time series). Hourly buckets are not supported: every rollup here is day-grained, and serving hours from raw operations would reintroduce the two-clock split this endpoint exists to avoid; time-of-day miss patterns are a follow-up that should add an hourly rollup. Witness rank and top-21 membership are deliberately NOT returned - those are hafbe-api /witnesses; join them on the producer name. NOTE: produced + missed is close to but not exactly 28,800 slots per day. A chain halt loses slots entirely (no block is produced AND no miss is recorded), and a halt straddling midnight can hand one back the next day - the replay corpus shows 28,711 on 2016-04-10 and 28,801 on 2016-04-11. Do not derive produced as 28800 - missed.",
+        "operationId": "haf_stats_endpoints.get_witness_missed_blocks",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)"
+          },
+          {
+            "in": "query",
+            "name": "to_date",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Block number or end date (YYYY-MM-DD), inclusive, defaults to today"
+          },
+          {
+            "in": "query",
+            "name": "witness",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string"
+            },
+            "description": "Restrict to a single witness account name; omit for all producers. Unknown names, and names with no scheduled slots in the window, return an empty array. Note this is NOT an active/top-21 filter - a demoted or backup witness returns its real figures, which is the population the endpoint exists to expose. (Issue #54's sketch and block_explorer_ui#774 call this parameter `producer`; it had to be renamed because `producer` is also a response column, and RETURNS TABLE columns are OUT parameters.)"
+          },
+          {
+            "in": "query",
+            "name": "granularity",
+            "required": false,
+            "schema": {
+              "x-sql-datatype": "TEXT",
+              "x-sql-default-value": "NULL",
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ]
+            },
+            "description": "Omit for the per-witness leaderboard; set to bucket the window into a time series"
+          },
+          {
+            "in": "query",
+            "name": "order_by",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "missed",
+              "enum": [
+                "missed",
+                "rate",
+                "last_missed"
+              ]
+            },
+            "description": "Leaderboard ranking column, descending. Validated but not applied when granularity is set (a series is always ordered by period)"
+          },
+          {
+            "in": "query",
+            "name": "limit_count",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1000,
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "description": "Number of leaderboard rows to return (1-1000), defaulting to the MAXIMUM rather than to a small page. Both the ceiling and that default differ from the sibling leaderboards on purpose: those rank an unbounded space (21k+ custom_json ids) where a top-N is the whole point, whereas the group set here is the WITNESS set - bounded by how many accounts were scheduled in the window, ~120-200 on modern Hive. Truncation is uniquely dangerous for the witness-table consumer, which merges by producer and renders an absent witness as \"0 missed\", so a dropped row becomes a WRONG figure rather than a missing one; the response carries no truncation indicator, so a low default would be a trap rather than a safeguard. The window aggregation is independent of the limit, so the wide default is nearly free (47.8 ms at 100 vs 62.4 ms at 1000 over full history). Validated but not applied when granularity is set."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Witness missed-block leaderboard or time series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "x-sql-datatype": "TABLE(period TEXT, producer TEXT, missed_count BIGINT, produced_count BIGINT, rate NUMERIC, first_missed_block INT, last_missed_block INT, first_missed_at TIMESTAMP, last_missed_at TIMESTAMP)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "ISO-8601 date string for the aggregation bucket (null in leaderboard mode)"
+                      },
+                      "producer": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Witness account name (null in a network-wide series, i.e. granularity set without witness)"
+                      },
+                      "missed_count": {
+                        "type": "integer",
+                        "description": "Scheduled slots the witness missed in the window"
+                      },
+                      "produced_count": {
+                        "type": "integer",
+                        "description": "Blocks the witness produced in the window"
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true,
+                        "description": "missed/(produced+missed), a fraction in [0,1] to 6 decimals; null only when the window holds no slots"
+                      },
+                      "first_missed_block": {
+                        "type": "integer",
+                        "nullable": true,
+                        "description": "Block at which the first miss in the window was recorded (null if nothing was missed)"
+                      },
+                      "last_missed_block": {
+                        "type": "integer",
+                        "nullable": true,
+                        "description": "Block at which the last miss in the window was recorded (null if nothing was missed)"
+                      },
+                      "first_missed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true,
+                        "description": "Timestamp of first_missed_block; with last_missed_at this separates a single outage from sustained flakiness"
+                      },
+                      "last_missed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true,
+                        "description": "Timestamp of last_missed_block"
                       }
                     }
                   }
@@ -6737,6 +6894,355 @@ BEGIN
     END IF;
 
     RETURN QUERY EXECUTE _sql;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Feature: witness missed blocks and reliability (issue #54)
+-- ---------------------------------------------------------------------------
+
+/** openapi:paths
+/witnesses/missed-blocks:
+  get:
+    tags:
+      - Witnesses
+    summary: Witness missed blocks and reliability
+    description: >-
+      Missed versus produced blocks per witness over [from_date, to_date]. Omit granularity for a
+      LEADERBOARD (one row per producer, period null); set it for a TIME SERIES (one row per period,
+      producer null unless witness is given). Every producer with any activity in the window is
+      included, INCLUDING those that missed nothing, so rate is a meaningful reliability figure and
+      a witness= query returns a row whenever that witness was scheduled; the active set is NOT
+      filtered server-side, since backup witnesses are exactly the ones that miss. rate is
+      missed_count / (produced_count + missed_count), a fraction in [0,1] rounded to 6 decimals -
+      not a percentage, because at 2 decimals a witness that missed 1 of 28,800 slots would print
+      0.00. A witness whose only activity in the window was a miss has produced_count 0 and rate 1.
+      Reads the witness_blocks_daily rollup only, so numerator and denominator always share one
+      clock (the app's last processed block) and counts never include blocks the app has not
+      processed yet; /sync-status discloses that lag. from_date/to_date select whole UTC days, so
+      the newest day holds only the blocks processed so far - "today so far". In series mode every
+      period OVERLAPPING the window is returned at its full-period value, so a from_date or to_date
+      landing mid-week or mid-month yields that whole period rather than a partial slice labelled as
+      a full one (same rule as the other network time series). Hourly buckets are
+      not supported: every rollup here is day-grained, and serving hours from raw operations would
+      reintroduce the two-clock split this endpoint exists to avoid; time-of-day miss patterns are
+      a follow-up that should add an hourly rollup. Witness rank and top-21 membership are
+      deliberately NOT returned - those are hafbe-api /witnesses; join them on the producer name.
+      NOTE: produced + missed is close to but not exactly 28,800 slots per day. A chain halt loses
+      slots entirely (no block is produced AND no miss is recorded), and a halt straddling midnight
+      can hand one back the next day - the replay corpus shows 28,711 on 2016-04-10 and 28,801 on
+      2016-04-11. Do not derive produced as 28800 - missed.
+    operationId: haf_stats_endpoints.get_witness_missed_blocks
+    parameters:
+      - in: query
+        name: from_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or start date (YYYY-MM-DD), inclusive; omit for full history (defaults to chain genesis)
+      - in: query
+        name: to_date
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: Block number or end date (YYYY-MM-DD), inclusive, defaults to today
+      - in: query
+        name: witness
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+        description: >-
+          Restrict to a single witness account name; omit for all producers. Unknown names, and
+          names with no scheduled slots in the window, return an empty array. Note this is NOT an
+          active/top-21 filter - a demoted or backup witness returns its real figures, which is the
+          population the endpoint exists to expose. (Issue #54's sketch and block_explorer_ui#774
+          call this parameter `producer`; it had to be renamed because `producer` is also a response
+          column, and RETURNS TABLE columns are OUT parameters.)
+      - in: query
+        name: granularity
+        required: false
+        schema:
+          x-sql-datatype: TEXT
+          x-sql-default-value: "NULL"
+          type: string
+          enum: [day, week, month]
+        description: Omit for the per-witness leaderboard; set to bucket the window into a time series
+      - in: query
+        name: order_by
+        required: false
+        schema:
+          type: string
+          default: missed
+          enum: [missed, rate, last_missed]
+        description: Leaderboard ranking column, descending. Validated but not applied when granularity is set (a series is always ordered by period)
+      - in: query
+        name: limit_count
+        required: false
+        schema:
+          type: integer
+          default: 1000
+          minimum: 1
+          maximum: 1000
+        description: >-
+          Number of leaderboard rows to return (1-1000), defaulting to the MAXIMUM rather than to a
+          small page. Both the ceiling and that default differ from the sibling leaderboards on
+          purpose: those rank an unbounded space (21k+ custom_json ids) where a top-N is the whole
+          point, whereas the group set here is the WITNESS set - bounded by how many accounts were
+          scheduled in the window, ~120-200 on modern Hive. Truncation is uniquely dangerous for the
+          witness-table consumer, which merges by producer and renders an absent witness as
+          "0 missed", so a dropped row becomes a WRONG figure rather than a missing one; the
+          response carries no truncation indicator, so a low default would be a trap rather than a
+          safeguard. The window aggregation is independent of the limit, so the wide default is
+          nearly free (47.8 ms at 100 vs 62.4 ms at 1000 over full history). Validated but not
+          applied when granularity is set.
+    responses:
+      '200':
+        description: Witness missed-block leaderboard or time series
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: "TABLE(period TEXT, producer TEXT, missed_count BIGINT, produced_count BIGINT, rate NUMERIC, first_missed_block INT, last_missed_block INT, first_missed_at TIMESTAMP, last_missed_at TIMESTAMP)"
+              type: array
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    nullable: true
+                    description: ISO-8601 date string for the aggregation bucket (null in leaderboard mode)
+                  producer:
+                    type: string
+                    nullable: true
+                    description: Witness account name (null in a network-wide series, i.e. granularity set without witness)
+                  missed_count:
+                    type: integer
+                    description: Scheduled slots the witness missed in the window
+                  produced_count:
+                    type: integer
+                    description: Blocks the witness produced in the window
+                  rate:
+                    type: number
+                    nullable: true
+                    description: missed/(produced+missed), a fraction in [0,1] to 6 decimals; null only when the window holds no slots
+                  first_missed_block:
+                    type: integer
+                    nullable: true
+                    description: Block at which the first miss in the window was recorded (null if nothing was missed)
+                  last_missed_block:
+                    type: integer
+                    nullable: true
+                    description: Block at which the last miss in the window was recorded (null if nothing was missed)
+                  first_missed_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: Timestamp of first_missed_block; with last_missed_at this separates a single outage from sustained flakiness
+                  last_missed_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: Timestamp of last_missed_block
+ */
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS haf_stats_endpoints.get_witness_missed_blocks;
+CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_witness_missed_blocks(
+    "from_date" TEXT = NULL,
+    "to_date" TEXT = NULL,
+    "witness" TEXT = NULL,
+    "granularity" TEXT = NULL,
+    "order_by" TEXT = 'missed',
+    "limit_count" INT = 1000
+)
+RETURNS TABLE(period TEXT, producer TEXT, missed_count BIGINT, produced_count BIGINT, rate NUMERIC, first_missed_block INT, last_missed_block INT, first_missed_at TIMESTAMP, last_missed_at TIMESTAMP)
+-- openapi-generated-code-end
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    _from DATE;
+    _to DATE;
+    _witness TEXT;
+    _witness_id INT;
+    _gran TEXT;
+    _ob TEXT;
+BEGIN
+    -- The query parameter is `witness`, not `producer`, because RETURNS TABLE columns ARE OUT
+    -- parameters: an IN parameter named `producer` is rejected outright with
+    -- 'parameter name "producer" used more than once'. The response field keeps the on-chain
+    -- name (hafd.blocks.producer_account_id, producer_missed_operation.producer).
+
+    -- No date filter ⇒ full history (chain genesis 2016-03-24), consistent with the sibling
+    -- network endpoints (issue #35). Reliability comparisons should pass an explicit window;
+    -- an all-time leaderboard is dominated by whoever was scheduled longest.
+    _from := haf_stats_app.to_filter_date("from_date", '2016-03-24'::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- Tolerate Wax's JSON-encoded string params (e.g. "gtg"); see issue #22. '' means absent.
+    _witness := NULLIF(TRIM('"' FROM COALESCE("witness", '')), '');
+    _gran := NULLIF(TRIM('"' FROM COALESCE("granularity", '')), '');
+    _ob := TRIM('"' FROM "order_by");
+
+    -- Deliberately INVERTED relative to every sibling endpoint's "IS NULL OR x NOT IN (...)":
+    -- here a NULL/absent granularity is a MEANINGFUL value (it selects the leaderboard), so the
+    -- usual guard would reject the default. _gran is non-null inside this branch, so NOT IN is a
+    -- plain boolean and can never evaluate to NULL.
+    IF _gran IS NOT NULL AND _gran NOT IN ('day', 'week', 'month') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid granularity: ' || _gran,
+            HINT = 'Must be one of: day, week, month (omit for the per-witness leaderboard)';
+    END IF;
+
+    -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so a NULL order_by
+    -- would slip past and reach the CASE.
+    IF _ob IS NULL OR _ob NOT IN ('missed', 'rate', 'last_missed') THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid order_by: ' || COALESCE(_ob, '(null)'),
+            HINT = 'Must be one of: missed, rate, last_missed';
+    END IF;
+
+    -- IS NULL is required for a second reason here: LIMIT NULL means NO LIMIT, so a null
+    -- limit_count would dump the entire leaderboard instead of one page.
+    IF "limit_count" IS NULL OR "limit_count" < 1 OR "limit_count" > 1000 THEN
+        RAISE SQLSTATE '22023' USING
+            MESSAGE = 'invalid limit_count: ' || COALESCE("limit_count"::TEXT, '(null)'),
+            HINT = 'Must be between 1 and 1000';
+    END IF;
+
+    IF _witness IS NOT NULL THEN
+        SELECT a.id INTO _witness_id FROM hafd.accounts a WHERE a.name = _witness;
+        -- Unknown account ⇒ empty result, not an error (the idiom every account endpoint uses).
+        -- A known witness with no activity in the window returns empty by the same route.
+        IF _witness_id IS NULL THEN
+            RETURN;
+        END IF;
+    END IF;
+
+    IF _gran IS NULL THEN
+        -- ------------------------------------------------------------------
+        -- Leaderboard: one row per producer over the whole window.
+        -- ------------------------------------------------------------------
+        RETURN QUERY
+        WITH agg AS (
+            SELECT
+                wb.producer_account_id AS producer_account_id,
+                SUM(wb.produced_count)::BIGINT AS produced_count,
+                SUM(wb.missed_count)::BIGINT AS missed_count,
+                MIN(wb.first_missed_block)::INT AS first_missed_block,
+                MAX(wb.last_missed_block)::INT AS last_missed_block
+            FROM haf_stats_backend.witness_blocks_daily wb
+            WHERE wb.day BETWEEN _from AND _to
+              AND (_witness_id IS NULL OR wb.producer_account_id = _witness_id)
+            GROUP BY wb.producer_account_id
+        ),
+        -- ::NUMERIC on the numerator is load-bearing: BIGINT / BIGINT is INTEGER division and
+        -- would round every real miss rate to 0. NULLIF guards the (unreachable, since a row
+        -- exists only when one of the counters is positive) zero-slot case.
+        rated AS (
+            SELECT
+                g.producer_account_id, g.produced_count, g.missed_count,
+                g.first_missed_block, g.last_missed_block,
+                ROUND(g.missed_count::NUMERIC
+                      / NULLIF(g.produced_count + g.missed_count, 0), 6) AS rate
+            FROM agg g
+        ),
+        -- NULLS LAST is mandatory, not defensive: last_missed_block is NULL for every witness
+        -- that never missed, and PostgreSQL's DESC sorts NULLs FIRST - without it,
+        -- order_by=last_missed would return a page of witnesses that have never missed a block.
+        -- missed_count then producer_account_id make the ordering total, so the page is
+        -- deterministic.
+        top AS (
+            SELECT r.*
+            FROM rated r
+            ORDER BY
+                (CASE WHEN _ob = 'rate' THEN r.rate
+                      WHEN _ob = 'last_missed' THEN r.last_missed_block::NUMERIC
+                      ELSE r.missed_count::NUMERIC END) DESC NULLS LAST,
+                r.missed_count DESC,
+                r.producer_account_id ASC
+            LIMIT "limit_count"
+        )
+        -- Names and block timestamps resolve AFTER the limit - at most limit_count rows, each a
+        -- PK lookup (the get_network_top_custom_json fast-path idiom). LEFT JOIN so a witness
+        -- with no misses is not dropped by its NULL extremes.
+        SELECT
+            NULL::TEXT,
+            a.name::TEXT,
+            t.missed_count,
+            t.produced_count,
+            t.rate,
+            t.first_missed_block,
+            t.last_missed_block,
+            fb.created_at,
+            lb.created_at
+        FROM top t
+        JOIN hafd.accounts a ON a.id = t.producer_account_id
+        LEFT JOIN hafd.blocks fb ON fb.num = t.first_missed_block
+        LEFT JOIN hafd.blocks lb ON lb.num = t.last_missed_block
+        ORDER BY
+            (CASE WHEN _ob = 'rate' THEN t.rate
+                  WHEN _ob = 'last_missed' THEN t.last_missed_block::NUMERIC
+                  ELSE t.missed_count::NUMERIC END) DESC NULLS LAST,
+            t.missed_count DESC,
+            t.producer_account_id ASC;
+    ELSE
+        -- ------------------------------------------------------------------
+        -- Time series: one row per period. With witness= it is that witness's series; without
+        -- it, network-wide totals (producer null). Sparse - periods with no data are omitted,
+        -- matching every other time series here. GROUP BY the DATE_TRUNC expression, not the
+        -- `period` alias, which collides with the RETURNS TABLE OUT column.
+        -- ------------------------------------------------------------------
+        RETURN QUERY
+        WITH agg AS (
+            SELECT
+                DATE_TRUNC(_gran, wb.day) AS bucket,
+                SUM(wb.produced_count)::BIGINT AS produced_count,
+                SUM(wb.missed_count)::BIGINT AS missed_count,
+                MIN(wb.first_missed_block)::INT AS first_missed_block,
+                MAX(wb.last_missed_block)::INT AS last_missed_block
+            FROM haf_stats_backend.witness_blocks_daily wb
+            -- Expand to whole BUCKET boundaries, not the raw day window. `day BETWEEN _from AND
+            -- _to` would emit a partial edge period LABELLED as a full one: a window of
+            -- 2016-04-15..04-20 at granularity=month returned period '2016-04-01' holding six
+            -- days of blocks, which renders as a ~70% collapse in block production that never
+            -- happened. Same both-ends form as get_daily_active_users, which aggregates a
+            -- *_daily table into buckets exactly like this; the house rule is stated at
+            -- get_daily_active_users' "every period overlapping [_from, _to] is returned at its
+            -- FULL-period value" comment. Interpolating _gran is safe - it is validated against
+            -- ('day','week','month') above. No effect at granularity=day.
+            WHERE wb.day >= DATE_TRUNC(_gran, _from)::DATE
+              AND wb.day < (DATE_TRUNC(_gran, _to) + ('1 ' || _gran)::INTERVAL)::DATE
+              AND (_witness_id IS NULL OR wb.producer_account_id = _witness_id)
+            GROUP BY DATE_TRUNC(_gran, wb.day)
+        )
+        -- Cost note: unlike the leaderboard, whose two hafd.blocks probes per row are capped by
+        -- limit_count, this branch does two PK probes per BUCKET with no client-settable bound -
+        -- a full-history granularity=day call is ~3,500 buckets, so ~7,000 random probes into a
+        -- table that is ~30 GB on mainnet. Measured at ~85 ms warm here; the exposure is a cold
+        -- cache, where the probe keys are spread one per day across all of chain history and
+        -- cannot be assumed resident. Left unbounded deliberately: truncating a chart is worse
+        -- than a slow one, and the rollup scan that feeds it is already the dominant cost for
+        -- every window a frontend actually requests.
+        SELECT
+            TO_CHAR(g.bucket, 'YYYY-MM-DD'),
+            _witness,
+            g.missed_count,
+            g.produced_count,
+            ROUND(g.missed_count::NUMERIC
+                  / NULLIF(g.produced_count + g.missed_count, 0), 6),
+            g.first_missed_block,
+            g.last_missed_block,
+            fb.created_at,
+            lb.created_at
+        FROM agg g
+        LEFT JOIN hafd.blocks fb ON fb.num = g.first_missed_block
+        LEFT JOIN hafd.blocks lb ON lb.num = g.last_missed_block
+        ORDER BY 1;
+    END IF;
 END;
 $$;
 

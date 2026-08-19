@@ -1,0 +1,24 @@
+[
+  {
+    "period": "2021-06-01",
+    "producer": "wtnalice",
+    "missed_count": 1,
+    "produced_count": 4,
+    "rate": 0.2,
+    "first_missed_block": 7001,
+    "last_missed_block": 7001,
+    "first_missed_at": "2021-06-01T00:00:03",
+    "last_missed_at": "2021-06-01T00:00:03"
+  },
+  {
+    "period": "2021-06-15",
+    "producer": "wtnalice",
+    "missed_count": 1,
+    "produced_count": 3,
+    "rate": 0.25,
+    "first_missed_block": 7504,
+    "last_missed_block": 7504,
+    "first_missed_at": "2021-06-15T12:00:12",
+    "last_missed_at": "2021-06-15T12:00:12"
+  }
+]

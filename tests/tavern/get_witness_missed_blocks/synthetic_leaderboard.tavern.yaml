@@ -1,0 +1,108 @@
+---
+test_name: Witness leaderboard ordering and row set over stub fixtures
+
+# Stub lane (tests/witness_fixture.sql, processed by the REAL process_witness_blocks).
+# The four witnesses are built so each order_by yields a DIFFERENT ordering - a fixture where
+# they all agree could not tell the sort keys apart:
+#   missed        wtncarol(3),   [wtnalice(2) TIE wtndave(2)],       wtnbob(0)
+#   rate          wtncarol(1.0),  wtndave(0.2857), wtnalice(0.2222), wtnbob(0.0)
+#   last_missed   wtndave(7506),  wtnalice(7504),  wtncarol(7502),   wtnbob(null, LAST)
+#
+# wtnbob is the load-bearing row: it never missed, so its last_missed_block is NULL, and
+# PostgreSQL sorts NULLs FIRST under DESC. Without NULLS LAST the order_by=last_missed stage
+# would return it first instead of last.
+
+marks:
+  - patterntest
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Default ordering is by missed_count, and includes the zero-miss witness
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_by_missed.pat.json"
+
+  - name: order_by=rate puts the never-produced witness on top
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        order_by: "rate"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_by_rate.pat.json"
+
+  - name: order_by=last_missed reorders the top two and sinks the null last
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        order_by: "last_missed"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_by_last_missed.pat.json"
+
+  - name: limit_count=1 returns only the top row
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        limit_count: 1
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_limit_one.pat.json"
+
+  # wtnalice and wtndave both have missed_count 2, and this page of 2 cuts through that tie, so
+  # the `producer_account_id ASC` tie-break decides MEMBERSHIP, not just order: alice (6001) must
+  # be on the page and dave (6004) must not. Drop the tie-break and this stage can return dave.
+  # Every other fixture value is distinct, so without this stage the documented "the ordering is
+  # total, so the page is deterministic" promise has nothing that could fail.
+  - name: A tie at the page boundary is broken deterministically by account id
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        order_by: "missed"
+        limit_count: 2
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_tie_break.pat.json"
+
+  # The contract that makes the endpoint reusable on the witness page: a witness that never
+  # missed must still return a row (rate 0), not an empty array indistinguishable from an
+  # unknown account.
+  - name: A witness with no misses still returns a row
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        witness: "wtnbob"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_zero_miss_witness.pat.json"

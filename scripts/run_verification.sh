@@ -27,6 +27,18 @@
 #        window. No tavern test can reach the ceiling (the busiest account in the
 #        replay corpus is far below any sane value), so without this the whole
 #        truncation path would ship unexecuted.
+#   6. tests/parity/witness_blocks_rebuild_consistency.sql (issue #54)
+#        witness_blocks_daily mixes two arithmetics in one upsert - the counters ADD
+#        while first/last_missed_block merge with LEAST/GREATEST - so the table could
+#        silently depend on how the chain was sliced into batches. Replays [1, tip]
+#        batched (the shape rebuild_witness_blocks.sh uses) and again as a single
+#        batch, asserts both reproduce live history byte-for-byte, then re-derives
+#        from hafd and checks the endpoint against raw data. Finally counts op-86
+#        rows RAW - no name parse, no accounts join - because every other stage shares
+#        the processor's own premises and so cannot detect a missed arm that has gone
+#        blind. TRUNCATEs and replays the table under ACCESS EXCLUSIVE inside a
+#        REPEATABLE READ transaction that is ROLLED BACK, so the live table is left
+#        exactly as found, pass or fail.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -77,10 +89,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/5: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/6: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/5: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/6: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
@@ -104,13 +116,16 @@ else
   fi
 fi
 
-echo "===== Guard 3/5: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/6: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Guard 4/5: community derivation vs hivemind (issue #47) ====="
+echo "===== Guard 4/6: community derivation vs hivemind (issue #47) ====="
 run_sql_file tests/parity/community_vs_hivemind.sql
 
-echo "===== Guard 5/5: interactions op-ceiling guard (issue #48) ====="
+echo "===== Guard 5/6: interactions op-ceiling guard (issue #48) ====="
 run_sql_file tests/parity/interactions_cap.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap) ====="
+echo "===== Guard 6/6: witness blocks rebuild consistency (issue #54) ====="
+run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild) ====="
