@@ -101,6 +101,9 @@ BEGIN
     PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
     PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
     PERFORM haf_stats_app.process_network_custom_json(_first_block, _last_block);
+    -- Reads hafd.blocks / hafd.operations directly, so it has no ordering dependency on any
+    -- processor above it.
+    PERFORM haf_stats_app.process_witness_blocks(_first_block, _last_block);
 END;
 $$;
 

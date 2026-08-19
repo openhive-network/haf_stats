@@ -27,11 +27,17 @@ CREATE TABLE IF NOT EXISTS hafd.operation_types (
 -- hafd.blocks: referenced by get_network_hp_distribution for VESTS/HP ratio.
 -- total_vesting_shares and total_vesting_fund_hive must exist as columns even
 -- though the table is empty (column resolution happens at call time in plpgsql).
+-- producer_account_id is what process_witness_blocks counts blocks by (#54). DEFAULT 0 is
+-- required, not cosmetic: every INSERT INTO hafd.blocks below uses an explicit column list
+-- without it, so a bare NOT NULL would break them all. Those rows land under account id 0,
+-- which is not a real fixture account - the witness tests therefore process only their own
+-- dedicated block range (see the #54 fixtures at the end of this file).
 CREATE TABLE IF NOT EXISTS hafd.blocks (
     num INT PRIMARY KEY,
     created_at TIMESTAMP NOT NULL,
     total_vesting_shares BIGINT NOT NULL DEFAULT 0,
-    total_vesting_fund_hive BIGINT NOT NULL DEFAULT 0
+    total_vesting_fund_hive BIGINT NOT NULL DEFAULT 0,
+    producer_account_id INT NOT NULL DEFAULT 0
 );
 
 -- hafd.operation_id(block, op_in_block): a monotonic op id whose ordering tracks
@@ -40,6 +46,14 @@ CREATE TABLE IF NOT EXISTS hafd.blocks (
 CREATE OR REPLACE FUNCTION hafd.operation_id(_block INT, _op INT)
 RETURNS BIGINT LANGUAGE sql IMMUTABLE AS $$
     SELECT _block::BIGINT * 1000000 + _op
+$$;
+
+-- The inverse, used by the processors that scan an op-type over a block range
+-- (process_witness_blocks, #54). Real HAF packs the block number into the high bits of the
+-- op id; this stub mirrors hafd.operation_id above.
+CREATE OR REPLACE FUNCTION hafd.operation_id_to_block_num(_id BIGINT)
+RETURNS INT LANGUAGE sql IMMUTABLE AS $$
+    SELECT (_id / 1000000)::INT
 $$;
 
 -- Minimal HAF operation relations used by process_account_cohorts.sql.
@@ -114,7 +128,10 @@ INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
 (1, 'hive::protocol::vote_operation', FALSE),
 (2, 'hive::protocol::transfer_operation', FALSE),
 (18, 'hive::protocol::custom_json_operation', FALSE),
-(64, 'hive::protocol::producer_reward_operation', TRUE)
+(64, 'hive::protocol::producer_reward_operation', TRUE),
+-- #54: process_witness_blocks resolves this by NAME (virtual op ids are not stable across
+-- hived versions), so the name must match production exactly; the id is arbitrary here.
+(86, 'hive::protocol::producer_missed_operation', TRUE)
 ON CONFLICT (id) DO NOTHING;
 
 -- Blocks for the get_account_rc_footprint synthetic test (March 2021; nums chosen above the

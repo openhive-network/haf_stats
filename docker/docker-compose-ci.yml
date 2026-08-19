@@ -43,6 +43,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /hivemind_oracle_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /mainnet_community_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /community_vs_hivemind.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_witness_blocks.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /witness_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /seed_data.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_governance_concentration.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_governance_concentration();" &&
@@ -70,6 +72,11 @@ services:
       # Executes the op-ceiling guard, which no tavern test can reach (the corpus is far
       # below any sane ceiling), so the truncation path does not ship unexecuted.
       - ../tests/parity/interactions_cap.sql:/interactions_cap.sql:ro
+      # #54 witness rollup. Unlike the operation-stream processors this one reads only
+      # hafd.blocks plus one virtual op type, so the fast lane can run the REAL processor
+      # over synthetic blocks instead of hand-seeding its output table.
+      - ../db/process_witness_blocks.sql:/process_witness_blocks.sql:ro
+      - ../tests/witness_fixture.sql:/witness_fixture.sql:ro
       - ../db/seed_data.sql:/seed_data.sql:ro
       - ../db/process_account_cohorts.sql:/process_account_cohorts.sql:ro
       - ../db/process_governance_concentration.sql:/process_governance_concentration.sql:ro

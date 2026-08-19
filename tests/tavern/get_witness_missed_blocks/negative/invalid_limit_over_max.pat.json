@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be between 1 and 1000",
+  "message": "invalid limit_count: 1001"
+}

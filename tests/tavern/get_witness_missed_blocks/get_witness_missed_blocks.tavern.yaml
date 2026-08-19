@@ -1,0 +1,78 @@
+---
+test_name: Witness missed blocks matches the 5M replay
+
+# Real-value lane. The window is April 2016, closed by block ~1.05M, so these figures are
+# stable at any replay depth beyond that - the same window the sibling suites assert on.
+#
+# This is also the ONLY lane that proves process_witness_blocks populates the rollup from a
+# real chain: the stub lane runs it over synthetic blocks, but only a genuine replay exercises
+# it through process_block_range across thousands of batch boundaries.
+
+marks:
+  - patterntest
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Leaderboard for 2016-04, top 5 by missed
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+        limit_count: 5
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+
+  - name: Single witness reuses the same aggregate
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+        witness: "kushed"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "single_witness.pat.json"
+
+  - name: Month series over the same window
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "2016-04-01"
+        to_date: "2016-04-30"
+        granularity: "month"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "month_series.pat.json"
+
+  # #23: from_date/to_date accept a block number as well as a date. These two blocks bracket
+  # the same April window, so the top of the leaderboard is unchanged.
+  - name: Block numbers resolve to the same window
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "209769"
+        to_date: "1023600"
+        limit_count: 2
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "block_number_values.pat.json"

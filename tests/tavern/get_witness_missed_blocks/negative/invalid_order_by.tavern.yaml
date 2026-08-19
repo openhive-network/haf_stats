@@ -1,0 +1,23 @@
+---
+test_name: Witness missed blocks rejects an unsupported order_by
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+stages:
+  - name: Witness missed blocks rejects an unsupported order_by
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        order_by: "produced"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

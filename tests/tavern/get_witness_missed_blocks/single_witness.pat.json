@@ -1,0 +1,13 @@
+[
+    {
+        "period": null,
+        "producer": "kushed",
+        "missed_count": 561,
+        "produced_count": 8718,
+        "rate": 0.060459,
+        "first_missed_block": 468796,
+        "last_missed_block": 964551,
+        "first_missed_at": "2016-04-10T04:41:27",
+        "last_missed_at": "2016-04-27T22:28:51"
+    }
+]

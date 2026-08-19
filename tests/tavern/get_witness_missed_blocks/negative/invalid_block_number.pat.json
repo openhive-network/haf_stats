@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": null,
+  "message": "block number must be positive, got: 0"
+}

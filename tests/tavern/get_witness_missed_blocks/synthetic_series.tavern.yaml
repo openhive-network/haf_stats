@@ -1,0 +1,80 @@
+---
+test_name: Witness missed-block time series over stub fixtures
+
+# The two fixture days (2021-06-01 and 2021-06-15) sit in different ISO weeks but the same
+# month, so week and month granularity return different row counts over the identical window -
+# which is what proves DATE_TRUNC is actually applied rather than the day rows being echoed.
+# The week rows also sum back to the month row (2 + 5 = 7 missed, 6 + 10 = 16 produced).
+#
+# Without a witness filter the series is network-wide and `producer` is null; with one it is
+# that witness's series and `producer` is echoed. Both shapes are asserted here.
+
+marks:
+  - patterntest
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Month granularity collapses both days into one period
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        granularity: "month"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_series_month.pat.json"
+
+  - name: Week granularity splits the same window into two periods
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        granularity: "week"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_series_week.pat.json"
+
+  # limit_count is documented as "validated but not applied when granularity is set". Nothing
+  # tested that: every series pattern here is 1-2 rows, far under the default, so a stray
+  # `LIMIT "limit_count"` added to the series branch would be invisible in both lanes (verified -
+  # the fast gate still passed 78/78 with exactly that mutation applied). Passing limit_count=1
+  # against a 2-row series is the smallest input that discriminates: shipped returns 2, a limited
+  # series returns 1.
+  - name: limit_count does not truncate a time series
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        granularity: "week"
+        limit_count: 1
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_series_week.pat.json"
+
+  - name: Day granularity with a witness filter echoes the producer
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        witness: "wtnalice"
+        granularity: "day"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "synthetic_series_day_witness.pat.json"

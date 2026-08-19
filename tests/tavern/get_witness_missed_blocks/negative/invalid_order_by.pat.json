@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Must be one of: missed, rate, last_missed",
+  "message": "invalid order_by: produced"
+}

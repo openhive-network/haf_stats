@@ -1,0 +1,24 @@
+[
+  {
+    "period": "2021-05-31",
+    "producer": null,
+    "missed_count": 2,
+    "produced_count": 6,
+    "rate": 0.25,
+    "first_missed_block": 7001,
+    "last_missed_block": 7004,
+    "first_missed_at": "2021-06-01T00:00:03",
+    "last_missed_at": "2021-06-01T00:00:12"
+  },
+  {
+    "period": "2021-06-14",
+    "producer": null,
+    "missed_count": 5,
+    "produced_count": 10,
+    "rate": 0.333333,
+    "first_missed_block": 7502,
+    "last_missed_block": 7506,
+    "first_missed_at": "2021-06-15T12:00:06",
+    "last_missed_at": "2021-06-15T12:00:18"
+  }
+]

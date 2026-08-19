@@ -1,0 +1,46 @@
+[
+  {
+    "period": null,
+    "producer": "wtncarol",
+    "missed_count": 3,
+    "produced_count": 0,
+    "rate": 1.0,
+    "first_missed_block": 7004,
+    "last_missed_block": 7502,
+    "first_missed_at": "2021-06-01T00:00:12",
+    "last_missed_at": "2021-06-15T12:00:06"
+  },
+  {
+    "period": null,
+    "producer": "wtndave",
+    "missed_count": 2,
+    "produced_count": 5,
+    "rate": 0.285714,
+    "first_missed_block": 7505,
+    "last_missed_block": 7506,
+    "first_missed_at": "2021-06-15T12:00:15",
+    "last_missed_at": "2021-06-15T12:00:18"
+  },
+  {
+    "period": null,
+    "producer": "wtnalice",
+    "missed_count": 2,
+    "produced_count": 7,
+    "rate": 0.222222,
+    "first_missed_block": 7001,
+    "last_missed_block": 7504,
+    "first_missed_at": "2021-06-01T00:00:03",
+    "last_missed_at": "2021-06-15T12:00:12"
+  },
+  {
+    "period": null,
+    "producer": "wtnbob",
+    "missed_count": 0,
+    "produced_count": 4,
+    "rate": 0.0,
+    "first_missed_block": null,
+    "last_missed_block": null,
+    "first_missed_at": null,
+    "last_missed_at": null
+  }
+]

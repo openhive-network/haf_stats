@@ -1,0 +1,172 @@
+#!/bin/bash
+# Backfill per-witness block production (witness_blocks_daily) from raw HAF data.
+#
+# process_witness_blocks' counters are additive, so a re-run would double-count; this script
+# TRUNCATEs first and then sweeps the full history once. Run it on a fresh deploy (the forward
+# processor only fills blocks from here on) to give the witness missed-blocks endpoint
+# historical coverage, or to rebuild after a logic change.
+#
+# The first_missed_block / last_missed_block columns merge with LEAST/GREATEST rather than
+# addition, so THOSE two are idempotent - but produced_count and missed_count are not, which is
+# what makes the TRUNCATE mandatory.
+#
+# The rebuild covers exactly [1, last_processed_block] and both ends are fixed, because it
+# TRUNCATEs the whole table first:
+#   * It MUST start at block 1: a partial start leaves the pre-FROM_BLOCK days empty forever
+#     (the forward processor already passed them and never revisits).
+#   * It MUST end at last_processed_block: a SHORT rebuild strands blocks (TO_BLOCK, tip] empty
+#     (the processor resumes at tip+1 and never revisits them); a LONG one double-counts after
+#     restart. So TO_BLOCK must equal last_processed_block.
+#
+# Stop the haf_stats processor before running this script (SELECT haf_stats_app.stop_processing();
+# or stop the haf-stats-process container) and keep it stopped until this finishes; the script
+# REFUSES to start if it is still live, and re-checks at the end. The rebuild commits once per
+# batch so it can process full history without one enormous transaction.
+#
+# IF THIS SCRIPT FAILS OR IS INTERRUPTED PART-WAY, the table is left describing only a prefix of
+# history while app_status.last_processed_block still points at the tip. Do NOT start the
+# processor: re-run this script to completion first (each run starts from a clean TRUNCATE, so
+# re-running is always safe — and after a failure it is mandatory).
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
+
+: "${BATCH_SIZE:=10000}"
+: "${TO_BLOCK:=}"
+
+# FROM_BLOCK is intentionally NOT configurable: the TRUNCATE wipes the whole table, so a partial
+# start would leave [1, FROM_BLOCK) empty with no other writer to fill it. Reject an override
+# loudly rather than silently creating a gap.
+if [[ -n "${FROM_BLOCK:-}" && "${FROM_BLOCK}" != "1" ]]; then
+    echo "FROM_BLOCK is not configurable and must be 1 (got '${FROM_BLOCK}'): the rebuild TRUNCATEs the whole table, so a partial start would leave [1, FROM_BLOCK) permanently empty." >&2
+    exit 2
+fi
+readonly FROM_BLOCK=1
+
+# Guard the interrupted/failed case, which no range check can catch: TRUNCATE and every completed
+# batch have already committed, so the table describes a prefix of history while
+# app_status.last_processed_block still points at the tip. Restarting the processor then resumes
+# past the gap and never refills it.
+rebuild_started=0
+on_exit() {
+    local rc=$?
+    if (( rc != 0 && rebuild_started == 1 )); then
+        echo "" >&2
+        echo "!!! WITNESS BLOCKS REBUILD DID NOT COMPLETE (exit ${rc}) !!!" >&2
+        echo "witness_blocks_daily now describes only the blocks replayed so far, while" >&2
+        echo "app_status.last_processed_block still points at the tip." >&2
+        echo "" >&2
+        echo "DO NOT START THE PROCESSOR: it would resume past the gap (tip+1) and never refill" >&2
+        echo "the missing days, so get_witness_missed_blocks would under-report that range" >&2
+        echo "permanently." >&2
+        echo "" >&2
+        echo "Re-run this script to completion first (it re-TRUNCATEs from a clean slate, so" >&2
+        echo "re-running is always safe)." >&2
+    fi
+    return $rc
+}
+# INT/TERM as well as EXIT: a Ctrl-C or `docker stop` mid-replay leaves the same partial state as
+# a failed batch, and the operator must see the warning either way.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap on_exit EXIT
+
+require_number() {
+    local name="$1" value="$2"
+    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "${name} must be a non-negative integer; got '${value}'." >&2
+        exit 2
+    fi
+}
+
+# Detect a live processor. Scoped to THIS database (pg_stat_activity is cluster-wide). Matching a
+# leading CALL keeps this from matching its own SELECT.
+count_live_processors() {
+    psql_cmd -Atc "
+        SELECT COUNT(*)
+        FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid()
+          AND datname = current_database()
+          AND state <> 'idle'
+          AND BTRIM(query) ILIKE 'CALL%haf_stats_app.main%'
+    "
+}
+
+wait_for_postgres
+
+require_number "BATCH_SIZE" "${BATCH_SIZE}"
+if (( BATCH_SIZE < 1 )); then
+    echo "BATCH_SIZE must be >= 1; got ${BATCH_SIZE}." >&2
+    exit 2
+fi
+
+app_block="$(
+    psql_cmd -Atc "
+        SELECT COALESCE(MAX(last_processed_block), 0)
+        FROM haf_stats_app.app_status
+    "
+)"
+require_number "app_status.last_processed_block" "${app_block}"
+
+if [[ -z "${TO_BLOCK}" ]]; then
+    TO_BLOCK="${app_block}"
+fi
+require_number "TO_BLOCK" "${TO_BLOCK}"
+
+if (( app_block < 1 )); then
+    echo "The app has processed no blocks (last_processed_block=${app_block}); nothing to rebuild." >&2
+    exit 2
+fi
+
+# Equality, not "<=": a short rebuild strands (TO_BLOCK, tip] empty, a long one double-counts.
+if (( TO_BLOCK != app_block )); then
+    echo "TO_BLOCK must equal the app's last processed block (${app_block}); got ${TO_BLOCK}." >&2
+    echo "A short rebuild leaves blocks (${TO_BLOCK}, ${app_block}] empty (the processor resumes at $((app_block + 1)) and never revisits them); a long one double-counts after restart." >&2
+    exit 2
+fi
+
+# Assign, then validate: `if (( $(cmd) > 0 ))` would FAIL OPEN if psql returned an empty string
+# (connection reset) — `(( > 0 ))` is a syntax error returning 1, and set -e is suppressed inside
+# an `if` condition, so the guard would silently conclude "no processor" and TRUNCATE while live.
+live_procs="$(count_live_processors)"
+require_number "live_processor_count" "${live_procs}"
+if (( live_procs > 0 )); then
+    echo "The haf_stats processor is still running; refusing to rebuild." >&2
+    echo "Stop it first: SELECT haf_stats_app.stop_processing();  (or stop the haf-stats-process container), then re-run." >&2
+    exit 2
+fi
+
+log "Rebuilding witness block counts through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
+log "The haf_stats processor must remain stopped until this command finishes."
+
+rebuild_started=1
+psql_cmd -c "
+    TRUNCATE TABLE haf_stats_backend.witness_blocks_daily;
+"
+
+first="${FROM_BLOCK}"
+while (( first <= TO_BLOCK )); do
+    last=$((first + BATCH_SIZE - 1))
+    if (( last > TO_BLOCK )); then
+        last="${TO_BLOCK}"
+    fi
+
+    log "Processing witness blocks rebuild blocks ${first}-${last}..."
+    psql_cmd -c "SELECT haf_stats_app.process_witness_blocks(${first}, ${last});"
+    first=$((last + 1))
+done
+
+# The pre-flight check is TOCTOU over a multi-minute replay, so re-check: a processor started
+# mid-rebuild would have been appending head blocks through the additive upsert onto the table we
+# rebuilt from block 1. Assign-then-validate for the same fail-open reason as the pre-flight check.
+live_procs="$(count_live_processors)"
+require_number "live_processor_count" "${live_procs}"
+if (( live_procs > 0 )); then
+    echo "The haf_stats processor STARTED DURING the rebuild; its head-block writes have" >&2
+    echo "double-counted onto the rebuilt table. Stop it and re-run this script." >&2
+    exit 2
+fi
+
+rebuild_started=0
+log "Witness blocks rebuild complete."

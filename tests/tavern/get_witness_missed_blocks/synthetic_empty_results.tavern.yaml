@@ -1,0 +1,64 @@
+---
+test_name: Witness missed blocks returns empty arrays rather than errors
+
+# Three distinct routes to an empty result, all of which must be 200 [] and not a 4xx:
+#   - an account that does not exist at all
+#   - a real account with no block activity in the window
+#   - an inverted range, which simply selects no days
+# The repo convention is that an unknown account is an empty result, not an error
+# (get_account_content_stats and every sibling behave this way). The inverted range returns
+# empty for a plainer reason: this endpoint resolves its window with to_filter_date and filters
+# the rollup on day directly - it never calls block_range_for_dates, so there is no explicit
+# inverted-range short-circuit to rely on, just a range that selects nothing.
+
+marks:
+  - patterntest
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+stages:
+  - name: Unknown witness returns an empty array
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        witness: "nosuchwitness"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      json: []
+
+  - name: A known account that produced nothing returns an empty array
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        witness: "hiveio"
+    response:
+      status_code: 200
+      json: []
+
+  - name: Inverted date range returns an empty array
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "2021-07-01"
+        to_date: "2021-06-01"
+    response:
+      status_code: 200
+      json: []
+
+  - name: A window before any block activity returns an empty array
+    request:
+      url: "{api_url}/rpc/get_witness_missed_blocks"
+      method: GET
+      params:
+        from_date: "2016-03-24"
+        to_date: "2016-03-25"
+    response:
+      status_code: 200
+      json: []
