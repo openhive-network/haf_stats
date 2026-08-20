@@ -470,31 +470,75 @@ DECLARE
           "Other"
         ],
         "summary": "Sync status",
-        "description": "Returns the last block processed by haf_stats as an object containing both the block number and its timestamp (UTC). This is the uniform HAF-app sync/health endpoint shape shared with the other HAF apps: the timestamp lets a consumer compute staleness with a single call (age = now() - last_block_time) without needing a separate head-block reference.",
+        "description": "Returns the block this node has consumed as tracked by HAF itself (hafd.contexts.current_block_num for the haf_stats context), with that block's timestamp (UTC). This is the uniform HAF-app sync/health endpoint shape shared with the other HAF apps: the timestamp lets a consumer compute staleness with a single call (age = now() - last_block_time) without needing a separate head-block reference.\n\nNot the same number as /health, which reports haf_stats_app.app_status.last_processed_block - the app's own bookkeeping row. The two are one clock on a node the processor drives (main() writes both from the same variable in the same transaction), so they normally agree exactly; hafd.contexts is HAF's authoritative pointer and is what the rest of the ecosystem exposes under this name.",
         "operationId": "haf_stats_endpoints.get_sync_status",
         "responses": {
           "200": {
-            "description": "Last block processed by haf_stats and its timestamp. last_block_time is null if no block has been processed yet. While the HAF instance is still in massive sync (indexes not yet built) the call fails fast with an error rather than executing an unindexed lookup.",
+            "description": "Last block consumed by the haf_stats HAF context, and its timestamp. last_block_time is null when that block has no hafd.blocks row - i.e. nothing has been processed yet (there is no block 0), or the node is pruned and the context is behind the prune tail.\n\nTwo conditions answer 503 rather than 200: the HAF instance is still in massive sync (indexes not yet built), so the call fails fast instead of executing an unindexed lookup; or the HAF context is missing or not visible, which is reported rather than served as a healthy-looking body.",
             "content": {
               "application/json": {
                 "schema": {
                   "x-sql-datatype": "JSON",
                   "type": "object",
+                  "required": [
+                    "last_block_num",
+                    "last_block_time"
+                  ],
                   "properties": {
                     "last_block_num": {
                       "type": "integer",
-                      "description": "highest block number processed by the app"
+                      "description": "last block consumed by the haf_stats HAF context"
                     },
                     "last_block_time": {
-                      "type": "string",
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "format": "date-time",
-                      "description": "UTC timestamp of that block"
+                      "description": "UTC timestamp of that block; null if it has no hafd.blocks row"
                     }
                   }
                 },
                 "example": {
                   "last_block_num": 5000000,
                   "last_block_time": "2016-09-15T19:47:21"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporarily unavailable, and the two cases are distinguished by message rather than by status. Either the HAF instance is still in massive sync (hafd.blocks' primary key is dropped for the duration, so the call fails fast instead of seq-scanning the largest table in the database), or the HAF context is missing or not visible to the reader. Both are raised as SQLSTATE 53000, which PostgREST maps to 503. Declared because prose in a 200 description is not part of any machine-readable contract: a client generated from a 200-only spec models this endpoint as infallible and throws on the error body below.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "description": "PostgreSQL SQLSTATE, '53000' for both cases"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "hint": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "code": "53000",
+                  "message": "HAF instance is not ready (massive sync in progress)",
+                  "details": null,
+                  "hint": null
                 }
               }
             }
@@ -2655,6 +2699,11 @@ AS $$
             OR EXISTS (SELECT 1 FROM haf_stats_backend.account_community_daily)
         ) AS community_data_ready
     FROM haf_stats_app.app_status s
+    -- Belt-and-braces against the duplicate rows that installs predating the guarded
+    -- seed left behind: db/haf_stats_app.sql now de-dups and enforces a singleton index,
+    -- but this endpoint must not report a synced node as being at block 0 (which would
+    -- also flip community_data_ready true for the wrong reason) if one ever reappears.
+    ORDER BY s.last_processed_block DESC
     LIMIT 1;
 $$;
 
@@ -2665,37 +2714,94 @@ $$;
       - Other
     summary: Sync status
     description: >-
-      Returns the last block processed by haf_stats as an object containing
-      both the block number and its timestamp (UTC). This is the uniform
-      HAF-app sync/health endpoint shape shared with the other HAF apps: the
-      timestamp lets a consumer compute staleness with a single call
-      (age = now() - last_block_time) without needing a separate head-block
-      reference.
+      Returns the block this node has consumed as tracked by HAF itself
+      (hafd.contexts.current_block_num for the haf_stats context), with that
+      block's timestamp (UTC). This is the uniform HAF-app sync/health endpoint
+      shape shared with the other HAF apps: the timestamp lets a consumer
+      compute staleness with a single call (age = now() - last_block_time)
+      without needing a separate head-block reference.
+
+
+      Not the same number as /health, which reports
+      haf_stats_app.app_status.last_processed_block - the app's own bookkeeping
+      row. The two are one clock on a node the processor drives (main() writes
+      both from the same variable in the same transaction), so they normally
+      agree exactly; hafd.contexts is HAF's authoritative pointer and is what
+      the rest of the ecosystem exposes under this name.
     operationId: haf_stats_endpoints.get_sync_status
     responses:
       '200':
         description: >-
-          Last block processed by haf_stats and its timestamp.
-          last_block_time is null if no block has been processed yet.
-          While the HAF instance is still in massive sync (indexes not yet
-          built) the call fails fast with an error rather than executing an
-          unindexed lookup.
+          Last block consumed by the haf_stats HAF context, and its timestamp.
+          last_block_time is null when that block has no hafd.blocks row - i.e.
+          nothing has been processed yet (there is no block 0), or the node is
+          pruned and the context is behind the prune tail.
+
+
+          Two conditions answer 503 rather than 200: the HAF instance is still
+          in massive sync (indexes not yet built), so the call fails fast
+          instead of executing an unindexed lookup; or the HAF context is
+          missing or not visible, which is reported rather than served as a
+          healthy-looking body.
         content:
           application/json:
             schema:
               x-sql-datatype: JSON
               type: object
+              required: [last_block_num, last_block_time]
               properties:
                 last_block_num:
                   type: integer
-                  description: highest block number processed by the app
+                  description: last block consumed by the haf_stats HAF context
                 last_block_time:
-                  type: string
+                  # ["string", "null"], not `nullable: true`: this document declares
+                  # openapi 3.1.0, where `nullable` was removed and is inert - a validator
+                  # would reject the null response this very description documents.
+                  # scripts/process_openapi.py handles this form explicitly.
+                  type:
+                    - string
+                    - "null"
                   format: date-time
-                  description: UTC timestamp of that block
+                  description: >-
+                    UTC timestamp of that block; null if it has no hafd.blocks
+                    row
             example:
               last_block_num: 5000000
               last_block_time: '2016-09-15T19:47:21'
+      '503':
+        description: >-
+          Temporarily unavailable, and the two cases are distinguished by message
+          rather than by status. Either the HAF instance is still in massive sync
+          (hafd.blocks' primary key is dropped for the duration, so the call fails
+          fast instead of seq-scanning the largest table in the database), or the
+          HAF context is missing or not visible to the reader. Both are raised as
+          SQLSTATE 53000, which PostgREST maps to 503. Declared because prose in a
+          200 description is not part of any machine-readable contract: a client
+          generated from a 200-only spec models this endpoint as infallible and
+          throws on the error body below.
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  description: PostgreSQL SQLSTATE, '53000' for both cases
+                message:
+                  type: string
+                details:
+                  type:
+                    - string
+                    - "null"
+                hint:
+                  type:
+                    - string
+                    - "null"
+            example:
+              code: '53000'
+              message: HAF instance is not ready (massive sync in progress)
+              details: null
+              hint: null
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_sync_status;
@@ -2704,29 +2810,40 @@ RETURNS JSON
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
+DECLARE
+    _s RECORD;
 BEGIN
     -- No cache - sync status needs real-time accuracy
     PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=0"}]', true);
 
-    -- Fail fast during HAF massive sync: hafd.blocks' PK is dropped for the
-    -- duration (hive.disable_indexes_of_irreversible), so the join below would
-    -- seq-scan the largest table in the database. Health-check agents gate on
-    -- is_instance_ready() before calling APIs; this guard protects any caller
-    -- that does not (e.g. a raw haproxy httpchk) by erroring in milliseconds
-    -- instead of stalling.
-    IF NOT hive.is_instance_ready() THEN
-        RAISE EXCEPTION 'HAF instance is not ready (massive sync in progress)'
-            USING ERRCODE = '55000';
+    -- haf_stats_app.sync_status() is SECURITY DEFINER (db/sync_status.sql): hafd.contexts
+    -- has RLS whose only application SELECT policy is granted TO hive_applications_group,
+    -- and haf_stats_user deliberately stays out of that group because it also carries
+    -- TRUNCATE on hafd.contexts and CREATE on hafd - to a role PostgREST connects as
+    -- unauthenticated, over trust auth. The definer also owns the massive-sync guard and
+    -- the context name; this function owns only the wire format.
+    SELECT * INTO _s FROM haf_stats_app.sync_status();
+
+    -- Zero rows means one of: the HAF context has not been registered yet, it was
+    -- removed, or haf_stats_owner (the definer) lost hive_applications_group so RLS hides
+    -- every row - which fails SILENTLY, with no error. Answering 200 with a body of
+    -- `null` (what a bare scalar subquery would do here) merges all three with "healthy"
+    -- and hides a privilege misconfiguration behind a healthy-looking response. 53000
+    -- maps to HTTP 503 on PostgREST; a bare RAISE (P0001) would map to 400 and tell a
+    -- probe its own request was malformed. Both measured on PostgREST 12.2.3.
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'HAF context ''haf_stats'' is not visible: the app is not installed on this node, its context was removed, or haf_stats_owner lost its hive_applications_group membership (see db/builtin_roles.sql)'
+            USING ERRCODE = '53000';
     END IF;
 
-    RETURN (
-        SELECT json_build_object(
-            'last_block_num', s.last_processed_block,
-            'last_block_time', to_char(b.created_at, 'YYYY-MM-DD"T"HH24:MI:SS')
-        )
-        FROM haf_stats_app.app_status s
-        LEFT JOIN hafd.blocks b ON b.num = s.last_processed_block
-        LIMIT 1
+    -- Two keys only, byte-compatible with hafbe's and haf_fyp's /sync-status: literal
+    -- 'T', 19 characters, no fractional seconds, no timezone suffix. Consumers parse it
+    -- with a fixed format, so any drift here is a silent breaking change. The definer's
+    -- extra diagnostic columns stay off the wire on purpose - uniformity is the point of
+    -- this endpoint, and they are available from psql and to tests/parity.
+    RETURN json_build_object(
+        'last_block_num', _s.context_block_num,
+        'last_block_time', to_char(_s.last_block_time, 'YYYY-MM-DD"T"HH24:MI:SS')
     );
 END
 $$;

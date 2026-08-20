@@ -1,0 +1,38 @@
+---
+test_name: Sync status reports the HAF context pointer, not the app's own bookkeeping row
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Exact-value companion to get_sync_status.tavern.yaml, which can only assert shape because
+# its numbers depend on how far the real replay has progressed. Here the fixture pins both
+# clocks apart on purpose: hafd.contexts for 'haf_stats' sits at block 6000
+# (tests/ci_setup.sql), while app_status.last_processed_block is seeded at 0 there and then
+# raised past 37.5M by tests/mainnet_community_fixture.sql. So this is the wire-level
+# statement of issue #55 — reading the app's own row instead of HAF's context pointer would
+# report that head here, and the assertion below would fail.
+#
+# 6000 is an existing hafd.blocks row, so last_block_time resolves to that block's real
+# timestamp rather than null. Two keys only, byte-compatible with hafbe's and
+# haf_fyp's /sync-status; tavern's default strict json:on means an added key fails this test,
+# which is the intent — the shape is a cross-app contract.
+#
+# tests/ci_privileges.sql covers what HTTP cannot see from here: the SECURITY DEFINER hop,
+# RLS on hafd.contexts, the 503 paths, and that the anon role still cannot read the context
+# table directly.
+stages:
+  - name: GET /rpc/get_sync_status
+    request:
+      url: "{api_url}/rpc/get_sync_status"
+      method: GET
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+        cache-control: "public, max-age=0"
+      json:
+        last_block_num: 6000
+        last_block_time: "2021-03-10T00:00:00"

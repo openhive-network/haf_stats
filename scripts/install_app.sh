@@ -60,13 +60,28 @@ run_sql_file "${SCRIPT_DIR}/../db/refresh_rc_op_stats.sql"
 # 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
 
-# 5. API endpoints
-psql_cmd -c "SET custom.swagger_url = '${SWAGGER_URL}';" -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
+# 4b. Sync-status reader (#55) — a SECURITY DEFINER over hafd.contexts, owned by
+#     haf_stats_owner. Needs the roles (step 1) and the haf_stats_app schema (step 2);
+#     the context row is resolved at call time, so it may load before step 5. Deliberately
+#     NOT applied under SET ROLE: it fixes its own ownership, which is the only thing that
+#     can repair a node where an earlier install left the function owned by the superuser
+#     running this script.
+run_sql_file "${SCRIPT_DIR}/../db/sync_status.sql"
 
-# 6. Register HAF context (idempotent) — must run as haf_stats_owner so that
-#    hafd.contexts.owner = haf_stats_owner, satisfying the RLS UPDATE policy in
-#    hive.app_next_block() (WITH CHECK: hive.can_impersonate(CURRENT_USER, owner)).
+# 5. Register HAF context (idempotent; also repairs a reset or lagging pointer) — must
+#    run as haf_stats_owner so that hafd.contexts.owner = haf_stats_owner, satisfying the
+#    RLS UPDATE policy in hive.app_next_block() (WITH CHECK:
+#    hive.can_impersonate(CURRENT_USER, owner)).
+#    Ordered BEFORE the endpoints: GET /sync-status answers 503 while the context row is
+#    absent. On a cold `compose up` the API is in fact gated on this container transitively
+#    (haf-stats-process depends_on haf-stats-setup service_completed_successfully;
+#    haf-stats-api depends_on haf-stats-process service_healthy) - but `compose up -d`
+#    against a running stack does not restart an already-up haf-stats-api, so on any
+#    ordinary redeploy a request can land between the two steps.
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
+
+# 6. API endpoints
+psql_cmd -c "SET custom.swagger_url = '${SWAGGER_URL}';" -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
 
 # 7. Grant read access on current and future objects to haf_stats_user
 psql_cmd -c "
@@ -251,6 +266,50 @@ psql_cmd -c "
         END;
     END
     \$do\$;
+"
+
+# Refresh PostgREST's schema cache. haf-stats-setup re-runs this script on every stack
+# start while haf-stats-api keeps running, and PostgREST caches function signatures at
+# startup — so without this a changed endpoint signature is served stale until the API
+# container happens to restart. Harmless when nothing is listening on the channel.
+psql_cmd -c "NOTIFY pgrst, 'reload schema';"
+
+# 8e. Post-install assertion for GET /sync-status (#55). This is the only place the whole
+#     chain is exercised end to end: EXECUTE grant -> SECURITY DEFINER ownership ->
+#     haf_stats_owner's hive_applications_group membership -> RLS on hafd.contexts.
+#
+#     Runs LAST, after every step that mutates the database. It used to sit between the
+#     endpoints and the grants, which meant the very failure it exists to catch aborted the
+#     install (ON_ERROR_STOP + set -e) after the context and endpoints had committed but
+#     before step 7's grants and step 8's rollup self-heal - leaving a half-installed node
+#     that re-aborts at the same point on every subsequent `up`, and never gets its grants.
+#     Running it here means a genuine membership failure is still loud, but the node is
+#     fully installed when you see it.
+#
+#     The readiness check is INSIDE the DO block, in one session with the assertion it
+#     gates. Split across two psql invocations it was a TOCTOU window: HAF could begin an
+#     index rebuild between the probe and the assertion, sync_status() would raise 53000,
+#     and the install would abort for exactly the environment condition the skip exists to
+#     tolerate. Nested IF/ELSIF rather than `AND`, because SQL does not guarantee
+#     short-circuit evaluation and sync_status() itself raises when HAF is not ready.
+#
+#     Deliberately NOT `|| true` and not a relaxed ON_ERROR_STOP - either would also
+#     swallow the real RLS/membership failure this assertion was added to catch.
+#     haf_stats_user has EXECUTE on hive.is_instance_ready() (db/builtin_roles.sql), so the
+#     whole block runs under SET ROLE with no extra grant. Follows the self-guarding idiom
+#     of steps 3b and 8d: never fail the install for an environment condition.
+psql_cmd -c "
+    SET ROLE haf_stats_user;
+    DO \$do\$
+    BEGIN
+        IF NOT hive.is_instance_ready() THEN
+            RAISE WARNING 'HAF is in massive sync (hive.is_instance_ready() is false) - skipping the GET /sync-status assertion. Re-run scripts/install_app.sh once HAF is ready to verify the EXECUTE grant / SECURITY DEFINER / hive_applications_group / RLS chain.';
+        ELSIF NOT EXISTS (SELECT 1 FROM haf_stats_app.sync_status()) THEN
+            RAISE EXCEPTION 'haf_stats_app.sync_status() returned no row as haf_stats_user: GET /sync-status would answer 503. Either the HAF context is absent, or haf_stats_owner (the definer) does not INHERIT hive_applications_group, so RLS on hafd.contexts hides every row (see db/builtin_roles.sql).';
+        END IF;
+    END
+    \$do\$;
+    RESET ROLE;
 "
 
 log "Installation complete."
