@@ -42,6 +42,8 @@ DECLARE
     _excess BIGINT;
     _missing_columns TEXT;
     _our_head_block INT;
+    _chain_max INT;
+    _chain_min INT;
     _our_head_time TIMESTAMP;
     _hm_in_range BIGINT;
 BEGIN
@@ -93,14 +95,44 @@ BEGIN
     -- documented repair (stop processor -> rebuild -> restart, which the README budgets at
     -- 2-4h). Comparing our processed head against hivemind's tip would report every active
     -- author as an undercount and fail the verification run for a node that is simply behind.
-    SELECT COALESCE(MIN(last_processed_block), 0) INTO _our_head_block
+    -- MAX, not MIN. app_status has no unique constraint, and installs predating its
+    -- guarded seed left duplicate rows behind (a live node carries four, one of them 0) -
+    -- so MIN resolved to 0 there, hafd.blocks has no block 0, _our_head_time came back
+    -- NULL, and the RETURN below skipped this entire oracle silently. Every other consumer
+    -- in the repo already uses MAX. db/haf_stats_app.sql now de-dups and enforces a
+    -- singleton index, which makes the two equivalent, but the aggregate that is correct
+    -- on its own terms is MAX: this is our processed head.
+    SELECT COALESCE(MAX(last_processed_block), 0) INTO _our_head_block
     FROM haf_stats_app.app_status;
 
     SELECT created_at INTO _our_head_time FROM hafd.blocks WHERE num = _our_head_block;
 
+    -- A missing timestamp has three causes and they are not equivalent, so distinguish them
+    -- rather than treating "no row" as one condition. Silently returning for all three is
+    -- what let this oracle report a pass without ever running; raising for all three would
+    -- fail run_verification.sh on a pruned node, a state db/sync_status.sql documents as
+    -- expected. Both are wrong.
     IF _our_head_time IS NULL THEN
-        RAISE NOTICE 'community oracle: cannot resolve the timestamp of our processed head block % - skipping.', _our_head_block;
-        RETURN;
+        IF _our_head_block = 0 THEN
+            RAISE NOTICE 'community oracle: nothing processed yet (head block 0) - skipping.';
+            RETURN;
+        END IF;
+
+        SELECT MAX(num), MIN(num) INTO _chain_max, _chain_min FROM hafd.blocks;
+
+        -- Pruned: the head is inside the chain's range but its row was deleted from under
+        -- us. Nothing is wrong with the app; the oracle simply cannot bound hivemind's side.
+        -- WARNING, not NOTICE, so a skip is visible in the verification log rather than
+        -- looking like a pass.
+        IF _chain_min IS NOT NULL AND _our_head_block <= _chain_max AND _chain_min > 1 THEN
+            RAISE WARNING 'community oracle: NOT RUN - our processed head block % has no hafd.blocks row and the chain starts at % (node is pruned), so hivemind cannot be bounded to our range.', _our_head_block, _chain_min;
+            RETURN;
+        END IF;
+
+        -- Not pruned: the head is beyond what HAF holds, or hafd.blocks is empty. The app
+        -- claims to have processed blocks this node cannot show - a real inconsistency, and
+        -- reporting a pass for it is exactly the failure this guard was fixed for.
+        RAISE EXCEPTION 'community oracle: our processed head block % has no hafd.blocks row and the node is not pruned (chain holds %..%). The app claims blocks HAF cannot show, so the oracle cannot compare like for like and must not report a pass.', _our_head_block, _chain_min, _chain_max;
     END IF;
 
     -- Only skip on an empty table when hivemind ALSO has nothing in our processed range.

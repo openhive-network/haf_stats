@@ -332,6 +332,56 @@ INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
+-- HAF context registry stub (#55) — GET /sync-status reads this, not app_status.
+--
+-- Modelled on production deliberately: RLS ENABLED but NOT FORCED, with the only
+-- SELECT policy granted TO hive_applications_group, and a UNIQUE name. The anon role
+-- keeps table-level SELECT, so a broken membership shows up here the way it does on a
+-- real node — ZERO ROWS, silently — rather than as "permission denied for schema hafd".
+-- That is the whole failure mode tests/ci_privileges.sql exists to catch, so the stub
+-- has to be able to reproduce it. The policy itself is created after the role stand-ins
+-- below.
+--
+-- The context points at block 6000 — an existing row in the hafd.blocks stub above — so
+-- last_block_time resolves to a real timestamp without adding a block row of our own.
+-- Deliberately reusing an existing block: a new highest-num block would move
+-- get_network_hp_distribution's VESTS/HP ratio, which reads the latest block's vesting
+-- columns. (Later fixtures add far higher blocks; this only needs a resolvable one.)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS hafd.contexts (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL CONSTRAINT uq_hive_context_name UNIQUE,
+    owner NAME NOT NULL DEFAULT 'haf_stats_owner',
+    current_block_num INT NOT NULL DEFAULT 0,
+    irreversible_block INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS hafd.hive_state (consistent_block INT NOT NULL);
+
+-- hive.is_instance_ready() is real HAF's massive-sync gate; the stub makes it table-driven
+-- so ci_privileges.sql can flip it and prove the guard is executed rather than dead code.
+CREATE TABLE IF NOT EXISTS hive.ci_instance_state (is_ready BOOLEAN NOT NULL);
+
+CREATE OR REPLACE FUNCTION hive.is_instance_ready()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE((SELECT s.is_ready FROM hive.ci_instance_state AS s LIMIT 1), TRUE)
+$$;
+
+INSERT INTO hafd.contexts (name, current_block_num, irreversible_block)
+SELECT 'haf_stats', 6000, 6000
+WHERE NOT EXISTS (SELECT 1 FROM hafd.contexts WHERE name = 'haf_stats');
+
+INSERT INTO hafd.hive_state (consistent_block)
+SELECT 6000 WHERE NOT EXISTS (SELECT 1 FROM hafd.hive_state);
+
+INSERT INTO hive.ci_instance_state (is_ready)
+SELECT TRUE WHERE NOT EXISTS (SELECT 1 FROM hive.ci_instance_state);
+
+-- ---------------------------------------------------------------------------
 -- Roles (simplified — no haf_admin / HAF group dependencies)
 -- ---------------------------------------------------------------------------
 
@@ -346,6 +396,33 @@ BEGIN
 END
 $$;
 GRANT haf_stats_user TO haf_stats_owner;
+
+-- HAF group stand-ins, so the RLS policy on hafd.contexts can name the same role the
+-- real one does and haf_stats_app.sync_status() is exercised through a genuine policy.
+-- haf_stats_owner joins (it is the SECURITY DEFINER's owner and must see the row);
+-- haf_stats_user deliberately does NOT — that asymmetry is exactly what is under test.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'hive_applications_group') THEN
+        CREATE ROLE hive_applications_group NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'hive_applications_owner_group') THEN
+        CREATE ROLE hive_applications_owner_group NOLOGIN IN ROLE hive_applications_group;
+    END IF;
+END
+$$;
+
+-- The roles above are created NOINHERIT to mirror PostgREST's connection role, but a
+-- NOINHERIT definer owner sees no policy at all — it would fail with "permission denied
+-- for schema hafd" instead of returning rows, i.e. the probe would pass or fail for the
+-- wrong reason. Production's haf_stats_owner is INHERIT (db/builtin_roles.sql), so match it.
+ALTER ROLE haf_stats_owner INHERIT;
+GRANT hive_applications_owner_group TO haf_stats_owner;
+
+ALTER TABLE hafd.contexts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS sp_applications_hive_context ON hafd.contexts;
+CREATE POLICY sp_applications_hive_context ON hafd.contexts
+FOR SELECT TO hive_applications_group USING (TRUE);
 
 -- hafd stub access for the anon role (endpoint functions read from hafd.*)
 GRANT USAGE ON SCHEMA hafd TO haf_stats_user;

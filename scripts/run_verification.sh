@@ -39,6 +39,13 @@
 #        blind. TRUNCATEs and replays the table under ACCESS EXCLUSIVE inside a
 #        REPEATABLE READ transaction that is ROLLED BACK, so the live table is left
 #        exactly as found, pass or fail.
+#   7. tests/parity/context_vs_app_status.sql (issue #55)
+#        Asserts hafd.contexts.current_block_num and app_status.last_processed_block
+#        agree. main() writes both in one transaction, so they can only diverge when
+#        the HAF context was reset out from under the data — a state in which
+#        GET /sync-status reports block 0 on a synced node and the processor replays
+#        from genesis. Reads through the SECURITY DEFINER under the API role, so it
+#        also covers that grant and RLS on hafd.contexts.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -89,10 +96,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/6: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/7: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/6: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/7: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
@@ -116,16 +123,19 @@ else
   fi
 fi
 
-echo "===== Guard 3/6: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/7: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Guard 4/6: community derivation vs hivemind (issue #47) ====="
+echo "===== Guard 4/7: community derivation vs hivemind (issue #47) ====="
 run_sql_file tests/parity/community_vs_hivemind.sql
 
-echo "===== Guard 5/6: interactions op-ceiling guard (issue #48) ====="
+echo "===== Guard 5/7: interactions op-ceiling guard (issue #48) ====="
 run_sql_file tests/parity/interactions_cap.sql
 
-echo "===== Guard 6/6: witness blocks rebuild consistency (issue #54) ====="
+echo "===== Guard 6/7: witness blocks rebuild consistency (issue #54) ====="
 run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild) ====="
+echo "===== Guard 7/7: HAF context vs app_status parity (issue #55) ====="
+run_sql_file tests/parity/context_vs_app_status.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity) ====="

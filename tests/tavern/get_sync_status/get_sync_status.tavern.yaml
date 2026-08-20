@@ -17,8 +17,16 @@ stages:
       json:
         # The uniform HAF-app sync-status shape: block number plus its UTC
         # timestamp (YYYY-MM-DDTHH:MM:SS), so a consumer can compute staleness
-        # with a single call. Values depend on how far the CI replay has been
-        # processed, so assert shape/format rather than exact numbers (the
-        # get_health test does the same for last_processed_block).
+        # with a single call. Since #55 the number is HAF's own context pointer
+        # (hafd.contexts.current_block_num), read through the SECURITY DEFINER
+        # haf_stats_app.sync_status() — not app_status.last_processed_block,
+        # which is what /health still reports.
+        #
+        # Values depend on how far the CI replay has been processed, so assert
+        # shape/format rather than exact numbers (the get_health test does the
+        # same for last_processed_block). The sibling
+        # get_sync_status_synthetic.tavern.yaml pins exact values against the stub
+        # fixture, where the two clocks are set apart on purpose so a regression
+        # to the old source is caught.
         last_block_num: !anyint
         last_block_time: !re_fullmatch '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'

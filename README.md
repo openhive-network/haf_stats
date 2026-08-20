@@ -321,7 +321,8 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | Endpoint | Status | Processor | Description |
 |---|---|---|---|
 | `GET /rpc/get_version` | ✅ Live | — | App git hash |
-| `GET /rpc/get_health` | ✅ Live | — | Last processed block + version |
+| `GET /rpc/get_health` | ✅ Live | — | Last processed block + version (the app's own `app_status` clock) |
+| `GET /rpc/get_sync_status` | ✅ Live | — | Uniform HAF-app freshness signal: the block HAF's own context pointer says this node has consumed, plus its UTC timestamp |
 | `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
 | `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /rpc/get_account_community_activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
@@ -341,6 +342,31 @@ All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
 | `GET /rpc/get_network_top_accounts` | ✅ Live | *(reads financial + active-users tables)* | Top N accounts by rewards, transfer volume, HP balance, or op count |
 | `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
 | `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
+
+### `/health` and `/sync-status` report different clocks, on purpose
+
+`get_health` reports `haf_stats_app.app_status.last_processed_block` — the app's own
+bookkeeping row. `get_sync_status` reports `hafd.contexts.current_block_num` for the
+`haf_stats` context — HAF's authoritative pointer, and the same source
+`hafbe_backend.sync_status()` and haf_fyp's `/sync-status` expose, so a monitor can treat
+every HAF app identically (#55).
+
+They are one clock: `haf_stats_app.main()` writes both from the same variable in the same
+transaction, so on a node the processor drives they agree exactly. A persistent
+disagreement means the HAF context was reset out from under the data — re-running
+`scripts/install_app.sh` repairs the pointer — **stop the block processor first**: the repair
+declines with a warning while the context is attached, which it is on any redeploy against a
+running stack, so an install with `haf-stats-process` up exits 0 without fixing anything. Note
+it *raises* a lagging pointer and cannot lower one, so it is not a way to force a replay (the
+warning the function itself emits names that procedure). `tests/parity/context_vs_app_status.sql`
+(guard 6 in `scripts/run_verification.sh`) fails if the two ever drift.
+
+`/sync-status` reads through the SECURITY DEFINER `haf_stats_app.sync_status()`
+(`db/sync_status.sql`), because `hafd.contexts` is protected by row-level security that
+admits only `hive_applications_group` — a group carrying `TRUNCATE` on that table, which
+the unauthenticated PostgREST role must not hold. It answers **503** rather than 200 when
+the HAF instance is in massive sync or the context is not visible; a 200 there would hide a
+privilege misconfiguration behind a healthy-looking body.
 
 ## Community Attribution
 
