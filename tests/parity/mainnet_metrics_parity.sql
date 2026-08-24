@@ -45,6 +45,56 @@
 SET max_parallel_workers_per_gather = 0;
 SET work_mem = '256MB';
 
+-- ---------------------------------------------------------------------------
+-- Virtual op types this oracle re-derives from, resolved by NAME (#56).
+--
+-- These three used to be the bare literals 57, 56 and 54. That made the "independent"
+-- derivation share the processors' single most fragile premise: virtual op ids are assigned
+-- after the non-virtual block, so adding ONE non-virtual op at a hardfork shifts every virtual
+-- id at once. An oracle that reads the same shifted numbers goes blind at the same instant as
+-- the code it is supposed to be checking.
+--
+-- Resolving by name is not sufficient on its own - an unresolved name yields NULL, the predicate
+-- matches nothing, and both sides of the comparison would agree at zero, so the guard would
+-- PASS while measuring nothing. Hence the assertion first, then the lookups.
+--
+-- The assertion is kept even though \gset below would itself abort psql on an unresolved name
+-- ("no rows returned for \gset"): \gset stops at the FIRST one with a bare message, while this
+-- names every missing op at once and points at db/op_type_registry.sql. It costs ~2 ms.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+    _missing TEXT;
+BEGIN
+    SELECT STRING_AGG(v.n, ', ' ORDER BY v.n) INTO _missing
+    FROM (VALUES
+        ('hive::protocol::fill_order_operation'),
+        ('hive::protocol::fill_vesting_withdraw_operation'),
+        ('hive::protocol::liquidity_reward_operation')
+    ) AS v (n)
+    WHERE NOT EXISTS (SELECT 1 FROM hafd.operation_types ot WHERE ot.name = v.n);
+
+    IF _missing IS NOT NULL THEN
+        RAISE EXCEPTION 'parity oracle: hafd.operation_types has no %. This guard re-derives those ops from the raw stream, so an unresolved name would silently compare zero against zero and pass. See db/op_type_registry.sql.', _missing;
+    END IF;
+END
+$$;
+
+-- Resolved into psql variables with \gset, NOT into a temp table read by a scalar subquery.
+-- That distinction is not cosmetic: a subquery hides the value from the planner, and an
+-- unanalyzed temp table defaults to a 2720-row estimate, so the op_type_id selectivity estimate
+-- blows up and the planner abandons hive_operations_op_type_id_block_num for
+-- hive_operations_block_num_trx_in_block_idx. Measured on the 5M corpus for the liquidity_reward
+-- derivation below: 17 ms as a literal, 572 ms via a temp-table subquery, same 283 rows.
+-- \gset substitutes the number before the server ever sees the statement, so the plan is
+-- byte-identical to the old hardcoded 57/56/54 while the VALUE still comes from the catalog.
+SELECT id AS vop_fill_order
+FROM hafd.operation_types WHERE name = 'hive::protocol::fill_order_operation' \gset
+SELECT id AS vop_fill_vesting_withdraw
+FROM hafd.operation_types WHERE name = 'hive::protocol::fill_vesting_withdraw_operation' \gset
+SELECT id AS vop_liquidity_reward
+FROM hafd.operation_types WHERE name = 'hive::protocol::liquidity_reward_operation' \gset
+
 \echo '== building independent first-occurrence table (excludes edits) =='
 DROP TABLE IF EXISTS _firsts;
 CREATE TEMP TABLE _firsts AS
@@ -243,7 +293,7 @@ WITH fill_order_independent AS (
             o.body_value -> 'current_pays' AS outgoing
         FROM hafd.operations o
         JOIN hafd.blocks b ON b.num = hafd.operation_id_to_block_num(o.id)
-        WHERE o.op_type_id = 57
+        WHERE o.op_type_id = :vop_fill_order
           AND b.created_at >= TIMESTAMP '2016-07-01'
           AND b.created_at < TIMESTAMP '2016-08-01'
 
@@ -255,7 +305,7 @@ WITH fill_order_independent AS (
             o.body_value -> 'open_pays'
         FROM hafd.operations o
         JOIN hafd.blocks b ON b.num = hafd.operation_id_to_block_num(o.id)
-        WHERE o.op_type_id = 57
+        WHERE o.op_type_id = :vop_fill_order
           AND b.created_at >= TIMESTAMP '2016-07-01'
           AND b.created_at < TIMESTAMP '2016-08-01'
     ) leg
@@ -297,7 +347,7 @@ WITH vesting_withdraw_independent AS (
         COUNT(*)::NUMERIC AS ops
     FROM hafd.operations o
     JOIN hafd.blocks b ON b.num = hafd.operation_id_to_block_num(o.id)
-    WHERE o.op_type_id = 56
+    WHERE o.op_type_id = :vop_fill_vesting_withdraw
       AND o.body_value ->> 'to_account' = 'pharesim'
       AND b.created_at >= TIMESTAMP '2016-03-01'
       AND b.created_at < TIMESTAMP '2016-10-01'
@@ -330,7 +380,7 @@ WITH liquidity_independent AS (
         COUNT(*)::NUMERIC AS ops
     FROM hafd.operations o
     JOIN hafd.blocks b ON b.num = hafd.operation_id_to_block_num(o.id)
-    WHERE o.op_type_id = 54
+    WHERE o.op_type_id = :vop_liquidity_reward
       AND o.body_value ->> 'owner' = 'adm'
       AND b.created_at >= TIMESTAMP '2016-07-01'
       AND b.created_at < TIMESTAMP '2016-08-01'
