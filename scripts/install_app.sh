@@ -4,12 +4,29 @@
 #
 # OPTIONS:
 #   --swagger-url=URL   Public hostname for Swagger UI example URLs (default: localhost)
+#
+# ENVIRONMENT:
+#   HAF_STATS_SKIP_OP_TYPE_ASSERT=1
+#       Last resort. Downgrades the op-type assertion's fatal arms (steps 3d/8f) to a warning so
+#       an install can complete over a condition that would normally abort it. The check still
+#       runs and still prints the full diagnosis - it just does not stop the install. Use it to
+#       get a node back up when the cause cannot be fixed from the source tree (e.g. an orphaned
+#       function body left in pg_proc by an earlier release), then fix the cause and unset it.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 SWAGGER_URL="localhost"
+
+# Off unless explicitly set to 1. Anything else (including "true") is treated as off, so a typo
+# fails safe - i.e. towards the assertion still being able to stop a bad install.
+: "${HAF_STATS_SKIP_OP_TYPE_ASSERT:=0}"
+if [ "${HAF_STATS_SKIP_OP_TYPE_ASSERT}" = "1" ]; then
+    OP_TYPE_BYPASS="TRUE"
+else
+    OP_TYPE_BYPASS="FALSE"
+fi
 
 for arg in "$@"; do
     case "$arg" in
@@ -56,6 +73,43 @@ run_sql_file "${SCRIPT_DIR}/../db/process_top_accounts_alltime.sql"
 # 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
 #     unavailable (e.g. CI), so it never fails the install. Scheduling is a deploy step.
 run_sql_file "${SCRIPT_DIR}/../db/refresh_rc_op_stats.sql"
+
+# 3c. Op-type dependency registry (#56). Declares every hafd.operation_types NAME the processors
+#     above resolve at runtime, and every op id they hardcode, plus the two scan helpers the
+#     drift arms read. Defines functions only; the two calls that run it are below and at 8f.
+run_sql_file "${SCRIPT_DIR}/../db/op_type_registry.sql"
+
+# 3d. Op-type assertion, first pass — THE GATE. Runs here, before anything that writes data.
+#
+#     This position is load-bearing. Step 8 backfills witness_blocks_daily by calling
+#     process_witness_blocks(1, tip), which is a UNION ALL of a produced arm reading hafd.blocks
+#     unconditionally and a missed arm filtered on a NAME-resolved op id. If that name no longer
+#     resolves, the missed arm matches nothing but the produced arm still writes a full table of
+#     rows with missed_count = 0 - and backfill_rollup_if_empty only ever fires on an EMPTY
+#     rollup, so that wrong data is permanent until someone runs scripts/rebuild_witness_blocks.sh.
+#     An assertion placed after step 8 would fire too late to prevent the damage it exists to
+#     prevent.
+#
+#     Aborting here does not leave a half-installed node. Steps 1-3c create roles, schemas,
+#     control rows (app_status, app_version) and function BODIES; no processor executes at load
+#     time - process_block_range's PERFORMs are inside its own function body - so nothing derived
+#     from an op-type lookup has been written yet, and nothing downstream (context, endpoints,
+#     grants, backfills) has run. On a re-install the node's existing context, endpoints and
+#     grants are untouched and keep serving.
+#
+#     Deliberately NOT `|| true`. The supported escape hatch is HAF_STATS_SKIP_OP_TYPE_ASSERT=1,
+#     which downgrades the fatal arms to a warning and still prints the whole diagnosis - unlike
+#     `|| true`, which would discard it. Only the three arms that mean "data is wrong on this node right
+#     now" are fatal - a name that no longer resolves, a hardcoded id that no longer carries its
+#     name, and a lookup missing the 'hive::protocol::' prefix. Environment conditions (no hafd,
+#     no USAGE on it) and registry/code drift are WARNING + continue inside the function, so only
+#     genuine breakage reaches this exit code. See the severity model in db/op_type_registry.sql.
+#     FALSE = do not let the fatal unprefixed arm abort on a haf_stats_endpoints body. Those are
+#     still the PREVIOUS release's at this point (step 6 replaces them), so a release that FIXES a
+#     shipped unprefixed lookup in an endpoint would otherwise abort here against the very body it
+#     is about to replace - making the fix uninstallable. Step 8f re-runs it unscoped.
+log "Verifying op-type dependencies against hafd.operation_types..."
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.assert_op_types(FALSE, ${OP_TYPE_BYPASS}); RESET ROLE;"
 
 # 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"
@@ -311,6 +365,17 @@ psql_cmd -c "
     \$do\$;
     RESET ROLE;
 "
+
+# 8f. Op-type assertion, second pass — the full-surface scan. Step 3d already gated the data
+#     writes; this one re-runs after the endpoints exist so the registry-drift arm can see
+#     haf_stats_endpoints function bodies too. On a FRESH install those functions do not exist
+#     yet at step 3d, so this is the only call that can catch an endpoint which resolves an
+#     op-type name without registering it. ~6 ms, so running it twice is free.
+#
+#     After 8e for the same reason 8e runs last: a /sync-status failure is an availability
+#     problem and keeps first claim on the exit code, while this one is data-correctness.
+log "Re-verifying op-type dependencies across the installed endpoints..."
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.assert_op_types(TRUE, ${OP_TYPE_BYPASS}); RESET ROLE;"
 
 log "Installation complete."
 

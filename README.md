@@ -70,6 +70,8 @@ db/
   builtin_roles.sql         Role definitions
   haf_stats_app.sql         Schemas, control tables, HAF context, main() loop
   process_block_range.sql   Block range dispatcher (calls all processors in order)
+  op_type_registry.sql      Every hafd.operation_types name / hardcoded op id the processors
+                            depend on, plus the install-time assertion that verifies them
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
   process_rc.sql            ⚠ RC cost attribution — BLOCKED: rc_account_statuses ops are not captured by HAF (see docs/VERIFICATION.md)
   process_content_cohorts.sql
@@ -313,6 +315,117 @@ created before it is ever a community, so earlier blocks cannot contribute. `FRO
 not configurable, because roles are ordered state — an account can only grant a role it
 already holds — so a partial start would drop the grants that authorize later
 `setRole`/`updateProps` ops.
+
+## Operation-Type Dependencies
+
+Processors resolve Hive operation types by **name**, not by literal id:
+
+```sql
+SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::producer_missed_operation'
+```
+
+That is deliberate. Non-virtual op ids are consensus-ordered and stable, but **virtual** ids are
+assigned after the non-virtual block, so adding one non-virtual operation at a hardfork shifts
+every virtual id at once.
+
+The catch is that name resolution fails **silently**. A renamed op makes the lookup return `NULL`,
+the aggregation arm matches no rows, and the endpoint reports zeros with no error anywhere. This is
+a real failure mode, not a hypothetical one: `hive::protocol::sps_fund_operation` was renamed to
+`dhf_funding_operation` and no longer resolves on any current node, and `docs/VERIFICATION.md` (D5)
+records the same class of bug inside this app — `process_rc` looked up `'custom_json_operation'`
+without the `hive::protocol::` prefix, got `NULL`, and silently lost every custom_json attribution.
+
+**`db/op_type_registry.sql` is the single place these dependencies are declared** — both the names
+resolved at runtime and the handful of op ids the code hardcodes (`0` vote, `1` comment,
+`2` transfer, `17` delete_comment, `18` custom_json, and `73` `ineffective_delete_comment`, which is
+*virtual* and therefore the unstable one). `scripts/install_app.sh` runs
+`haf_stats_app.assert_op_types()` twice — once at step 3d, before anything writes data, and again at
+step 8f once the endpoints exist.
+
+The first call is positioned deliberately. Step 8 backfills `witness_blocks_daily`, and that
+processor's produced arm writes a full table even when its missed arm has gone blind; since
+`backfill_rollup_if_empty` only ever fires on an empty rollup, a late assertion would fail *after*
+the wrong data became permanent.
+
+### What aborts the install, and what only warns
+
+**Fatal** — something is broken on this node *right now*, in a way that yields wrong or empty data
+with no other symptom:
+
+| | |
+|---|---|
+| a registered name no longer resolves | that lookup is `NULL` today |
+| a registered id no longer carries its name | that filter reads a different operation |
+| a name is looked up **without** the `hive::protocol::` prefix | that lookup is `NULL` today — this is D5 again |
+
+**Warning** — the registry and the code have drifted apart, but nothing is broken on this node:
+code resolves a name the registry does not declare; the registry declares a name no installed
+function resolves any more; code hardcodes an op id the registry does not declare.
+
+That split is a correctness decision, not a soft one. This app only drops the exact signatures it
+immediately recreates — never a whole schema — so a *renamed* or *re-signatured* function's body
+persists in `pg_proc`, and bodies accumulate across releases. If a later release renames a
+processor and deletes its now-unused registry row, the orphaned body still carries that literal; a
+*fatal* drift check would abort every subsequent install, and since `haf-stats-process` gates on
+setup completing and `haf-stats-api` on process being healthy, the whole stack would stay down over
+a bookkeeping mismatch — recoverable only by a manual `DROP FUNCTION` on the production node. Drift
+is a code-review concern; broken data is an install concern.
+
+The one fatal arm that *is* driven by the code scan — the unprefixed-lookup check — is therefore
+scoped at step 3d to the schemas step 3 has just reloaded, and only runs across the endpoints at
+step 8f, once step 6 has replaced those bodies. Without that, a release fixing a shipped unprefixed
+lookup in an endpoint would abort against the stale body it was about to replace.
+
+**Adding a processor that needs a new op type: add a row to
+`haf_stats_app.expected_op_type_names()`.** The scan reads installed function bodies — both classic
+`AS $$…$$` bodies and SQL-standard `BEGIN ATOMIC` ones, which keep their body in `prosqlbody` and
+leave `prosrc` empty — so forgetting is not silent. It cannot see a name or id assembled at runtime
+by `format()` or concatenation, or one that lives outside a function body (a view definition, a
+column default); those still have to be registered by hand. Removing a dependency means deleting
+its row, and the assertion warns when one is left behind.
+
+`haf_stats_app.scanned_op_type_literals()` and `haf_stats_app.scanned_op_type_ids()` expose the two
+scans directly, which is how the drift arms are tested (a `WARNING` is not catchable in plpgsql).
+
+### If a fatal arm is blocking a node that must come up
+
+`HAF_STATS_SKIP_OP_TYPE_ASSERT=1 ./scripts/install_app.sh` downgrades the fatal arms to a single
+loud warning. The check still runs and still prints the whole diagnosis — it just does not stop the
+install, and it does **not** report success. Fix the cause and unset it.
+
+**On a compose deployment that invocation does nothing.** `install_app.sh` runs inside the
+`haf-stats-setup` container, whose service definition (in `haf_api_node`, not this repo) declares no
+pass-through for the variable — so setting it on the host leaves the container at the default and
+the install aborts again with the same message. Measured: with the variable exported on the host, a
+`compose up` of that service still saw `HAF_STATS_SKIP_OP_TYPE_ASSERT=0`. It has to reach the
+container:
+
+```bash
+docker compose -p haf -f <compose-file> run --rm \
+    -e HAF_STATS_SKIP_OP_TYPE_ASSERT=1 haf-stats-setup
+```
+
+`run` reuses the service's own `command`, so the `--swagger-url=` argument is preserved (verified),
+and it honours `depends_on`, so it waits for HAF to be healthy exactly as the normal install does.
+The alternative is to add `HAF_STATS_SKIP_OP_TYPE_ASSERT` to that service's `environment:` block,
+which is the better fix if the node needs it more than once.
+
+It is there for the one case the step-3d scoping cannot reach: an **orphaned** function body left in
+`pg_proc` by an earlier release, carrying a lookup that no longer exists anywhere in the source
+tree. Nothing in a new release can replace a body whose signature it no longer ships, so without the
+hatch the only route back is a manual `DROP FUNCTION` on the node — while `haf-stats-process` and
+`haf-stats-api` stay down. The arm-4 message names the function and the `DROP FUNCTION` recovery for
+exactly that reason.
+
+The assertion is read-only and safe to run by hand at any time:
+
+```bash
+psql -d haf_block_log -c "SELECT haf_stats_app.assert_op_types();"
+```
+
+It warns and returns — never fails — when `hafd.operation_types` is absent or when the caller lacks
+`USAGE` on schema `hafd`; neither is a statement about the app. An *empty* catalog is a hard
+failure: that is a HAF node on which every op-type lookup in every processor would return `NULL`.
 
 ## API Endpoints
 

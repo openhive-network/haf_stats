@@ -165,7 +165,11 @@ $$;
 -- (aligns with the block explorer's ops vocabulary, haf_stats issue #26).
 -- Op-type ids are resolved once into locals from hafd.operation_types, whose
 -- names are fully qualified with the 'hive::protocol::' prefix (same lookup
--- pattern as process_rc.sql / process_account_cohorts.sql).
+-- pattern as process_account_cohorts.sql / process_witness_blocks.sql; the
+-- unprefixed form silently resolves to NULL, see docs/VERIFICATION.md D5).
+-- Every name below is declared in db/op_type_registry.sql, which fails the
+-- install if hived ever renames one - otherwise these lookups would return
+-- NULL and every category here would silently report zero.
 --
 -- DOUBLE COUNT (intentional): reward *accrual* (author_reward,
 -- comment_benefactor_reward, curation_reward) and reward *claim*
