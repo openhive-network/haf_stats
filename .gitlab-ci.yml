@@ -247,6 +247,21 @@ sql-lint:
   script:
     - pip install sqlfluff==3.3.0 -q
     - sqlfluff lint db/ endpoints/ --dialect postgres
+    # scripts/ and docker/ added with #57's two new .sql files. shell-lint already reads
+    # both directories; sql-lint did not, so a new .sql there would have gone unlinted.
+    #
+    # scripts/uninstall_verify.sql passes STRICT, so it is linted strictly.
+    - sqlfluff lint scripts/ --dialect postgres
+    # Only docker/block-processing-healthcheck.sql needs the layout rules relaxed: it is
+    # fed to psql with -v and uses :'var' substitution, which sqlfluff cannot parse (it
+    # reads the colon as an operator, so every placeholder becomes a spacing or indent
+    # complaint). Scoped to the one directory that contains it rather than to both, so a
+    # future .sql under scripts/ is not silently exempted.
+    #
+    # Note that CLI --exclude-rules REPLACES .sqlfluff's exclude_rules rather than
+    # merging, so this invocation also re-enables whatever that file turns off. That is
+    # acceptable for one generated-style file; do not widen it.
+    - sqlfluff lint docker/ --dialect postgres --exclude-rules LT01,LT02,LT14
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
@@ -255,7 +270,9 @@ sql-lint:
 
 shell-lint:
   stage: lint
-  image: koalaman/shellcheck-alpine:latest
+  # Pinned, for the reason sql-lint pins sqlfluff: an unpinned linter means a drifting
+  # build can fail unchanged code. :latest was 0.11.0 when this was pinned.
+  image: koalaman/shellcheck-alpine:v0.11.0
   needs: []
   script:
     - find scripts/ docker/ -name "*.sh" -exec shellcheck --severity=warning {} +
@@ -263,6 +280,34 @@ shell-lint:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
+    - if: $CI_COMMIT_BRANCH
+
+# Behavioural tests for the shell scripts that make up the image contract (#57):
+# the entrypoint's verb dispatch, the block-processing healthcheck, the uninstall
+# teardown and both option loops. They drive the real scripts against a stub psql on
+# PATH, so they need only bash and pytest -- no database, no image.
+#
+# They exist because these scripts had NO coverage and the failure modes are silent: a
+# healthcheck that answers "healthy" unconditionally fails no pipeline, and on a live
+# node the symptom is the absence of an alert. Mutation testing on the sibling app
+# (hive/haf_fyp!50) found 26 of 59 deliberate breakages surviving before this suite
+# shape was hardened.
+shell-tests:
+  stage: lint
+  # Pinned for the reason shell-lint and sql-lint pin theirs, and because this file
+  # already pins `pytest<9` elsewhere: pytest 9 dropped an internal tavern depends on.
+  image: python:3.11-slim
+  needs: []
+  script:
+    # pyyaml: tests/unit/test_compose_contract.py parses docker-compose.yml. It FAILS
+    # rather than skips when the module is missing under CI, for the same reason the
+    # bash harness does -- a silent skip would put the compose file back to uncovered.
+    - pip install --quiet 'pytest<9' pyyaml
+    # CI is set, so tests/unit/shell_harness.py FAILS rather than skips if bash ever
+    # leaves the image -- otherwise every shell test would quietly stop running and the
+    # pipeline would stay green with the scripts uncovered.
+    - PYTHONPATH=. pytest tests/unit/ -q
+  rules:
     - if: $CI_COMMIT_BRANCH
 
 hadolint:
@@ -324,6 +369,97 @@ docker-build:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
     - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    # Smoke-run the image (#57). Be precise about the gap this closes, because an
+    # earlier revision of this comment overstated it: the `sync` job DOES start
+    # containers from this image and exercises install_app/process_blocks for real. What
+    # had no coverage was the dispatcher's ERROR paths, every --help path, and the
+    # healthcheck script -- which `sync` overrides away via CI_FAST_HEALTHCHECK_SERVICES.
+    # Those are all fast, so they belong here rather than behind a 2-hour replay. That is not hypothetical: the
+    # sibling app (hive/haf_fyp!50) shipped `date --utc --iso-8601=seconds`, a GNU long
+    # option BusyBox does not have, in the first line of process_blocks.sh -- which under
+    # `set -e` would have crash-looped the block processor on every deployment.
+    #
+    # Every assertion greps for an expected message rather than accepting any non-zero
+    # status: a bare `! docker run ...` also passes on 127, so it would "verify" a file
+    # that had never been COPYed. `timeout` because a job that hangs reports "job
+    # timeout" rather than a diff.
+    #
+    # These run without a database on purpose: each exercises a path that resolves
+    # before the first connection. `uninstall_app` without --force is deliberately NOT
+    # smoke-tested -- it calls wait_for_postgres BEFORE its no-TTY refusal, so it would
+    # hang here rather than fail. A unit test covers it instead.
+    - |
+      set -e
+      IMG="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+      expect_ok()   { timeout 60 docker run --rm "$IMG" "$@"; }
+      # 124 is timeout's own kill, 125/126 are docker/exec failures, 127 is
+      # "not found" -- none of them is the script rejecting its input. Excluding
+      # them is the rule round two arrived at the hard way: an assertion whose
+      # expected outcome is a non-zero exit must name a SPECIFIC reachable exit.
+      expect_fail() { rc=0; timeout 60 docker run --rm "$IMG" "$@" >/tmp/o 2>&1 || rc=$?; cat /tmp/o; case "$rc" in 0|124|125|126|127) return 1 ;; *) return 0 ;; esac; }
+
+      echo "--- the image's userland is what the scripts assume ---"
+      # Asserted in three places in this repo and verified nowhere until now: that the
+      # base is Alpine (so `date` is BusyBox and has no --iso-8601), and that bash exists
+      # for the #!/bin/bash scripts. One line settles both.
+      docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
+      echo "--- entrypoint dispatches its own usage on stdout ---"
+      expect_ok --help | grep -q "install_app"
+      echo "--- unknown verb fails with the right message, not merely non-zero ---"
+      expect_fail install-app; grep -q "unknown verb: install-app" /tmp/o
+      echo "--- the scripts parse and render help under the image's BusyBox userland ---"
+      expect_ok install_app    --help | grep -q -- "--swagger-url"
+      expect_ok uninstall_app  --help | grep -q -- "--force"
+      expect_ok process_blocks --help | grep -q -- "--host"
+      echo "--- an invalid option is rejected, not ignored ---"
+      expect_fail install_app --nope; grep -q "is not a valid option" /tmp/o
+      echo "--- a foreign --schema warns and does NOT exit at the option loop ---"
+      # It must not hard-fail: upstream module files pass --schema= to process_blocks on
+      # a service that is `restart: on-failure`, so exiting here is a permanent
+      # crash-loop.
+      #
+      # `--help` AFTER it, deliberately. The option loop processes every argument, so the
+      # warning is emitted and then --help exits 0 -- WITHOUT falling into
+      # wait_for_postgres. The previous form was `expect_fail install_app
+      # --schema=btracker_app`, which HUNG this job for 58 minutes on the first run after
+      # the hard failure was removed: with nothing to exit at, the script reached
+      # wait_for_postgres, an unbounded `until pg_isready; do sleep 2; done`, against a
+      # container that has no `haf` host. `timeout 60` did not save it -- it kills the
+      # docker CLI while the container keeps running and holds the redirect open, so the
+      # shell waits on the pipe. The job had to be cancelled by hand.
+      #
+      # Two lessons kept here on purpose: an assertion whose expected outcome is a
+      # NON-zero exit must name a specific reachable exit, not "anything but 0"; and a
+      # smoke test must never invoke a verb in a way that reaches the connect.
+      expect_ok install_app --schema=btracker_app --help >/tmp/o 2>&1; cat /tmp/o
+      grep -q "WARNING: --schema" /tmp/o
+      echo "--- a connection URI is REFUSED, not half-honoured ---"
+      # Honouring it moved only the psql connection: the messages and the teardown's
+      # confirmation prompt still read POSTGRES_HOST/POSTGRES_DB, so it could act on one
+      # database while reporting another. Refusing is safe -- --postgres-url appears in
+      # one upstream module file, on a service with no restart policy.
+      for verb in install_app uninstall_app process_blocks; do
+        expect_fail "$verb" --postgres-url=postgresql://haf_admin@haf/haf_block_log
+        grep -q "not supported yet" /tmp/o || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
+        grep -q -- "--host=" /tmp/o || { echo "FAIL: $verb did not name the alternative flags"; exit 1; }
+      done
+      echo "--- the compat path the LIVE node uses still dispatches ---"
+      expect_ok /app/scripts/install_app.sh --help | grep -q -- "--swagger-url"
+      echo "--- the healthcheck ships at the path module files hardcode ---"
+      expect_ok test -r /app/block-processing-healthcheck.sql
+      timeout 60 docker run --rm --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h 2>&1 && exit 1
+      cat /tmp/h; grep -q "hasn.t started yet" /tmp/h
+      echo "--- and fails CLOSED when it has a startup time but no database ---"
+      timeout 60 docker run --rm -e HAF_STATS_STARTUP_TIME_FILE=/etc/hostname         --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h2 2>&1 && exit 1
+      cat /tmp/h2
+      grep -q "psql: error:" /tmp/h2
+      # `if ... then exit 1`, NOT `! grep ...`. POSIX and bash both exempt a
+      # !-inverted pipeline from errexit, so `set -e; ! grep -q X` CONTINUES when X
+      # matches -- the assertion could never fail. Verified locally.
+      if grep -q "healthcheck SQL not found" /tmp/h2; then
+        echo "the healthcheck could not find its .sql -- COPY missing?" >&2; exit 1
+      fi
+      echo "image smoke tests passed"
     - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not

@@ -2,8 +2,20 @@
 # One-time schema installation. Run once against a live HAF database.
 # Safe to re-run: all DDL uses IF NOT EXISTS / ON CONFLICT DO NOTHING.
 #
-# OPTIONS:
+# OPTIONS:                                                      # --- help-start ---
 #   --swagger-url=URL   Public hostname for Swagger UI example URLs (default: localhost)
+#   --host=VALUE        PostgreSQL host  (default: $POSTGRES_HOST, else haf)
+#   --port=NUMBER       PostgreSQL port  (default: $POSTGRES_PORT, else 5432)
+#   --user=VALUE        PostgreSQL user  (default: $POSTGRES_USER, else haf_stats_owner)
+#                       --postgres-host=, --postgres-port= and --postgres-user= are
+#                       accepted as synonyms (balance_tracker's spelling)
+#   --postgres-url=URI  NOT SUPPORTED YET -- recognised and refused with a message
+#                       pointing at --host/--port/--user. --url= is the same flag.
+#   --schema=NAME       Accepted for module-file compatibility; anything but
+#                       haf_stats_app is warned about and ignored, not refused
+#   --is_forking=FALSE  Accepted for compatibility with the upstream module template.
+#                       TRUE is warned about and ignored -- see below.
+#   --help,-h,-?        Show this and exit                      # --- help-end ---
 #
 # ENVIRONMENT:
 #   HAF_STATS_SKIP_OP_TYPE_ASSERT=1
@@ -15,6 +27,12 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the source relative to THIS SCRIPT rather than the linter's working directory,
+# so shellcheck actually reads common.sh. Without it the connection flags below trip
+# SC2034 ("POSTGRES_HOST appears unused") -- shellcheck cannot see psql_cmd consuming
+# them -- at warning severity, which is the level shell-lint fails on.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
 SWAGGER_URL="localhost"
@@ -28,9 +46,125 @@ else
     OP_TYPE_BYPASS="FALSE"
 fi
 
+print_help() {
+    # Delimited by the markers in the header rather than a hardcoded line range: a range
+    # silently truncates as soon as the header grows a line, and a test asserting on one
+    # early flag never notices.
+    #
+    # The bracket in help-sta[r]t is not decoration: written literally, the pattern
+    # matches THIS LINE too, sed re-opens the range here and prints the rest of the file.
+    sed -n '/--- help-sta[r]t ---/,/--- help-en[d] ---/p' "$0" | sed 's/^# //; s/^#$//; s/ *# --- help-[a-z]* ---//'
+}
+
+# The connection flags are parsed AFTER common.sh has applied its defaults, and every
+# psql_cmd call expands them at call time -- so assigning here genuinely overrides the
+# environment rather than being overridden by it.
 for arg in "$@"; do
     case "$arg" in
         --swagger-url=*) SWAGGER_URL="${arg#*=}" ;;
+
+        # Matching balance_tracker, haf_block_explorer and hivesense, whose docker
+        # entrypoints forward these. Without them the documented upstream operator form,
+        # `run --rm <svc> install_app --host=haf`, fails on an app claiming to implement
+        # the same contract. balance_tracker spells it --postgres-host and takes nothing
+        # else; the other two use --host. The trio does not agree, so accept both.
+        --host=*|--postgres-host=*) POSTGRES_HOST="${arg#*=}" ;;
+        --port=*|--postgres-port=*) POSTGRES_PORT="${arg#*=}" ;;
+        --user=*|--postgres-user=*) POSTGRES_USER="${arg#*=}" ;;
+
+        # RECOGNISED AND REFUSED, deliberately -- not warn-and-continue like --schema,
+        # and not "is not a valid option" either.
+        #
+        # An earlier revision of this MR HONOURED it, handing the URI to psql as a
+        # conninfo. That was worse than rejecting it, because only psql moved: every
+        # message, the confirmation banner and the typed-the-database-name gate still
+        # read ${POSTGRES_HOST}/${POSTGRES_DB}. So `uninstall_app --postgres-url=...`
+        # dropped schemas on the URI's host while printing the discrete host, and
+        # accepted the discrete database name as confirmation -- in the one gate whose
+        # stated purpose is catching "the right command against the wrong host".
+        #
+        # Honouring it properly means the banner, the healthcheck's application_name
+        # tag (the uninstall session guard excludes the probe by that literal), passing
+        # the conninfo through to the healthcheck, a redactor that survives
+        # ?password= and keyword/value forms, and the other scripts. That is tracked
+        # separately.
+        #
+        # Refusing is safe here, unlike for --schema: --postgres-url appears in exactly
+        # one upstream module file (hivemind.yaml, on hivemind-uninstall) and that file
+        # carries no `restart:` key, so this cannot crash-loop a service. One clear
+        # error beats a silent connection to the wrong database.
+        --postgres-url=*|--url=*)
+            log "ERROR: --postgres-url is not supported yet."
+            log "       Use --host=, --port= and --user= instead. Accepting the URI"
+            log "       would move only the psql connection: this script's messages,"
+            log "       and the teardown's confirmation prompt, still read POSTGRES_HOST"
+            log "       and POSTGRES_DB -- so it could act on one database while"
+            log "       reporting another. Refusing is the safe answer until that is"
+            log "       fixed throughout."
+            exit 2
+            ;;
+
+        # haf_api_node's module files pass --schema= on EVERY verb -- balance_tracker.yaml
+        # ships `process_blocks --schema=btracker_app` on a service that is
+        # `restart: on-failure`. A hard failure here is therefore a permanent crash-loop
+        # that blocks the whole stack, over a flag this app cannot act on either way:
+        # its schema names are fixed in the SQL.
+        #
+        # So WARN and continue, exactly as --is_forking does. An earlier revision of this
+        # MR exited 2, justified by a claim that `restart: on-failure` sat on the INSTALL
+        # service -- it does not, in this repo or upstream; it sits on block-processing,
+        # which is precisely where the hard failure landed.
+        --schema=*)
+            if [ "${arg#*=}" != "haf_stats_app" ]; then
+                log "WARNING: --schema=${arg#*=} is ignored."
+                log "         haf_stats owns three fixed schemas: haf_stats_app,"
+                log "         haf_stats_backend and haf_stats_endpoints. Continuing."
+            fi
+            ;;
+
+        # haf_api_node's module template passes --is_forking defaulted from a node-wide
+        # ${IS_FORKING:-TRUE}, so a haf_stats module file copied from an upstream app
+        # carries TRUE without anyone choosing it for this app. It cannot be honoured:
+        # create_context_if_not_exists() calls hive.app_context_set_non_forking('haf_stats')
+        # when it creates the context (db/haf_stats_app.sql), so HAF does not rewind
+        # these tables on a fork.
+        #
+        # WARN, do not fail. Upstream module files put `restart: on-failure` on their
+        # app services (balance_tracker.yaml's block-processing carries it), so a hard
+        # failure on a flag that arrives from an inherited node-wide default is a
+        # permanent crash-loop rather than a useful error. NOTE: this repo's own
+        # docker/docker-compose.yml has no `restart:` key at all -- an earlier revision
+        # of this comment claimed haf-stats-setup ran under `restart: on-failure`, which
+        # was carried over from the sibling app and is false here. (Note the limit:
+        # the call sits inside the `IF NOT app_context_exists` branch, so on a database
+        # whose context already exists this warning is still right that the flag is not
+        # honoured, but nothing here converts that context either.)
+        --is_forking=*)
+            case "${arg#*=}" in
+                FALSE|false|False)
+                    log "--is_forking=FALSE matches this app's context; nothing to do."
+                    ;;
+                *)
+                    log "WARNING: --is_forking=${arg#*=} is ignored."
+                    log "         haf_stats registers a NON-forking HAF context by design"
+                    log "         (hive.app_context_set_non_forking, db/haf_stats_app.sql), so HAF"
+                    log "         does NOT rewind its tables on a fork. Continuing non-forking."
+                    log "         Pass --is_forking=FALSE to silence this."
+                    ;;
+            esac
+            ;;
+
+        --help|-h|-\?) print_help; exit 0 ;;
+
+        # Unknown arguments are an ERROR, matching upstream's option loops. This loop
+        # previously had no fallthrough at all, so a mistyped --swagger-url silently
+        # installed with the "localhost" default and baked wrong example URLs into the
+        # published Swagger page, with nothing in the log to say so.
+        *)
+            log "ERROR: '${arg}' is not a valid option"
+            print_help
+            exit 2
+            ;;
     esac
 done
 
@@ -129,7 +263,7 @@ run_sql_file "${SCRIPT_DIR}/../db/sync_status.sql"
 #    Ordered BEFORE the endpoints: GET /sync-status answers 503 while the context row is
 #    absent. On a cold `compose up` the API is in fact gated on this container transitively
 #    (haf-stats-process depends_on haf-stats-setup service_completed_successfully;
-#    haf-stats-api depends_on haf-stats-process service_healthy) - but `compose up -d`
+#    haf-stats-api in turn depends_on haf-stats-process) - but `compose up -d`
 #    against a running stack does not restart an already-up haf-stats-api, so on any
 #    ordinary redeploy a request can land between the two steps.
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
