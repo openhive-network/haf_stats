@@ -7,7 +7,6 @@ set -euo pipefail
 : "${POSTGRES_PORT:=5432}"
 : "${POSTGRES_DB:=haf_block_log}"
 : "${POSTGRES_USER:=haf_stats_owner}"
-
 export HAF_STATS_SCHEMA="haf_stats_app"
 
 log() {

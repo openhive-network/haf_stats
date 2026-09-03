@@ -51,7 +51,12 @@ services:
 
   haf-stats-setup:
     image: ${HAF_STATS_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats:${HAF_STATS_VERSION:-latest}}
-    command: ["/app/scripts/install_app.sh"]
+    # A verb, not a path (#57) -- the image's entrypoint dispatches it. Spelled this
+    # way here, rather than only in a future module file, so the reference stack uses the
+    # same form a module would. Note what that does NOT buy: compose-validate only runs
+    # `docker compose config`, which parses YAML and never starts a container. Nothing in
+    # CI executes the dispatcher inside the image except the docker-build smoke tests.
+    command: ["install_app"]
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_admin   # install runs as haf_admin to create roles/context
@@ -64,22 +69,83 @@ services:
 
   haf-stats-process:
     image: ${HAF_STATS_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats:${HAF_STATS_VERSION:-latest}}
-    command: ["/app/scripts/process_blocks.sh"]
+    command: ["process_blocks"]
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_stats_owner
       POSTGRES_DB:   haf_block_log
     networks:
       haf-network:
+    # Declared here rather than in the Dockerfile -- see the note there. This is the only
+    # service the check describes; the other two built from the same image run once and
+    # exit.
+    #
+    # What it replaces: `psql -U haf_stats_user ... -c 'SELECT 1'`, which proved
+    # PostgreSQL answers and said nothing about whether haf_stats_app.main() was still
+    # advancing. It also connected as haf_stats_user, which db/builtin_roles.sql creates
+    # NOINHERIT *where it creates the role at all* -- on a HAF-provisioned node the role
+    # is INHERIT and in hive_applications_owner_group. What actually hides hafd.contexts
+    # from it is RLS, not inheritance: builtin_roles.sql grants SELECT on hafd directly.
+    # (An earlier revision of this comment gave the mechanism as NOINHERIT.) So
+    # cannot read hafd.contexts at all -- harmless for SELECT 1, fatal for any real check.
+    #
+    # start_period covers a first run against a fresh HAF, which replays in MASSIVE
+    # iterations; the heartbeat does not move until an iteration finishes, so a long batch
+    # can exceed MAX_AGE on a replay that is perfectly healthy. 72h is inherited from the
+    # SELECT 1 check and is NOT a considered number for the new one: Docker >= 25 ends the
+    # start period at the first success, so it does not in fact cover a whole replay. Left
+    # alone because tuning it without a measured MASSIVE batch duration would be
+    # guessing twice. NOTE: haf-stats-api's depends_on was relaxed from service_healthy
+    # to service_started in the same change -- an earlier revision of this comment
+    # claimed "nothing yet consumes this service's health", which was false fifteen
+    # lines below its own text.
     healthcheck:
-      test: ["CMD-SHELL", "psql -h haf -U haf_stats_user -d haf_block_log -c 'SELECT 1' -q"]
+      test: ["CMD", "/app/block-processing-healthcheck.sh"]
       interval: 60s
-      timeout: 10s
-      retries: 20
-      start_period: 72h   # time for processing to catch up on a fresh sync
+      timeout: 15s
+      retries: 3
+      start_period: 72h
     depends_on:
       haf-stats-setup:
         condition: service_completed_successfully
+
+  # Removes haf_stats from the database: HAF context, all three schemas (CASCADE), both
+  # roles. Behind a profile, so `docker compose up` never starts it.
+  #
+  #     docker compose -f docker/docker-compose.yml stop haf-stats-process haf-stats-api
+  #     docker compose -f docker/docker-compose.yml run --rm haf-stats-uninstall
+  #
+  # USE `run --rm`, NOT `--profile haf-stats-uninstall up`. Upstream documents the `up`
+  # form and it is safe THERE because upstream puts every app service behind a profile
+  # too. In THIS file nothing else has `profiles:`, so `up` would also start
+  # haf-stats-setup -- whose command is `install_app` -- concurrently with the teardown,
+  # racing DROP SCHEMA against CREATE SCHEMA, and restart the very services the operator
+  # was just told to stop. The session guard cannot see it either: haf-stats-setup
+  # connects as haf_admin, and the guard counts only haf_stats_owner/haf_stats_user.
+  # `run` starts only this service and its depends_on.
+  #
+  # --force is passed so the run is non-interactive; `docker compose run` does allocate a
+  # TTY, so dropping it would make the script prompt. Run scripts/uninstall_app.sh
+  # directly without --force to get the type-the-database-name confirmation.
+  #
+  # DESTRUCTIVE AND IRREVERSIBLE -- haf_stats_backend holds the rollups, which only a
+  # full reprocess rebuilds.
+  haf-stats-uninstall:
+    profiles: ["haf-stats-uninstall"]
+    image: ${HAF_STATS_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats:${HAF_STATS_VERSION:-latest}}
+    command: ["uninstall_app", "--force"]
+    environment:
+      POSTGRES_HOST: haf
+      POSTGRES_USER: haf_admin   # dropping roles needs more than haf_stats_owner
+      POSTGRES_DB:   haf_block_log
+    networks:
+      haf-network:
+    depends_on:
+      # Without this, `run --rm haf-stats-uninstall` against a stopped stack does not
+      # start haf and sits in wait_for_postgres -- an unbounded `until pg_isready` loop --
+      # forever, with no message.
+      haf:
+        condition: service_healthy
 
   haf-stats-api:
     image: ${POSTGREST_IMAGE:-${POSTGREST_REGISTRY:-postgrest/postgrest}:${POSTGREST_VERSION:-v12.2.3}}
@@ -108,7 +174,18 @@ services:
       haf:
         condition: service_healthy
       haf-stats-process:
-        condition: service_healthy
+        # service_started, NOT service_healthy. This gate predates #57, but #57 changed
+        # what "healthy" MEANS: from `SELECT 1` (true the moment Postgres answers) to a
+        # committed block-processing iteration. Left as service_healthy, PostgREST would
+        # not start until the app had finished a MASSIVE batch -- and by this MR's own
+        # admission a long batch can exceed the window indefinitely, so on a fresh node
+        # it might never start. `start_period: 72h` makes it worse, not better: the
+        # container reports `starting` rather than `healthy`, so the gate never releases.
+        #
+        # Upstream does not couple these at all -- balance_tracker.yaml's postgrest
+        # depends on its install job and pgbouncer, never on block-processing. Serving
+        # slightly stale statistics is better than serving none.
+        condition: service_started
 
 networks:
   haf-network:

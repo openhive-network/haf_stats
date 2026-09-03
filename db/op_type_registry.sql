@@ -47,8 +47,8 @@ SET ROLE haf_stats_owner;
 -- and the schemas themselves are CREATE SCHEMA IF NOT EXISTS. If a later release renames a
 -- processor and deletes its now-unused registry row, the ORPHANED body is still there carrying
 -- that literal. A fatal arm 3 would then abort every subsequent install, and since
--- haf-stats-process gates on setup service_completed_successfully and haf-stats-api on process
--- service_healthy, the whole stack would stay down over a bookkeeping mismatch with no
+-- haf-stats-process gates on setup service_completed_successfully and haf-stats-api on
+-- haf-stats-process, the whole stack would stay down over a bookkeeping mismatch with no
 -- data-correctness content, recoverable only by a manual DROP FUNCTION on the production node.
 -- The same argument applies in reverse to arm 5. Drift is a code-review concern; broken data is
 -- an install concern.

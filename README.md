@@ -427,6 +427,107 @@ It warns and returns — never fails — when `hafd.operation_types` is absent o
 `USAGE` on schema `hafd`; neither is a statement about the app. An *empty* catalog is a hard
 failure: that is a HAF node on which every op-type lookup in every processor would return `NULL`.
 
+## Container image contract
+
+`Dockerfile` builds one image used by three services, dispatched by
+`docker/docker_entrypoint.sh` — the same `install_app` / `process_blocks` /
+`uninstall_app` trio every `haf_api_node` app image exposes, which is what lets a module
+file say `command: ["install_app"]` rather than reaching into the image for a script
+path.
+
+| Verb | Runs | Notes |
+|------|------|-------|
+| `install_app [--swagger-url=HOST] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; safe to re-run |
+| `process_blocks [--host=] [--port=] [--user=]` | `scripts/process_blocks.sh` | infinite loop |
+| `uninstall_app [--force] [--host=] [--port=] [--user=]` | `scripts/uninstall_app.sh` | destructive |
+
+Connection settings default from the environment (`POSTGRES_HOST`, `POSTGRES_PORT`,
+`POSTGRES_DB`, `POSTGRES_USER`); `--host=` / `--port=` / `--user=` override them and the
+entrypoint forwards them, so a runbook copied from an upstream app works here.
+`--postgres-host=`, `--postgres-port=` and `--postgres-user=` are accepted as synonyms
+because that is balance_tracker's spelling. An argument no option loop recognises is an
+error rather than being silently discarded.
+
+`--postgres-url=` (also spelled `--url=`) is **recognised and refused**, with a message
+pointing at `--host`/`--port`/`--user`. `haf_api_node`'s `hivemind.yaml` does pass
+`--postgres-url=postgresql://haf_admin@haf/haf_block_log` to its uninstall service, and
+all three of balance_tracker's scripts take the flag -- so this is a real gap, tracked in
+issue #59.
+
+It is refused rather than honoured because honouring it moved only the psql connection.
+Every message, and the teardown's type-the-database-name confirmation, still read
+`POSTGRES_HOST`/`POSTGRES_DB`, so the script dropped schemas on the URI's host while
+reporting the discrete one -- in the gate whose stated purpose is catching "the right
+command against the wrong host". Refusing is safe here, unlike for `--schema`: the flag
+appears in exactly one upstream module file, on a service with no `restart:` key.
+
+Two more flags are accepted only for module-file compatibility, and **both warn and
+continue** rather than refusing. `--schema=` naming anything but `haf_stats_app` is
+ignored with a warning, because the three schema names are fixed in the SQL; so is
+`--is_forking=TRUE`, because `db/haf_stats_app.sql` creates the context non-forking.
+
+Refusing either would be worse than useless. Upstream module files put
+`restart: on-failure` on their app services — `balance_tracker.yaml` carries it on
+block-processing, which is also where it passes `--schema=` — so exiting non-zero over a
+flag this app cannot act on either way is a permanent crash-loop that blocks the whole
+stack. (This repo's own `docker/docker-compose.yml` has no `restart:` key at all; an
+earlier version of this paragraph claimed `haf-stats-setup` carried one, which was
+imported from the sibling app and is false here.)
+
+Anything that is not a verb but *is* runnable is still executed, so the previous
+`command: ["/app/scripts/process_blocks.sh"]` form keeps working, and an argument
+starting with `-` goes to bash — except `--help`, `-h`, `-?`, which print the
+dispatcher's own usage.
+
+### Block-processing healthcheck
+
+The image ships `/app/block-processing-healthcheck.sh` — the path
+`reputation_tracker.yaml` and its siblings hardcode — and `docker/docker-compose.yml`
+attaches it to `haf-stats-process`. It is **not** declared as a `HEALTHCHECK` in the
+Dockerfile: upstream does not, and an image-level check would also land on the one-shot
+install and uninstall containers.
+
+It replaces `psql -U haf_stats_user -c 'SELECT 1'`, which proved PostgreSQL answers and
+nothing about whether `haf_stats_app.main()` was still running — and which connected as
+`haf_stats_user`, a role that cannot see `hafd.contexts` rows. The mechanism is RLS on a
+role outside `hive_applications_group`, not the `NOINHERIT` flag: `db/builtin_roles.sql`
+grants `SELECT` on `hafd` directly, and sets `NOINHERIT` only where it creates the role
+itself — on a HAF-provisioned node the role is `INHERIT` and in the group.
+
+The signal is `hafd.contexts.last_active_at`, HAF's own column, written once per
+`hive.app_next_iteration`. Healthy when it is fresher than
+`HAF_STATS_HEALTHCHECK_MAX_AGE_SECONDS` (default 300) **and** later than this
+container's start, or when `hive.is_app_in_sync()`.
+
+Be precise about that column: it is written with a clock **one iteration old**
+(`__now := NOW()` is a DECLARE initializer taking `transaction_timestamp()` of the
+caller's still-open transaction), so the observed age spans up to *two* iteration
+durations — 300s tolerates iterations of roughly 150s. It is also not a sub-batch
+heartbeat, so on a long MASSIVE batch this check **can report unhealthy on a healthy
+replay**. The window is a deliberately wide guess; narrow it once a batch has been timed.
+
+## Uninstalling
+
+**Destructive and irreversible.** Drops the HAF context, all three schemas `CASCADE`
+— including `haf_stats_backend`, which holds the rollups — and both roles.
+
+```bash
+docker compose -f docker/docker-compose.yml stop haf-stats-process haf-stats-api
+docker compose -f docker/docker-compose.yml run --rm haf-stats-uninstall
+```
+
+**`run --rm`, not `--profile haf-stats-uninstall up`.** Upstream documents the `up` form
+and it is safe there because upstream profiles every app service; in this file nothing
+else is profile-gated, so `up` would also start `haf-stats-setup` (whose command is
+`install_app`) alongside the teardown. The session guard would not catch it either —
+that service connects as `haf_admin`, which the guard does not count.
+
+The script refuses while anything is connected as a `haf_stats` role, because
+`DROP SCHEMA ... CASCADE` needs an `AccessExclusiveLock` and would otherwise block rather
+than fail. Run `scripts/uninstall_app.sh` directly without `--force` to get a
+type-the-database-name confirmation. It reports what it could not remove rather than
+stopping at the first error, and re-running is safe.
+
 ## API Endpoints
 
 All endpoints are served via PostgREST. Base URL: `http://localhost:3001`

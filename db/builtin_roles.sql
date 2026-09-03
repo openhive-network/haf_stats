@@ -37,8 +37,8 @@ $$;
 -- plans; only DISCARD PLANS or a pool recycle recovers. haf-stats-setup re-runs
 -- install_app.sh on every stack start. On a COLD `compose up` the API is transitively
 -- gated on setup (haf-stats-process depends_on haf-stats-setup
--- service_completed_successfully; haf-stats-api depends_on haf-stats-process
--- service_healthy), so the window is not reachable there - but `compose up -d` against a
+-- service_completed_successfully, and haf-stats-api in turn depends_on
+-- haf-stats-process), so the window is not reachable there - but `compose up -d` against a
 -- running stack does NOT restart an already-up haf-stats-api, and that container keeps
 -- serving from its existing pool across the re-install. That is the reachable case.
 DO $$
