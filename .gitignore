@@ -15,4 +15,8 @@ tests/tavern/.pytest_cache/
 *.log
 
 # Fetched on demand by scripts/openapi_rewrite.sh (not vendored)
-scripts/process_openapi.py
+
+# Created by scripts/openapi_rewrite.sh: a private virtualenv for the pinned
+# generator dependencies, and the generator's staging tree.
+scripts/.openapi_venv/
+scripts/openapi_out/

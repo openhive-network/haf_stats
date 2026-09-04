@@ -113,11 +113,16 @@ services:
       setup:
         condition: service_completed_successfully
 
-  # The rewriter, built from the SHIPPED Dockerfile -- not a stand-in. Until now no
-  # lane started it, so endpoints/rewrite_rules.conf was built into an image and never
-  # requested: a removed, mis-ordered or typo'd rule shipped green while every public
-  # URL 404'd. It also means the published haf_stats rewriter image had never actually
-  # run anywhere (production borrows balance_tracker's with these rules bind-mounted).
+  # The rewriter, built from the SHIPPED Dockerfile.rewriter -- not a stand-in. Until
+  # now no lane started it, so endpoints/rewrite_rules.conf was built into an image and
+  # never requested: a removed, mis-ordered or typo'd rule shipped green while every
+  # public URL 404'd. It also means Dockerfile.rewriter itself had never run anywhere.
+  #
+  # Scope, stated precisely, because the artifact and the container have different
+  # reaches: what this proves is that every rule in endpoints/rewrite_rules.conf --
+  # the file production bind-mounts into its own (balance_tracker-derived) nginx --
+  # resolves to a live /rpc/ function. It does NOT cover that container's server
+  # block, nor the HAProxy path in front of it.
   rewriter:
     build:
       context: ..
@@ -130,8 +135,25 @@ services:
       # what it rewrote to -- which is the one fact you need. Costs nothing in a
       # throwaway CI container.
       REWRITE_LOG: "on"
+    # The image already ships a dedicated health server on port 81 (see
+    # docker/haf_stats_nginx.conf.template) that nothing was using. Every other
+    # dependency in this file waits on a condition; these two were the only
+    # short-form ones, and short form waits for container START, not readiness.
+    # tavern spends 20-40s in `pip install` before its first request so the race is
+    # unlikely, but "unlikely" is how flakes are described before they happen.
+    healthcheck:
+      # Same probe haf_api_node uses for the sibling rewriter images
+      # (balance_tracker.yaml, hafah.yaml, haf_block_explorer.yaml all run exactly
+      # this against port 81 of an openresty image from the same family), so wget
+      # is known present.
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
     depends_on:
-      - postgrest
+      postgrest:
+        condition: service_started
 
   tavern:
     image: python:3.12-slim
@@ -144,10 +166,15 @@ services:
       - ../tests/tavern:/tests/tavern:ro
     environment:
       API_URL: "http://postgrest:3000"
-      # The URL an operator (and haf_api_node's HAProxy backend) actually requests.
+      # The one place this variable carries a REAL address. The two other
+      # declarations (.gitlab-ci.yml, docker-compose-test.yml) are collection-only
+      # placeholders pointing at a deliberately unresolvable host, so if this
+      # service is ever renamed those lanes fail fast instead of quietly passing.
       REWRITER_URL: "http://rewriter"
       PYTHONPATH: "/tests/tavern"
       TAVERN_DIR: "/tests/tavern"
     depends_on:
-      - postgrest
-      - rewriter
+      postgrest:
+        condition: service_started
+      rewriter:
+        condition: service_healthy

@@ -1,5 +1,5 @@
 ---
-test_name: Every rewrite rule routes to its endpoint
+test_name: Every rewrite rule reaches the endpoint it names
 
 marks:
   - synthetic
@@ -14,82 +14,251 @@ includes:
 # traversed. A removed, mis-ordered or typo'd rule shipped with a green pipeline
 # while the public API 404'd. !72 already hit the ordering half of that.
 #
-# One stage per rule, deliberately. An earlier revision of this file covered six of
-# the twenty-four, and a review showed the obvious consequence: deleting the
-# /network/engagement rule, or moving it below the catch-all, left the suite green.
-# It is cheap to be complete here, so be complete.
+# `status_code: 200` alone does NOT prove routing, and two review rounds proved it
+# concretely. Seventeen of these functions have every parameter defaulted, so they
+# all answer 200 to a bare GET: with 200-only stages the thirteen no-parameter
+# public rules were freely PERMUTABLE among themselves and the pipeline stayed
+# green. The six account rules were worse -- they return 200 with an EMPTY array
+# for an account that does not exist, so even a fixture bought nothing.
+#
+# So every stage below carries a discriminator that only its intended target can
+# satisfy, and the discriminator is a SHAPE assertion, not a data assertion -- it
+# holds on an empty result set, so these stages do not duplicate or compete with
+# the sibling suites that own the values:
+#
+#   * `select=<column>` -- PostgREST vertical filtering. Naming a column the
+#     function does not return is 42703 -> 400, so a rule repointed at any other
+#     endpoint fails loudly. Each column below was checked to be returned by
+#     exactly ONE of the twenty-four functions.
+#   * a unique PARAMETER where no column is unique -- an overload that does not
+#     declare it is PGRST202 -> 404.
+#   * a body shape for the three scalar-returning endpoints, which have no
+#     columns to select.
 stages:
+  # --- the thirteen no-parameter rules, each pinned by a column only it returns
   - name: witnesses missed-blocks
-    request: {url: "{rewriter_url}/witnesses/missed-blocks", method: GET}
+    request:
+      url: "{rewriter_url}/witnesses/missed-blocks"
+      method: GET
+      params: {select: "missed_count"}
     response: {status_code: 200}
+
   - name: network top-accounts
-    request: {url: "{rewriter_url}/network/top-accounts", method: GET}
+    request:
+      url: "{rewriter_url}/network/top-accounts"
+      method: GET
+      params: {select: "value_hive_nai"}
     response: {status_code: 200}
+
   - name: network engagement
-    request: {url: "{rewriter_url}/network/engagement", method: GET}
+    request:
+      url: "{rewriter_url}/network/engagement"
+      method: GET
+      params: {select: "zero_vote_post_pct"}
     response: {status_code: 200}
+
   - name: network content-volume
-    request: {url: "{rewriter_url}/network/content-volume", method: GET}
+    # Shares period/posts/comments with get_account_content_stats; unique_authors
+    # is the one column no other endpoint returns.
+    request:
+      url: "{rewriter_url}/network/content-volume"
+      method: GET
+      params: {select: "unique_authors"}
     response: {status_code: 200}
+
   - name: network vote-stats
-    request: {url: "{rewriter_url}/network/vote-stats", method: GET}
+    request:
+      url: "{rewriter_url}/network/vote-stats"
+      method: GET
+      params: {select: "downvote_pct"}
     response: {status_code: 200}
+
   - name: network daily-active-users
-    request: {url: "{rewriter_url}/network/daily-active-users", method: GET}
+    request:
+      url: "{rewriter_url}/network/daily-active-users"
+      method: GET
+      params: {select: "active_accounts"}
     response: {status_code: 200}
+
   - name: network author-retention
-    request: {url: "{rewriter_url}/network/author-retention", method: GET}
+    # Shares the whole 30d/90d cohort block with get_network_account_funnel, which
+    # is exactly the confusable pair; first_post_accounts separates them.
+    request:
+      url: "{rewriter_url}/network/author-retention"
+      method: GET
+      params: {select: "first_post_accounts"}
     response: {status_code: 200}
+
   - name: network account-funnel
-    request: {url: "{rewriter_url}/network/account-funnel", method: GET}
+    request:
+      url: "{rewriter_url}/network/account-funnel"
+      method: GET
+      params: {select: "new_accounts"}
     response: {status_code: 200}
+
   - name: governance influence-concentration
-    request: {url: "{rewriter_url}/governance/influence-concentration", method: GET}
+    request:
+      url: "{rewriter_url}/governance/influence-concentration"
+      method: GET
+      params: {select: "gini"}
     response: {status_code: 200}
+
   - name: network hp-distribution
-    request: {url: "{rewriter_url}/network/hp-distribution", method: GET}
+    request:
+      url: "{rewriter_url}/network/hp-distribution"
+      method: GET
+      params: {select: "pct_accounts"}
     response: {status_code: 200}
+
   - name: network top-custom-json
-    request: {url: "{rewriter_url}/network/top-custom-json", method: GET}
+    request:
+      url: "{rewriter_url}/network/top-custom-json"
+      method: GET
+      params: {select: "json_id"}
     response: {status_code: 200}
+
   - name: network custom-json-usage
-    # json_id is documented required (400 without it), so pass one -- this stage is
-    # about routing, and the missing-param contract has its own negative test.
+    # The ONE endpoint with no unique return column -- period/op_count/op_bytes/
+    # rc_estimate are all shared with get_network_top_custom_json. Discriminated by
+    # the parameter instead: json_id is declared by no other function (PGRST202
+    # elsewhere) and is documented required, so it has to be supplied anyway.
     request:
       url: "{rewriter_url}/network/custom-json-usage"
       method: GET
-      params: {json_id: "follow"}
+      params: {json_id: "follow", select: "op_bytes"}
     response: {status_code: 200}
+
   - name: network rc-utilization
-    request: {url: "{rewriter_url}/network/rc-utilization", method: GET}
+    request:
+      url: "{rewriter_url}/network/rc-utilization"
+      method: GET
+      params: {select: "rc_total"}
     response: {status_code: 200}
+
   - name: custom-json-app-registry
-    request: {url: "{rewriter_url}/custom-json-app-registry", method: GET}
+    request:
+      url: "{rewriter_url}/custom-json-app-registry"
+      method: GET
+      params: {select: "app_id_pattern"}
     response: {status_code: 200}
+
+  # --- the six account rules. All six take `account` with no default, and all six
+  #     return 200 for any account, so the column is what identifies the target.
   - name: account dapp-footprint
-    request: {url: "{rewriter_url}/account/ixalice/dapp-footprint", method: GET}
+    # Scalar jsonb, so no select= -- but it ECHOES the account, which no sibling
+    # does, and that doubles as the $1 proof asserted in the second document.
+    request:
+      url: "{rewriter_url}/account/dapptester/dapp-footprint"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2020-06-30"}
+    response:
+      status_code: 200
+      json:
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        total_ops: !anyint
+        total_rc_estimated: !anyint
+        top_category: !anystr
+        top_dapp: !anystr
+        categories: !anything
+        dapps: !anything
+
+  - name: account rc-footprint-timeline
+    request:
+      url: "{rewriter_url}/account/ixalice/rc-footprint-timeline"
+      method: GET
+      params: {select: "op_seq"}
     response: {status_code: 200}
+
+  - name: account rc-footprint
+    request:
+      url: "{rewriter_url}/account/ixalice/rc-footprint"
+      method: GET
+      params: {select: "pct"}
+    response: {status_code: 200}
+
+  - name: account interactions
+    request:
+      url: "{rewriter_url}/account/ixalice/interactions"
+      method: GET
+      params: {select: "partner_rank"}
+    response: {status_code: 200}
+
   - name: account community-activity
-    request: {url: "{rewriter_url}/account/ixalice/community-activity", method: GET}
+    request:
+      url: "{rewriter_url}/account/ixalice/community-activity"
+      method: GET
+      params: {select: "post_count"}
     response: {status_code: 200}
+
   - name: account content-stats
-    request: {url: "{rewriter_url}/account/ixalice/content-stats", method: GET}
+    request:
+      url: "{rewriter_url}/account/ixalice/content-stats"
+      method: GET
+      params: {select: "votes_received"}
     response: {status_code: 200}
+
   - name: account financial-summary
-    request: {url: "{rewriter_url}/account/ixalice/financial-summary", method: GET}
+    request:
+      url: "{rewriter_url}/account/ixalice/financial-summary"
+      method: GET
+      params: {select: "direction"}
     response: {status_code: 200}
-  - name: the OpenAPI spec root
+
+  # --- the three scalar endpoints: no columns, so assert the shape instead
+  - name: version returns a bare string, which no other endpoint returns
+    request: {url: "{rewriter_url}/version", method: GET}
+    response:
+      status_code: 200
+      json: !anystr
+
+  - name: health returns the four-column row SET, not an object
+    # The set-vs-object distinction is the reason the OpenAPI annotation for this
+    # endpoint had to be corrected in this same MR (type: object -> array).
+    request:
+      url: "{rewriter_url}/health"
+      method: GET
+      params: {select: "community_data_ready"}
+    response:
+      status_code: 200
+      json:
+        - community_data_ready: !anybool
+
+  - name: sync-status returns the two-key object
+    request: {url: "{rewriter_url}/sync-status", method: GET}
+    response:
+      status_code: 200
+      json:
+        last_block_num: !anyint
+        last_block_time: !re_fullmatch '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+
+  # --- the two structural rules
+  - name: the OpenAPI spec root is served, not proxied to a function
+    # Discriminated on the content type rather than the body: PostgREST answers the
+    # root with application/openapi+json and no /rpc/ route does, so repointing
+    # `^/$` at any function fails here. Asserting the body would mean pinning
+    # PostgREST's exact top-level key set, which is its business, not ours.
     request: {url: "{rewriter_url}/", method: GET}
-    response: {status_code: 200}
+    response:
+      status_code: 200
+      headers:
+        content-type: !re_search "openapi"
+
   - name: the catch-all forwards an unmapped name to /rpc/
     request: {url: "{rewriter_url}/get_version", method: GET}
-    response: {status_code: 200}
+    response:
+      status_code: 200
+      json: !anystr
+
   - name: an unknown path is a clean 404, not a hang
+    # Also the guard on the spec-root rule: de-anchoring `^/$` to `^/` would make
+    # every unmatched path serve the spec with a 200 instead of this 404.
     request: {url: "{rewriter_url}/no-such-endpoint", method: GET}
     response: {status_code: 404}
 
 ---
-test_name: Rules route to the RIGHT endpoint, not merely to a 200
+test_name: Rules stay anchored, and the account really is substituted
 
 marks:
   - synthetic
@@ -98,65 +267,141 @@ includes:
   - !include ../common.yaml
   - !include rewriter_common.yaml
 
-# `status_code: 200` does not prove routing. A review demonstrated it: pointing the
-# /version rule at get_health, or /account/<a>/rc-footprint at
-# get_account_interactions, left the suite green -- the target also answers 200. The
-# three account endpoints are worse than that, because they all return 200 with an
-# EMPTY array for an account that does not exist, so even the fixture bought nothing.
+# Two mutation classes the first document cannot see, both single-edit and both
+# realistic, because scripts/openapi_rewrite.sh generates these rules and the
+# anchoring is applied by one sed expression:
 #
-# Each stage below carries something only its intended function accepts or returns:
-#   * a parameter unique to that function -- PostgREST answers 404 PGRST202 when no
-#     overload matches, so a mis-pointed rule fails loudly;
-#   * or a body shape the wrong function cannot produce.
+#   1. DROPPING THE TRAILING `$`. Every stage above requests the exact path, which
+#      an unanchored rule still matches -- so the whole file stayed green. Here each
+#      rule is probed with a one-character suffix, which must fall through to the
+#      catch-all and 404. This is the guard with real teeth for the rc-footprint /
+#      rc-footprint-timeline pair: those two rules are kept apart ONLY by the
+#      anchor, and the previous revision claimed to test that while actually
+#      requiring a compound mutation (de-anchor AND reorder) to go red.
+#
+#   2. WIDENING `([^/]+)` to `(.*)` in the six account rules, which would swallow
+#      arbitrary path depth.
+#
+# Then the `$1` substitution itself. A rule that hardcodes an account instead of
+# substituting the capture is invisible to a 200 check, since every account yields
+# 200. Two endpoints can prove it outright -- dapp-footprint echoes the account
+# back, and ixtester has interaction fixtures no other account has -- and the rest
+# are probed with an account that does not exist, which must come back empty.
 stages:
-  - name: version returns a bare string, which get_health cannot
-    request: {url: "{rewriter_url}/version", method: GET}
-    response:
-      status_code: 200
-      json: !anystr
+  # --- 1. anchoring: every rule must reject a suffixed path
+  - name: witnesses missed-blocks stays anchored
+    request: {url: "{rewriter_url}/witnesses/missed-blocksX", method: GET}
+    response: {status_code: 404}
+  - name: network top-accounts stays anchored
+    request: {url: "{rewriter_url}/network/top-accountsX", method: GET}
+    response: {status_code: 404}
+  - name: network engagement stays anchored
+    request: {url: "{rewriter_url}/network/engagementX", method: GET}
+    response: {status_code: 404}
+  - name: network content-volume stays anchored
+    request: {url: "{rewriter_url}/network/content-volumeX", method: GET}
+    response: {status_code: 404}
+  - name: network vote-stats stays anchored
+    request: {url: "{rewriter_url}/network/vote-statsX", method: GET}
+    response: {status_code: 404}
+  - name: network daily-active-users stays anchored
+    request: {url: "{rewriter_url}/network/daily-active-usersX", method: GET}
+    response: {status_code: 404}
+  - name: network author-retention stays anchored
+    request: {url: "{rewriter_url}/network/author-retentionX", method: GET}
+    response: {status_code: 404}
+  - name: network account-funnel stays anchored
+    request: {url: "{rewriter_url}/network/account-funnelX", method: GET}
+    response: {status_code: 404}
+  - name: governance influence-concentration stays anchored
+    request: {url: "{rewriter_url}/governance/influence-concentrationX", method: GET}
+    response: {status_code: 404}
+  - name: network hp-distribution stays anchored
+    request: {url: "{rewriter_url}/network/hp-distributionX", method: GET}
+    response: {status_code: 404}
+  - name: network top-custom-json stays anchored
+    request: {url: "{rewriter_url}/network/top-custom-jsonX", method: GET}
+    response: {status_code: 404}
+  - name: network custom-json-usage stays anchored
+    request: {url: "{rewriter_url}/network/custom-json-usageX", method: GET}
+    response: {status_code: 404}
+  - name: network rc-utilization stays anchored
+    request: {url: "{rewriter_url}/network/rc-utilizationX", method: GET}
+    response: {status_code: 404}
+  - name: custom-json-app-registry stays anchored
+    request: {url: "{rewriter_url}/custom-json-app-registryX", method: GET}
+    response: {status_code: 404}
+  - name: account dapp-footprint stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/dapp-footprintX", method: GET}
+    response: {status_code: 404}
+  - name: account rc-footprint-timeline stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/rc-footprint-timelineX", method: GET}
+    response: {status_code: 404}
+  - name: account rc-footprint stays anchored, and does not swallow the timeline
+    # THE ordering guard. Unanchored, this rule's prefix also matches
+    # /account/<a>/rc-footprint-timeline, and it is generated adjacent to it.
+    request: {url: "{rewriter_url}/account/ixalice/rc-footprintX", method: GET}
+    response: {status_code: 404}
+  - name: account interactions stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/interactionsX", method: GET}
+    response: {status_code: 404}
+  - name: account community-activity stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/community-activityX", method: GET}
+    response: {status_code: 404}
+  - name: account content-stats stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/content-statsX", method: GET}
+    response: {status_code: 404}
+  - name: account financial-summary stays anchored
+    request: {url: "{rewriter_url}/account/ixalice/financial-summaryX", method: GET}
+    response: {status_code: 404}
+  - name: sync-status stays anchored
+    request: {url: "{rewriter_url}/sync-statusX", method: GET}
+    response: {status_code: 404}
+  - name: health stays anchored
+    request: {url: "{rewriter_url}/healthX", method: GET}
+    response: {status_code: 404}
+  - name: version stays anchored
+    request: {url: "{rewriter_url}/versionX", method: GET}
+    response: {status_code: 404}
 
-  - name: health returns the four-column row set
-    request: {url: "{rewriter_url}/health", method: GET}
+  # --- 2. the account capture must not cross a path separator
+  - name: the account capture does not span a slash
+    # `(.*)` here would make /account/a/b/rc-footprint route to the footprint
+    # endpoint with account="a/b" instead of falling through to a 404.
+    request: {url: "{rewriter_url}/account/ixalice/extra/rc-footprint", method: GET}
+    response: {status_code: 404}
+  - name: the account capture does not span a slash on the timeline rule
+    request: {url: "{rewriter_url}/account/ixalice/extra/rc-footprint-timeline", method: GET}
+    response: {status_code: 404}
+  - name: the account capture does not span a slash on interactions
+    request: {url: "{rewriter_url}/account/ixalice/extra/interactions", method: GET}
+    response: {status_code: 404}
+
+  # --- 3. $1 substitution, proved outright where the data allows
+  - name: dapp-footprint echoes back the account taken from the path
+    # A hardcoded account in the rule would echo THAT name here.
+    request:
+      url: "{rewriter_url}/account/dapptester/dapp-footprint"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2020-06-30"}
     response:
       status_code: 200
       json:
-        - status: "ok"
-          last_processed_block: !anyint
-          version: !anystr
-          community_data_ready: !anybool
+        account: "dapptester"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        total_ops: 65
+        total_rc_estimated: 113000
+        top_category: "Gaming"
+        top_dapp: "Splinterlands"
+        categories: !anything
+        dapps: !anything
 
-  - name: sync-status returns the two-key object
-    request: {url: "{rewriter_url}/sync-status", method: GET}
-    response:
-      status_code: 200
-      json:
-        last_block_num: !anyint
-        last_block_time: !anything
-
-  - name: rc-footprint accepts group_by, which only it declares
-    request:
-      url: "{rewriter_url}/account/ixalice/rc-footprint"
-      method: GET
-      params: {group_by: "op_type"}
-    response: {status_code: 200}
-
-  - name: rc-footprint-timeline accepts limit_count, which only it declares
-    # This is the anchoring/ordering guard with teeth. De-anchoring the shorter
-    # rc-footprint rule and hoisting it above this one really does swallow this path
-    # -- a review reproduced it -- and the previous version of this stage stayed green
-    # because get_account_rc_footprint also answers 200 here. It does NOT accept
-    # limit_count, so the swallow now surfaces as PGRST202.
-    request:
-      url: "{rewriter_url}/account/ixalice/rc-footprint-timeline"
-      method: GET
-      params: {limit_count: 1}
-    response: {status_code: 200}
-
-  - name: interactions accepts top_n, and the account really is passed through
-    # Named for what it tests, this time. A rule that hardcodes the account instead
-    # of substituting $1 previously passed, because every account yields 200 and an
-    # empty body. ixtester on 2021-03-01 has fixture rows, so a substituted account
-    # produces THIS body and any other account produces [].
+  - name: interactions returns ixtester's rows, which no other account produces
+    # The full body, matching the sibling at
+    # tests/tavern/get_account_interactions/get_account_interactions.tavern.yaml.
+    # top_n=10 is above every band's partner count, so it truncates nothing -- it is
+    # here as the parameter discriminator (declared by no other function).
     request:
       url: "{rewriter_url}/account/ixtester/interactions"
       method: GET
@@ -167,27 +412,34 @@ stages:
     response:
       status_code: 200
       json:
-        - interaction_type: "reply"
-          partner: "ixalice"
-          interaction_count: 2
-          partner_rank: 1
-          partners_merged: 1
-          covered_from: "2021-03-01"
-        - interaction_type: "reply"
-          partner: "ixbob"
-          interaction_count: 1
-          partner_rank: 2
-          partners_merged: 1
-          covered_from: "2021-03-01"
-        - interaction_type: "vote"
-          partner: "ixalice"
-          interaction_count: 2
-          partner_rank: 1
-          partners_merged: 1
-          covered_from: "2021-03-01"
-        - interaction_type: "vote"
-          partner: "ixbob"
-          interaction_count: 1
-          partner_rank: 2
-          partners_merged: 1
-          covered_from: "2021-03-01"
+        - {interaction_type: "reply", partner: "ixalice", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "reply", partner: "ixbob", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "vote", partner: "ixalice", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "vote", partner: "ixbob", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "transfer", partner: "ixbob", interaction_count: 1, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "reblog", partner: "ixalice", interaction_count: 1, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "follow", partner: "ixbob", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "follow", partner: "ixcarol", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
+
+  # --- 4. the remaining four account rules: an account with no rows must stay empty.
+  #     Weaker than the two above -- it only catches a rule hardcoded to an account
+  #     that HAS data -- but that is the shape a copy-paste mistake actually takes,
+  #     and these four endpoints have no field that echoes the input back.
+  - name: rc-footprint is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint", method: GET}
+    response: {status_code: 200, json: []}
+  - name: rc-footprint-timeline is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint-timeline", method: GET}
+    response: {status_code: 200, json: []}
+  - name: community-activity is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/community-activity", method: GET}
+    response: {status_code: 200, json: []}
+  - name: content-stats is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/content-stats", method: GET}
+    response: {status_code: 200, json: []}
+  - name: financial-summary is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/financial-summary", method: GET}
+    response: {status_code: 200, json: []}
+  - name: interactions is empty for an account that does not exist
+    request: {url: "{rewriter_url}/account/zzz-no-such-account/interactions", method: GET}
+    response: {status_code: 200, json: []}

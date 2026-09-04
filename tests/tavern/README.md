@@ -23,6 +23,24 @@ Exact response values follow the `balance_tracker` convention: each
 values must not use permissive sentinels such as `!anylist`. Shared values
 belong in `common.yaml`.
 
+### Environment variables
+
+Every command below needs `API_URL`, and any command that passes a bare
+`tests/tavern` path also needs `REWRITER_URL` — even when the selection
+deselects the rewriter tests. Tavern resolves an include's variables while
+**collecting** the file, before pytest applies `-m`, so an unset `REWRITER_URL`
+aborts collection of the whole suite with `MissingFormatError`, not just of
+`tests/tavern/rewriter/`.
+
+Only `tests/tavern/rewriter/` (marked `synthetic`) actually requests it, and only
+the `endpoint-tests` lane starts a rewriter, so for local runs any unreachable
+value will do:
+
+```bash
+export API_URL=http://localhost:3000
+export REWRITER_URL=http://rewriter.invalid
+```
+
 Run one endpoint while developing with:
 
 ```bash
