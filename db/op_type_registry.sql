@@ -86,11 +86,17 @@ DROP FUNCTION IF EXISTS haf_stats_app.scanned_op_type_ids();
 -- with the function a previous install of THIS version already created:
 --     ERROR: function "assert_op_types" already exists with same argument types
 -- install_app.sh runs this through psql_cmd (ON_ERROR_STOP=on), so the install aborts
--- with exit 3 -- and under haf_api_node's `restart: on-failure` on the setup service that
--- is a crash loop. Observed on testapi: 33 restarts, recovered only by dropping the
--- function by hand. The first install on a fresh database always worked, which is why it
--- shipped. The three functions above avoid this by dropping their own signatures; this
--- one did not.
+-- with exit 3. That takes the whole app down by the GATING CHAIN, not by any restart
+-- policy: haf-stats-process gates on the installer's service_completed_successfully, and
+-- haf-stats-api gates on that.
+--
+-- Deliberately NOT "restart: on-failure on the setup service". !77 asserted that, was
+-- wrong, and retracted it in scripts/install_app.sh and README.md -- this repo's compose
+-- files contain no `restart:` key at all. It is true of the NODE's own module file, which
+-- is where the 33 restarts observed on testapi came from; it is not true here.
+--
+-- The first install on a fresh database always worked, which is why this shipped. The
+-- three functions above avoid it by dropping their own signatures; this one did not.
 DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types();
 DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types(BOOLEAN);
 DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types(BOOLEAN, BOOLEAN);
