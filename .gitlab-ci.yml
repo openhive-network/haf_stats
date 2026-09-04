@@ -294,6 +294,25 @@ openapi-drift:
         exit 1
       fi
     - echo "endpoints/ matches the generator."
+    # Generator-fidelity is not the same as spec validity, and this MR proved it:
+    # a re-indentation that the generator faithfully reproduced turned the served
+    # spec INVALID (a stray key became a phantom response property) while the diff
+    # check above stayed green. Validate what we actually serve.
+    - pip install openapi-spec-validator -q
+    - |
+      python - <<'PY'
+      import re, sys, json
+      from openapi_spec_validator import OpenAPIV31SpecValidator
+      src = open("endpoints/endpoint_schema.sql", encoding="utf-8").read()
+      m = re.search(r"openapi json = \$\$(.*?)\$\$;", src, re.S)
+      if not m:
+          sys.exit("could not extract the embedded OpenAPI blob")
+      errs = list(OpenAPIV31SpecValidator(json.loads(m.group(1))).iter_errors())
+      for e in errs:
+          print("INVALID:", list(e.absolute_path), "-", str(e)[:200])
+      sys.exit(1 if errs else 0)
+      PY
+    - echo "served OpenAPI document is valid." 
   rules:
     - if: $CI_COMMIT_BRANCH
 

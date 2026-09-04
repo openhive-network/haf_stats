@@ -1,0 +1,10 @@
+---
+name: Rewriter variables
+description: >-
+  Kept OUT of tests/tavern/common.yaml on purpose. Every lane includes that file, but
+  only the endpoint-tests lane starts a rewriter and sets REWRITER_URL -- so defining
+  rewriter_url there made pattern-test and regression-test raise MissingFormatError on
+  every single file that includes it, whether or not the file used the variable.
+
+variables:
+  rewriter_url: "{tavern.env_vars.REWRITER_URL}"

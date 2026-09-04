@@ -455,9 +455,9 @@ DECLARE
                         "type": "string"
                       },
                       "community_data_ready": {
-                        "type": "boolean"
-                      },
-                      "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
+                        "type": "boolean",
+                        "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
+                      }
                     }
                   }
                 }
@@ -2680,12 +2680,13 @@ $$;
                     type: string
                   community_data_ready:
                     type: boolean
-                  description: >-
-                    False when this node has processed past the community start block
-                    (37,500,000) but holds no per-account community rows — i.e. it synced
-                    before the community feature and scripts/rebuild_content_volume.sh has
-                    not been run yet. get_account_community_activity still answers on such
-                    a node, but reports everything under the personal-blog bucket.
+                    description: >-
+                      False when this node has processed past the community start block
+                      (37,500,000) but holds no per-account community rows — i.e. it
+                      synced before the community feature and
+                      scripts/rebuild_content_volume.sh has not been run yet.
+                      get_account_community_activity still answers on such a node, but
+                      reports everything under the personal-blog bucket.
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;

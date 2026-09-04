@@ -6,6 +6,7 @@ marks:
 
 includes:
   - !include ../common.yaml
+  - !include rewriter_common.yaml
 
 # THE GAP THIS CLOSES (#62): every other stage in this suite addresses PostgREST
 # directly at {api_url}/rpc/<fn>, so endpoints/rewrite_rules.conf -- which defines
@@ -19,14 +20,14 @@ includes:
 # the ROUTING -- that /network/engagement reaches get_network_engagement and not
 # something else, or nothing.
 stages:
-  - name: /version reaches get_version
+  - name: version reaches get_version
     request:
       url: "{rewriter_url}/version"
       method: GET
     response:
       status_code: 200
 
-  - name: /health reaches get_health and is a LIST
+  - name: health reaches get_health and is a LIST
     request:
       url: "{rewriter_url}/health"
       method: GET
@@ -40,7 +41,7 @@ stages:
           version: !anystr
           community_data_ready: !anybool
 
-  - name: /sync-status reaches get_sync_status
+  - name: sync-status reaches get_sync_status
     request:
       url: "{rewriter_url}/sync-status"
       method: GET
@@ -58,27 +59,30 @@ marks:
 
 includes:
   - !include ../common.yaml
+  - !include rewriter_common.yaml
 
 # Capture groups and anchoring, which a hand-edit breaks silently.
-# /account/{a}/rc-footprint-timeline is a DIFFERENT endpoint from
-# /account/{a}/rc-footprint, and the rules are only kept apart by the trailing `$`.
+# /account/<a>/rc-footprint-timeline is a DIFFERENT endpoint from
+# /account/<a>/rc-footprint, and the rules are only kept apart by the trailing `$`.
+# (Angle brackets, not braces: tavern format-expands stage names and comments are
+# fine but names are not -- a literal {account} is read as a missing variable.)
 # Drop the anchor and the shorter rule swallows the longer path.
 stages:
-  - name: /account/{account}/interactions passes the account through
+  - name: the account path parameter is passed through to the query string
     request:
       url: "{rewriter_url}/account/ixalice/interactions"
       method: GET
     response:
       status_code: 200
 
-  - name: /account/{account}/rc-footprint resolves to the footprint endpoint
+  - name: rc-footprint resolves to the footprint endpoint
     request:
       url: "{rewriter_url}/account/ixalice/rc-footprint"
       method: GET
     response:
       status_code: 200
 
-  - name: /account/{account}/rc-footprint-timeline is NOT swallowed by it
+  - name: rc-footprint-timeline is NOT swallowed by the shorter rule
     request:
       url: "{rewriter_url}/account/ixalice/rc-footprint-timeline"
       method: GET
