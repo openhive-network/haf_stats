@@ -125,6 +125,11 @@ services:
     environment:
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: 3000
+      # nginx's access_log records the ORIGINAL request line, so without this a
+      # routing failure shows up as `GET /version ... 404` with no indication of
+      # what it rewrote to -- which is the one fact you need. Costs nothing in a
+      # throwaway CI container.
+      REWRITE_LOG: "on"
     depends_on:
       - postgrest
 

@@ -35,6 +35,13 @@ variables:
   #   roles/schema derived from HAF_APP_ROLE_PREFIX: haf_stats_owner /
   #   haf_stats_user / haf_stats_endpoints / haf_stats_app.
   # ---------------------------------------------------------------------------
+  # Present so tavern can COLLECT tests/tavern/rewriter/ in every lane. Tavern
+  # resolves includes before pytest applies -m, so pattern-test -- which
+  # deselects those tests via `not synthetic` and never starts a rewriter --
+  # still errored on the unresolvable variable. The endpoint-tests lane, the
+  # only one that runs them, overrides this with the compose service name.
+  REWRITER_URL: "http://rewriter"
+
   HAF_APP_NAME: "haf_stats"
   HAF_APP_ROLE_PREFIX: "haf_stats"
   HAF_APP_SCHEMA: "haf_stats_app"
@@ -816,11 +823,19 @@ endpoint-tests:
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
-    - docker compose -f docker/docker-compose-ci.yml up --detach
+    # --build is load-bearing for LOCAL runs of this same file: compose only
+    # builds when the derived image is absent, so after the first run an edit to
+    # endpoints/rewrite_rules.conf would be silently ignored and the suite would
+    # go green on the old rules -- exactly the failure this lane exists to catch.
+    # In CI's ephemeral dind nothing is cached, so it changes nothing there.
+    - docker compose -f docker/docker-compose-ci.yml up --detach --build
     - docker compose -f docker/docker-compose-ci.yml wait tavern
   after_script:
     - docker compose -f docker/docker-compose-ci.yml logs setup
     - docker compose -f docker/docker-compose-ci.yml logs tavern
+    # With REWRITE_LOG=on this is what turns "some path 404'd" into "that rule
+    # rewrote to X".
+    - docker compose -f docker/docker-compose-ci.yml logs rewriter
     - docker compose -f docker/docker-compose-ci.yml down -v
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not

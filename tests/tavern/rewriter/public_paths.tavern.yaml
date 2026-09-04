@@ -1,5 +1,5 @@
 ---
-test_name: Public clean URLs resolve through the rewriter
+test_name: Every rewrite rule routes to its endpoint
 
 marks:
   - synthetic
@@ -12,47 +12,84 @@ includes:
 # directly at {api_url}/rpc/<fn>, so endpoints/rewrite_rules.conf -- which defines
 # every URL a third party actually requests -- was built into an image and never
 # traversed. A removed, mis-ordered or typo'd rule shipped with a green pipeline
-# while the public API 404'd. !72 already hit the ordering half of this, where a new
-# rule had to precede the `^/(.*)$` catch-all or be shadowed by it.
+# while the public API 404'd. !72 already hit the ordering half of that.
 #
-# Asserting status and shape rather than values on purpose: the exact-value contract
-# is the pattern-test lane's job against the real replay. What is under test here is
-# the ROUTING -- that /network/engagement reaches get_network_engagement and not
-# something else, or nothing.
+# One stage per rule, deliberately. An earlier revision of this file covered six of
+# the twenty-four, and a review showed the obvious consequence: deleting the
+# /network/engagement rule, or moving it below the catch-all, left the suite green.
+# It is cheap to be complete here, so be complete.
 stages:
-  - name: version reaches get_version
+  - name: witnesses missed-blocks
+    request: {url: "{rewriter_url}/witnesses/missed-blocks", method: GET}
+    response: {status_code: 200}
+  - name: network top-accounts
+    request: {url: "{rewriter_url}/network/top-accounts", method: GET}
+    response: {status_code: 200}
+  - name: network engagement
+    request: {url: "{rewriter_url}/network/engagement", method: GET}
+    response: {status_code: 200}
+  - name: network content-volume
+    request: {url: "{rewriter_url}/network/content-volume", method: GET}
+    response: {status_code: 200}
+  - name: network vote-stats
+    request: {url: "{rewriter_url}/network/vote-stats", method: GET}
+    response: {status_code: 200}
+  - name: network daily-active-users
+    request: {url: "{rewriter_url}/network/daily-active-users", method: GET}
+    response: {status_code: 200}
+  - name: network author-retention
+    request: {url: "{rewriter_url}/network/author-retention", method: GET}
+    response: {status_code: 200}
+  - name: network account-funnel
+    request: {url: "{rewriter_url}/network/account-funnel", method: GET}
+    response: {status_code: 200}
+  - name: governance influence-concentration
+    request: {url: "{rewriter_url}/governance/influence-concentration", method: GET}
+    response: {status_code: 200}
+  - name: network hp-distribution
+    request: {url: "{rewriter_url}/network/hp-distribution", method: GET}
+    response: {status_code: 200}
+  - name: network top-custom-json
+    request: {url: "{rewriter_url}/network/top-custom-json", method: GET}
+    response: {status_code: 200}
+  - name: network custom-json-usage
+    # json_id is documented required (400 without it), so pass one -- this stage is
+    # about routing, and the missing-param contract has its own negative test.
     request:
-      url: "{rewriter_url}/version"
+      url: "{rewriter_url}/network/custom-json-usage"
       method: GET
-    response:
-      status_code: 200
-
-  - name: health reaches get_health and is a LIST
-    request:
-      url: "{rewriter_url}/health"
-      method: GET
-    response:
-      status_code: 200
-      # A TABLE-returning function serialises as an array. The spec declared this an
-      # object until #62; pinning the shape here keeps the two honest.
-      json:
-        - status: "ok"
-          last_processed_block: !anyint
-          version: !anystr
-          community_data_ready: !anybool
-
-  - name: sync-status reaches get_sync_status
-    request:
-      url: "{rewriter_url}/sync-status"
-      method: GET
-    response:
-      status_code: 200
-      json:
-        last_block_num: !anyint
-        last_block_time: !anything
+      params: {json_id: "follow"}
+    response: {status_code: 200}
+  - name: network rc-utilization
+    request: {url: "{rewriter_url}/network/rc-utilization", method: GET}
+    response: {status_code: 200}
+  - name: custom-json-app-registry
+    request: {url: "{rewriter_url}/custom-json-app-registry", method: GET}
+    response: {status_code: 200}
+  - name: account dapp-footprint
+    request: {url: "{rewriter_url}/account/ixalice/dapp-footprint", method: GET}
+    response: {status_code: 200}
+  - name: account community-activity
+    request: {url: "{rewriter_url}/account/ixalice/community-activity", method: GET}
+    response: {status_code: 200}
+  - name: account content-stats
+    request: {url: "{rewriter_url}/account/ixalice/content-stats", method: GET}
+    response: {status_code: 200}
+  - name: account financial-summary
+    request: {url: "{rewriter_url}/account/ixalice/financial-summary", method: GET}
+    response: {status_code: 200}
+  - name: the OpenAPI spec root
+    request: {url: "{rewriter_url}/", method: GET}
+    response: {status_code: 200}
+  - name: the catch-all forwards an unmapped name to /rpc/
+    request: {url: "{rewriter_url}/get_version", method: GET}
+    response: {status_code: 200}
+  - name: an unknown path is a clean 404, not a hang
+    request: {url: "{rewriter_url}/no-such-endpoint", method: GET}
+    response: {status_code: 404}
 
 ---
-test_name: Rewriter path parameters and rule ordering
+test_name: Rules route to the RIGHT endpoint, not merely to a 200
 
 marks:
   - synthetic
@@ -61,44 +98,96 @@ includes:
   - !include ../common.yaml
   - !include rewriter_common.yaml
 
-# Capture groups and anchoring, which a hand-edit breaks silently.
-# /account/<a>/rc-footprint-timeline is a DIFFERENT endpoint from
-# /account/<a>/rc-footprint, and the rules are only kept apart by the trailing `$`.
-# (Angle brackets, not braces: tavern format-expands stage names and comments are
-# fine but names are not -- a literal {account} is read as a missing variable.)
-# Drop the anchor and the shorter rule swallows the longer path.
+# `status_code: 200` does not prove routing. A review demonstrated it: pointing the
+# /version rule at get_health, or /account/<a>/rc-footprint at
+# get_account_interactions, left the suite green -- the target also answers 200. The
+# three account endpoints are worse than that, because they all return 200 with an
+# EMPTY array for an account that does not exist, so even the fixture bought nothing.
+#
+# Each stage below carries something only its intended function accepts or returns:
+#   * a parameter unique to that function -- PostgREST answers 404 PGRST202 when no
+#     overload matches, so a mis-pointed rule fails loudly;
+#   * or a body shape the wrong function cannot produce.
 stages:
-  - name: the account path parameter is passed through to the query string
-    request:
-      url: "{rewriter_url}/account/ixalice/interactions"
-      method: GET
+  - name: version returns a bare string, which get_health cannot
+    request: {url: "{rewriter_url}/version", method: GET}
     response:
       status_code: 200
+      json: !anystr
 
-  - name: rc-footprint resolves to the footprint endpoint
+  - name: health returns the four-column row set
+    request: {url: "{rewriter_url}/health", method: GET}
+    response:
+      status_code: 200
+      json:
+        - status: "ok"
+          last_processed_block: !anyint
+          version: !anystr
+          community_data_ready: !anybool
+
+  - name: sync-status returns the two-key object
+    request: {url: "{rewriter_url}/sync-status", method: GET}
+    response:
+      status_code: 200
+      json:
+        last_block_num: !anyint
+        last_block_time: !anything
+
+  - name: rc-footprint accepts group_by, which only it declares
     request:
       url: "{rewriter_url}/account/ixalice/rc-footprint"
       method: GET
-    response:
-      status_code: 200
+      params: {group_by: "op_type"}
+    response: {status_code: 200}
 
-  - name: rc-footprint-timeline is NOT swallowed by the shorter rule
+  - name: rc-footprint-timeline accepts limit_count, which only it declares
+    # This is the anchoring/ordering guard with teeth. De-anchoring the shorter
+    # rc-footprint rule and hoisting it above this one really does swallow this path
+    # -- a review reproduced it -- and the previous version of this stage stayed green
+    # because get_account_rc_footprint also answers 200 here. It does NOT accept
+    # limit_count, so the swallow now surfaces as PGRST202.
     request:
       url: "{rewriter_url}/account/ixalice/rc-footprint-timeline"
       method: GET
+      params: {limit_count: 1}
+    response: {status_code: 200}
+
+  - name: interactions accepts top_n, and the account really is passed through
+    # Named for what it tests, this time. A rule that hardcodes the account instead
+    # of substituting $1 previously passed, because every account yields 200 and an
+    # empty body. ixtester on 2021-03-01 has fixture rows, so a substituted account
+    # produces THIS body and any other account produces [].
+    request:
+      url: "{rewriter_url}/account/ixtester/interactions"
+      method: GET
+      params:
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+        top_n: 10
     response:
       status_code: 200
-
-  - name: the catch-all still forwards an unmapped name to /rpc/
-    request:
-      url: "{rewriter_url}/get_version"
-      method: GET
-    response:
-      status_code: 200
-
-  - name: an unknown path is a clean 404, not a hang
-    request:
-      url: "{rewriter_url}/no-such-endpoint"
-      method: GET
-    response:
-      status_code: 404
+      json:
+        - interaction_type: "reply"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "reply"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: "ixalice"
+          interaction_count: 2
+          partner_rank: 1
+          partners_merged: 1
+          covered_from: "2021-03-01"
+        - interaction_type: "vote"
+          partner: "ixbob"
+          interaction_count: 1
+          partner_rank: 2
+          partners_merged: 1
+          covered_from: "2021-03-01"

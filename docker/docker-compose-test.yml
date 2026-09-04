@@ -156,6 +156,9 @@ services:
       - ../tests/tavern:/tests/tavern:ro
     environment:
       API_URL: "http://haf-stats-api:3000"
+      # Only so tavern can collect tests/tavern/rewriter/; that lane deselects
+      # them (`not negative and not synthetic`) and starts no rewriter.
+      REWRITER_URL: "http://rewriter"
       # Gate: wait until the processor has caught up to the replay head before
       # asserting exact values. Must match the haf service's stop block.
       REPLAY_STOP_AT_BLOCK: "${REPLAY_STOP_AT_BLOCK:-5000000}"
