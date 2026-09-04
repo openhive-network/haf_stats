@@ -113,6 +113,21 @@ services:
       setup:
         condition: service_completed_successfully
 
+  # The rewriter, built from the SHIPPED Dockerfile -- not a stand-in. Until now no
+  # lane started it, so endpoints/rewrite_rules.conf was built into an image and never
+  # requested: a removed, mis-ordered or typo'd rule shipped green while every public
+  # URL 404'd. It also means the published haf_stats rewriter image had never actually
+  # run anywhere (production borrows balance_tracker's with these rules bind-mounted).
+  rewriter:
+    build:
+      context: ..
+      dockerfile: Dockerfile.rewriter
+    environment:
+      POSTGREST_HOST: postgrest
+      POSTGREST_PORT: 3000
+    depends_on:
+      - postgrest
+
   tavern:
     image: python:3.12-slim
     # Pin pytest<9: pytest 9 dropped _pytest._code.code.FormattedExcinfo, which
@@ -124,7 +139,10 @@ services:
       - ../tests/tavern:/tests/tavern:ro
     environment:
       API_URL: "http://postgrest:3000"
+      # The URL an operator (and haf_api_node's HAProxy backend) actually requests.
+      REWRITER_URL: "http://rewriter"
       PYTHONPATH: "/tests/tavern"
       TAVERN_DIR: "/tests/tavern"
     depends_on:
       - postgrest
+      - rewriter

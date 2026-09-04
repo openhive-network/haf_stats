@@ -268,6 +268,35 @@ sql-lint:
     # the MR. Matches balance_tracker.
     - if: $CI_COMMIT_BRANCH
 
+openapi-drift:
+  stage: lint
+  image: python:3.12-slim
+  needs: []
+  script:
+    # endpoints/endpoint_schema.sql's embedded spec and endpoints/rewrite_rules.conf
+    # are GENERATED from the /** openapi:paths */ annotations, by a script a developer
+    # is expected to remember to run ("Run this after adding or changing endpoint
+    # annotations, then commit the result"). Nothing enforced it, so an annotation
+    # edit without a regeneration -- or a hand-edit of either generated file -- shipped
+    # silently, and the served spec could describe an API the rewriter does not route.
+    #
+    # This regenerates and fails on any diff. It is also what keeps the pin in
+    # scripts/openapi_rewrite.sh honest: if common-ci-configuration's generator ever
+    # changes output, this job goes red rather than a later MR carrying an unrelated
+    # reformat of every endpoint.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl >/dev/null
+    - bash scripts/openapi_rewrite.sh
+    - |
+      if ! git diff --quiet -- endpoints/; then
+        echo "ERROR: endpoints/ is not what scripts/openapi_rewrite.sh generates."
+        echo "Run it locally and commit the result. Diff:"
+        git --no-pager diff -- endpoints/
+        exit 1
+      fi
+    - echo "endpoints/ matches the generator."
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
 shell-lint:
   stage: lint
   # Pinned, for the reason sql-lint pins sqlfluff: an unpinned linter means a drifting

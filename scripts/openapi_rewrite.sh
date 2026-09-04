@@ -11,11 +11,22 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENDPOINTS_DIR="${SCRIPTDIR}/../endpoints"
 OUTPUT_DIR="${SCRIPTDIR}/openapi_out"
 
-COMMON_CI_REF="${COMMON_CI_REF:-develop}"
+# PINNED, not "develop": the generator is fetched at run time, so a moving ref
+# means the same annotations can produce different artifacts on different days
+# with nothing to signal it. 1.28.6 is the tag the rest of the stack pins to
+# (HIVE_API_NODE_VERSION), and its process_openapi.py is byte-identical to
+# develop's today, so pinning changes no output.
+COMMON_CI_REF="${COMMON_CI_REF:-1.28.6}"
 COMMON_CI_URL="https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}"
 PROCESS_OPENAPI="${SCRIPTDIR}/process_openapi.py"
 
-if [[ ! -f "${PROCESS_OPENAPI}" ]]; then
+# Always re-fetch. Skipping when the file already exists (it is gitignored) meant a
+# stale cached helper from an older ref silently produced different artifacts than a
+# colleague's -- the same class of drift the pin above prevents, one level down. Set
+# COMMON_CI_OFFLINE=1 to reuse a local copy deliberately.
+if [[ "${COMMON_CI_OFFLINE:-0}" == "1" && -f "${PROCESS_OPENAPI}" ]]; then
+    echo "Using cached process_openapi.py (COMMON_CI_OFFLINE=1)"
+else
     echo "Fetching process_openapi.py from common-ci-configuration (ref: ${COMMON_CI_REF})..."
     curl -fsSL "${COMMON_CI_URL}/haf-app-tools/python/process_openapi.py" -o "${PROCESS_OPENAPI}"
 fi

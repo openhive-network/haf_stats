@@ -1,0 +1,100 @@
+---
+test_name: Public clean URLs resolve through the rewriter
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# THE GAP THIS CLOSES (#62): every other stage in this suite addresses PostgREST
+# directly at {api_url}/rpc/<fn>, so endpoints/rewrite_rules.conf -- which defines
+# every URL a third party actually requests -- was built into an image and never
+# traversed. A removed, mis-ordered or typo'd rule shipped with a green pipeline
+# while the public API 404'd. !72 already hit the ordering half of this, where a new
+# rule had to precede the `^/(.*)$` catch-all or be shadowed by it.
+#
+# Asserting status and shape rather than values on purpose: the exact-value contract
+# is the pattern-test lane's job against the real replay. What is under test here is
+# the ROUTING -- that /network/engagement reaches get_network_engagement and not
+# something else, or nothing.
+stages:
+  - name: /version reaches get_version
+    request:
+      url: "{rewriter_url}/version"
+      method: GET
+    response:
+      status_code: 200
+
+  - name: /health reaches get_health and is a LIST
+    request:
+      url: "{rewriter_url}/health"
+      method: GET
+    response:
+      status_code: 200
+      # A TABLE-returning function serialises as an array. The spec declared this an
+      # object until #62; pinning the shape here keeps the two honest.
+      json:
+        - status: "ok"
+          last_processed_block: !anyint
+          version: !anystr
+          community_data_ready: !anybool
+
+  - name: /sync-status reaches get_sync_status
+    request:
+      url: "{rewriter_url}/sync-status"
+      method: GET
+    response:
+      status_code: 200
+      json:
+        last_block_num: !anyint
+        last_block_time: !anything
+
+---
+test_name: Rewriter path parameters and rule ordering
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Capture groups and anchoring, which a hand-edit breaks silently.
+# /account/{a}/rc-footprint-timeline is a DIFFERENT endpoint from
+# /account/{a}/rc-footprint, and the rules are only kept apart by the trailing `$`.
+# Drop the anchor and the shorter rule swallows the longer path.
+stages:
+  - name: /account/{account}/interactions passes the account through
+    request:
+      url: "{rewriter_url}/account/ixalice/interactions"
+      method: GET
+    response:
+      status_code: 200
+
+  - name: /account/{account}/rc-footprint resolves to the footprint endpoint
+    request:
+      url: "{rewriter_url}/account/ixalice/rc-footprint"
+      method: GET
+    response:
+      status_code: 200
+
+  - name: /account/{account}/rc-footprint-timeline is NOT swallowed by it
+    request:
+      url: "{rewriter_url}/account/ixalice/rc-footprint-timeline"
+      method: GET
+    response:
+      status_code: 200
+
+  - name: the catch-all still forwards an unmapped name to /rpc/
+    request:
+      url: "{rewriter_url}/get_version"
+      method: GET
+    response:
+      status_code: 200
+
+  - name: an unknown path is a clean 404, not a hang
+    request:
+      url: "{rewriter_url}/no-such-endpoint"
+      method: GET
+    response:
+      status_code: 404
