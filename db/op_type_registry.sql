@@ -80,8 +80,20 @@ DROP FUNCTION IF EXISTS haf_stats_app.scanned_op_type_literals();
 DROP FUNCTION IF EXISTS haf_stats_app.scanned_op_type_ids();
 -- Signature changed (gained the fatal-scan scope flag), so the old 0-arg form has to go:
 -- CREATE OR REPLACE would leave it behind as an overload and every call would be ambiguous.
+--
+-- THE CURRENT SIGNATURE IS DROPPED TOO, and that line is the whole point of #60. The two
+-- below cover the HISTORICAL forms; without the third, a plain CREATE FUNCTION collides
+-- with the function a previous install of THIS version already created:
+--     ERROR: function "assert_op_types" already exists with same argument types
+-- install_app.sh runs this through psql_cmd (ON_ERROR_STOP=on), so the install aborts
+-- with exit 3 -- and under haf_api_node's `restart: on-failure` on the setup service that
+-- is a crash loop. Observed on testapi: 33 restarts, recovered only by dropping the
+-- function by hand. The first install on a fresh database always worked, which is why it
+-- shipped. The three functions above avoid this by dropping their own signatures; this
+-- one did not.
 DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types();
 DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types(BOOLEAN);
+DROP FUNCTION IF EXISTS haf_stats_app.assert_op_types(BOOLEAN, BOOLEAN);
 
 CREATE FUNCTION haf_stats_app.expected_op_type_names()
 RETURNS TABLE (op_name TEXT, expected_id INT, used_by TEXT)
