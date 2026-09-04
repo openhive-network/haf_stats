@@ -4,7 +4,10 @@
 #
 # Run this after adding or changing endpoint annotations, then commit the result.
 #
-# Requires: pip install deepmerge jsonpointer pyyaml
+# Requires: network access (fetches process_openapi.py from common-ci-configuration)
+#           and pip. Set COMMON_CI_OFFLINE=1 to reuse an already-downloaded
+#           scripts/process_openapi.py instead of re-fetching -- for working
+#           behind a proxy. Dependencies are installed by this script.
 
 set -euo pipefail
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,10 +16,15 @@ OUTPUT_DIR="${SCRIPTDIR}/openapi_out"
 
 # PINNED, not "develop": the generator is fetched at run time, so a moving ref
 # means the same annotations can produce different artifacts on different days
-# with nothing to signal it. 1.28.6 is the tag the rest of the stack pins to
-# (HIVE_API_NODE_VERSION), and its process_openapi.py is byte-identical to
-# develop's today, so pinning changes no output.
-COMMON_CI_REF="${COMMON_CI_REF:-1.28.6}"
+# with nothing to signal it.
+#
+# This default MUST match COMMON_CI_REF in .gitlab-ci.yml, which the repo already
+# pins and which GitLab injects into every job -- so in CI this line never fires.
+# It only applies to a developer running the script by hand, and the whole point
+# is that they regenerate with the same generator CI validates against. An earlier
+# revision defaulted to the 1.28.6 TAG here, which silently made local and CI use
+# different refs: exactly the divergence this comment claims to prevent.
+COMMON_CI_REF="${COMMON_CI_REF:-96889a650b3f45244cecc4bb3f250af439a71900}"
 COMMON_CI_URL="https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}"
 PROCESS_OPENAPI="${SCRIPTDIR}/process_openapi.py"
 
@@ -31,7 +39,12 @@ else
     curl -fsSL "${COMMON_CI_URL}/haf-app-tools/python/process_openapi.py" -o "${PROCESS_OPENAPI}"
 fi
 
-pip install deepmerge jsonpointer pyyaml -q
+# Pinned for the same reason as the generator itself: this script's contract is
+# byte-identical output, and deepmerge's Merger drives the fragment merge -- a
+# strategy change there would rewrite the blob repo-wide. Every sibling CI job
+# pins its tooling (sqlfluff==3.3.0, pytest<9, shellcheck v0.11.0); this was the
+# one reproducibility input left floating at PyPI latest.
+pip install deepmerge==2.0 jsonpointer==3.1.1 pyyaml==6.0.3 -q
 
 echo "Running process_openapi.py..."
 # IMPORTANT: pass a RELATIVE input path and run from the repo root. The generator

@@ -287,9 +287,24 @@ openapi-drift:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl >/dev/null
     - bash scripts/openapi_rewrite.sh
     - |
-      if ! git diff --quiet -- endpoints/; then
+      # git status, not `git diff`: diff ignores UNTRACKED files, and a failed run can
+      # leave scripts/openapi_out/ or a repo-root rewrite_rules.conf behind that the
+      # gate would not see. --porcelain is stable output by contract.
+      #
+      # Capture the status explicitly rather than `if ! git ...`: git exits 0 (clean),
+      # 1 (differs) and >=128 on ERROR, and treating them alike turns a runner-side
+      # git problem (dubious-ownership, a GIT_STRATEGY override) into
+      # "endpoints/ is not what the generator produces" followed by an EMPTY diff,
+      # sending the author to regenerate a file that was already correct.
+      changed="$(git status --porcelain -- endpoints/)"; rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "ERROR: git failed (exit $rc) -- this is a runner problem, not drift."
+        exit 1
+      fi
+      if [ -n "$changed" ]; then
         echo "ERROR: endpoints/ is not what scripts/openapi_rewrite.sh generates."
-        echo "Run it locally and commit the result. Diff:"
+        echo "Run it locally and commit the result."
+        echo "$changed"
         git --no-pager diff -- endpoints/
         exit 1
       fi
