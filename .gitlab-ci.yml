@@ -35,6 +35,23 @@ variables:
   #   roles/schema derived from HAF_APP_ROLE_PREFIX: haf_stats_owner /
   #   haf_stats_user / haf_stats_endpoints / haf_stats_app.
   # ---------------------------------------------------------------------------
+  # Present ONLY so tavern can COLLECT tests/tavern/rewriter/ in every lane.
+  # Tavern resolves an include's variables while collecting the file, which
+  # happens before pytest applies -m, so pattern-test -- which deselects those
+  # tests via `not synthetic` and never starts a rewriter -- still died on the
+  # unresolvable variable, taking the whole suite with it.
+  #
+  # .invalid is reserved by RFC 2606 and guaranteed never to resolve. That is the
+  # point: this value must never be reachable. If a mark is ever dropped and one
+  # of these tests actually RUNS in a lane with no rewriter, it fails immediately
+  # with NXDOMAIN. A plausible name like "http://rewriter" could resolve through a
+  # runner's DNS search suffix, and nothing here sets a request timeout, so the
+  # lane would hang until the job limit instead.
+  #
+  # The real address lives in docker/docker-compose-ci.yml, on the one service
+  # that runs these tests against a rewriter that is actually up.
+  REWRITER_URL: "http://rewriter.invalid"
+
   HAF_APP_NAME: "haf_stats"
   HAF_APP_ROLE_PREFIX: "haf_stats"
   HAF_APP_SCHEMA: "haf_stats_app"
@@ -266,6 +283,83 @@ sql-lint:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
+    - if: $CI_COMMIT_BRANCH
+
+openapi-drift:
+  stage: lint
+  image: python:3.12-slim
+  needs: []
+  script:
+    # endpoints/endpoint_schema.sql's embedded spec and endpoints/rewrite_rules.conf
+    # are GENERATED from the /** openapi:paths */ annotations, by a script a developer
+    # is expected to remember to run ("Run this after adding or changing endpoint
+    # annotations, then commit the result"). Nothing enforced it, so an annotation
+    # edit without a regeneration -- or a hand-edit of either generated file -- shipped
+    # silently, and the served spec could describe an API the rewriter does not route.
+    #
+    # This regenerates and fails on any diff, so the artifacts always match the
+    # annotations they claim to describe.
+    #
+    # What it does NOT do is police the generator: the script fetches it from
+    # ${COMMON_CI_REF}, which GitLab injects into this job, so the pin inside
+    # scripts/openapi_rewrite.sh is never exercised here. Generator output cannot
+    # drift without someone editing the pin -- which is the intended property, but
+    # it also means nothing enforces that the script's default and this file's
+    # COMMON_CI_REF stay equal. They are equal today; keep them so by hand.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl >/dev/null
+    - bash scripts/openapi_rewrite.sh
+    - |
+      # git status, not `git diff`: diff ignores UNTRACKED files, so a new endpoint
+      # whose generated artifact is not yet added would slip through. --porcelain is
+      # stable output by contract. (The pathspec scopes this to endpoints/; the
+      # script's own leftovers elsewhere are handled by its EXIT trap, and a failed
+      # run fails the job at the step above regardless.)
+      #
+      # Capture the status explicitly rather than `if ! git ...`: git exits 0 (clean),
+      # 1 (differs) and >=128 on ERROR, and treating them alike turns a runner-side
+      # git problem (dubious-ownership, a GIT_STRATEGY override) into
+      # "endpoints/ is not what the generator produces" followed by an EMPTY diff,
+      # sending the author to regenerate a file that was already correct.
+      # `if ! changed=$(...)`, not a separate $? test: gitlab-runner emits
+      # `set -eo pipefail` at the top of the job script, so a failing command
+      # substitution in a plain assignment kills the shell before $? is ever read.
+      # The rc branch below only runs because the assignment is inside `if !`.
+      if ! changed="$(git status --porcelain -- endpoints/)"; then
+        echo "ERROR: git failed -- this is a runner problem, not drift."
+        exit 1
+      fi
+      if [ -n "$changed" ]; then
+        echo "ERROR: endpoints/ is not what scripts/openapi_rewrite.sh generates."
+        echo "Run it locally and commit the result."
+        echo "$changed"
+        git --no-pager diff -- endpoints/
+        exit 1
+      fi
+    - echo "endpoints/ matches the generator."
+    # Generator-fidelity is not the same as spec validity, and this MR proved it:
+    # a re-indentation that the generator faithfully reproduced turned the served
+    # spec INVALID (a stray key became a phantom response property) while the diff
+    # check above stayed green. Validate what we actually serve.
+    # Pinned like every other tool in this file. The hadolint job a few hundred
+    # lines down carries the note explaining why: an unpinned linter started
+    # failing this pipeline with no repo change. A validator release that adds or
+    # tightens an OpenAPI 3.1 rule would do exactly that here.
+    - pip install openapi-spec-validator==0.9.0 -q
+    - |
+      python - <<'PY'
+      import re, sys, json
+      from openapi_spec_validator import OpenAPIV31SpecValidator
+      src = open("endpoints/endpoint_schema.sql", encoding="utf-8").read()
+      m = re.search(r"openapi json = \$\$(.*?)\$\$;", src, re.S)
+      if not m:
+          sys.exit("could not extract the embedded OpenAPI blob")
+      errs = list(OpenAPIV31SpecValidator(json.loads(m.group(1))).iter_errors())
+      for e in errs:
+          print("INVALID:", list(e.absolute_path), "-", str(e)[:200])
+      sys.exit(1 if errs else 0)
+      PY
+    - echo "served OpenAPI document is valid." 
+  rules:
     - if: $CI_COMMIT_BRANCH
 
 shell-lint:
@@ -753,11 +847,21 @@ endpoint-tests:
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
-    - docker compose -f docker/docker-compose-ci.yml up --detach
+    # --build is load-bearing for LOCAL runs of this same file: compose only
+    # builds when the derived image is absent, so after the first run an edit to
+    # endpoints/rewrite_rules.conf would be silently ignored and the suite would
+    # go green on the old rules -- exactly the failure this lane exists to catch.
+    # In CI's ephemeral dind nothing is cached, so it changes nothing there.
+    - docker compose -f docker/docker-compose-ci.yml up --detach --build
     - docker compose -f docker/docker-compose-ci.yml wait tavern
   after_script:
     - docker compose -f docker/docker-compose-ci.yml logs setup
     - docker compose -f docker/docker-compose-ci.yml logs tavern
+    # With REWRITE_LOG=on this is what turns "some path 404'd" into "that rule
+    # rewrote to X". `|| true` because after_script runs under set -e: if the build
+    # failed the service has no container, and a non-zero here would skip the
+    # `down -v` below.
+    - docker compose -f docker/docker-compose-ci.yml logs rewriter || true
     - docker compose -f docker/docker-compose-ci.yml down -v
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not

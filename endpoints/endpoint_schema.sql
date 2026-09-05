@@ -440,21 +440,24 @@ DECLARE
               "application/json": {
                 "schema": {
                   "x-sql-datatype": "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)",
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "example": "ok"
-                    },
-                    "last_processed_block": {
-                      "type": "integer"
-                    },
-                    "version": {
-                      "type": "string"
-                    },
-                    "community_data_ready": {
-                      "type": "boolean",
-                      "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "example": "ok"
+                      },
+                      "last_processed_block": {
+                        "type": "integer"
+                      },
+                      "version": {
+                        "type": "string"
+                      },
+                      "community_data_ready": {
+                        "type": "boolean",
+                        "description": "False when this node has processed past the community start block (37,500,000) but holds no per-account community rows \u2014 i.e. it synced before the community feature and scripts/rebuild_content_volume.sh has not been run yet. get_account_community_activity still answers on such a node, but reports everything under the personal-blog bucket."
+                      }
                     }
                   }
                 }
@@ -1470,7 +1473,7 @@ DECLARE
           {
             "in": "query",
             "name": "json_id",
-            "required": false,
+            "required": true,
             "schema": {
               "x-sql-datatype": "TEXT",
               "x-sql-default-value": "NULL",
@@ -2659,23 +2662,31 @@ $$;
           application/json:
             schema:
               x-sql-datatype: "TABLE(status TEXT, last_processed_block INT, version TEXT, community_data_ready BOOLEAN)"
-              type: object
-              properties:
-                status:
-                  type: string
-                  example: ok
-                last_processed_block:
-                  type: integer
-                version:
-                  type: string
-                community_data_ready:
-                  type: boolean
-                  description: >-
-                    False when this node has processed past the community start block
-                    (37,500,000) but holds no per-account community rows — i.e. it synced
-                    before the community feature and scripts/rebuild_content_volume.sh has
-                    not been run yet. get_account_community_activity still answers on such
-                    a node, but reports everything under the personal-blog bucket.
+              # ARRAY, not object. The function is RETURNS TABLE(...), so PostgREST
+              # serialises it as a list -- live: [{"status":"ok",...}]. Declared as an
+              # object, a generated client reads .status off a list and breaks. Every
+              # other TABLE-returning endpoint here is already declared as an array;
+              # this one was the exception.
+              type: array
+              items:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  last_processed_block:
+                    type: integer
+                  version:
+                    type: string
+                  community_data_ready:
+                    type: boolean
+                    description: >-
+                      False when this node has processed past the community start block
+                      (37,500,000) but holds no per-account community rows — i.e. it
+                      synced before the community feature and
+                      scripts/rebuild_content_volume.sh has not been run yet.
+                      get_account_community_activity still answers on such a node, but
+                      reports everything under the personal-blog bucket.
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
@@ -4901,7 +4912,11 @@ $$;
     parameters:
       - in: query
         name: json_id
-        required: false
+        # The description below has always said "required (400 if omitted)", and live
+        # confirms it: omitting it returns 400 22023 "json_id is required". Declared
+        # optional, Swagger UI's "Try it" and any generated client emit a call that
+        # cannot succeed.
+        required: true
         schema:
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
