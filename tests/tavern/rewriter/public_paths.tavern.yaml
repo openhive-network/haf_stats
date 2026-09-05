@@ -144,9 +144,23 @@ stages:
 
   # --- the six account rules. All six take `account` with no default, and all six
   #     return 200 for any account, so the column is what identifies the target.
+  #
+  #     ixalice deliberately has no rows on any of them, and these stages
+  #     deliberately assert no data. PostgREST resolves a select= column against the
+  #     function's declared OUT parameters when it plans the query, so an unknown
+  #     column is 42703 whether or not a row comes back -- which is the point: the
+  #     routing check cannot be weakened by a fixture change. Do not "fix" this by
+  #     adding data assertions; the sibling suites own the values.
   - name: account dapp-footprint
-    # Scalar jsonb, so no select= -- but it ECHOES the account, which no sibling
-    # does, and that doubles as the $1 proof asserted in the second document.
+    # The one account endpoint returning scalar jsonb, so there is no select= to
+    # apply. It is identified instead by returning an OBJECT carrying top_dapp,
+    # which no other endpoint produces -- every sibling returns an array. The
+    # account echo it also carries is what the second document uses to prove $1
+    # substitution; here the assertion is deliberately shape-only, so this stage
+    # stays a routing check and the fixture values live in exactly one place.
+    # Keeps dapptester and the June-2020 window: that is the request the fixture is
+    # built for, so the object is known to be populated. Only the VALUES are
+    # relaxed, which is the duplication being removed.
     request:
       url: "{rewriter_url}/account/dapptester/dapp-footprint"
       method: GET
@@ -155,12 +169,12 @@ stages:
       status_code: 200
       json:
         account: "dapptester"
-        from_date: "2020-06-01"
-        to_date: "2020-06-30"
+        from_date: !anything
+        to_date: !anything
         total_ops: !anyint
         total_rc_estimated: !anyint
-        top_category: !anystr
-        top_dapp: !anystr
+        top_category: !anything
+        top_dapp: !anything
         categories: !anything
         dapps: !anything
 
@@ -234,11 +248,17 @@ stages:
         last_block_time: !re_fullmatch '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
 
   # --- the two structural rules
-  - name: the OpenAPI spec root is served, not proxied to a function
-    # Discriminated on the content type rather than the body: PostgREST answers the
-    # root with application/openapi+json and no /rpc/ route does, so repointing
-    # `^/$` at any function fails here. Asserting the body would mean pinning
-    # PostgREST's exact top-level key set, which is its business, not ours.
+  - name: the spec root is served, not proxied to a function
+    # Discriminated on the content type rather than the body: the root answers with
+    # application/openapi+json and no /rpc/ route does, so repointing `^/$` at any
+    # function fails here, and deleting the rule sends `/` to the catch-all.
+    #
+    # Scope, so this is not read as more than it is: what CI serves at `/` is
+    # PostgREST's OWN auto-generated spec, because PGRST_DB_ROOT_SPEC is set only in
+    # haf_api_node/haf_stats.yaml and in none of this repo's compose files. So this
+    # stage covers the RULE, not the curated haf_stats_endpoints.root() document --
+    # nothing here exercises that, and #61 is where the shipped stack's missing
+    # rewriter and unset root spec belong.
     request: {url: "{rewriter_url}/", method: GET}
     response:
       status_code: 200
@@ -379,21 +399,28 @@ stages:
 
   # --- 3. $1 substitution, proved outright where the data allows
   - name: dapp-footprint echoes back the account taken from the path
-    # A hardcoded account in the rule would echo THAT name here.
+    # Deliberately NOT dapptester, the account this endpoint's fixture is built
+    # for: a rule hardcoded to dapptester would echo "dapptester" here and go red.
+    # Probing the fixture account instead passes under exactly that mutation,
+    # which is what an earlier revision of this stage did.
+    #
+    # ixalice has no custom_json rows, and the function builds the same object on
+    # both branches, so the key set is stable and only the echo is asserted -- the
+    # values live once, in the sibling suite that owns them.
     request:
-      url: "{rewriter_url}/account/dapptester/dapp-footprint"
+      url: "{rewriter_url}/account/ixalice/dapp-footprint"
       method: GET
       params: {from_date: "2020-06-01", to_date: "2020-06-30"}
     response:
       status_code: 200
       json:
-        account: "dapptester"
+        account: "ixalice"
         from_date: "2020-06-01"
         to_date: "2020-06-30"
-        total_ops: 65
-        total_rc_estimated: 113000
-        top_category: "Gaming"
-        top_dapp: "Splinterlands"
+        total_ops: !anyint
+        total_rc_estimated: !anyint
+        top_category: !anything
+        top_dapp: !anything
         categories: !anything
         dapps: !anything
 
@@ -421,25 +448,58 @@ stages:
         - {interaction_type: "follow", partner: "ixbob", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
         - {interaction_type: "follow", partner: "ixcarol", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
 
-  # --- 4. the remaining four account rules: an account with no rows must stay empty.
-  #     Weaker than the two above -- it only catches a rule hardcoded to an account
-  #     that HAS data -- but that is the shape a copy-paste mistake actually takes,
-  #     and these four endpoints have no field that echoes the input back.
+  # --- 4. the remaining account probes: an unknown account must come back empty.
+  #     Weaker than the two above -- this only catches a rule hardcoded to an
+  #     account that HAS data -- but that is the shape a copy-paste mistake takes,
+  #     and these endpoints have no field echoing the input back.
+  #
+  #     EVERY probe passes an explicit window, and that is load-bearing rather than
+  #     decorative. On the endpoints' DEFAULT windows these stages were vacuous: the
+  #     stub's newest block is 2021-06-01, so a NOW()-30d default resolves to no
+  #     block range at all and every account -- fixture or not -- comes back empty.
+  #     A rule hardcoded to a real account would have passed all of them. The
+  #     windows below are the ones the fixtures actually occupy, so a hardcoded
+  #     account produces rows and the stage goes red.
   - name: rc-footprint is empty for an account that does not exist
-    request: {url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint", method: GET}
+    request:
+      url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2021-03-10"}
     response: {status_code: 200, json: []}
   - name: rc-footprint-timeline is empty for an account that does not exist
-    request: {url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint-timeline", method: GET}
+    request:
+      url: "{rewriter_url}/account/zzz-no-such-account/rc-footprint-timeline"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2021-03-10"}
     response: {status_code: 200, json: []}
   - name: community-activity is empty for an account that does not exist
+    # The one probe with teeth on the default window too, since it filters the
+    # activity day directly against a genesis default.
     request: {url: "{rewriter_url}/account/zzz-no-such-account/community-activity", method: GET}
     response: {status_code: 200, json: []}
   - name: content-stats is empty for an account that does not exist
-    request: {url: "{rewriter_url}/account/zzz-no-such-account/content-stats", method: GET}
+    request:
+      url: "{rewriter_url}/account/zzz-no-such-account/content-stats"
+      method: GET
+      params: {from_date: "2019-10-01", to_date: "2020-06-30"}
     response: {status_code: 200, json: []}
-  - name: financial-summary is empty for an account that does not exist
-    request: {url: "{rewriter_url}/account/zzz-no-such-account/financial-summary", method: GET}
+  - name: financial-summary is a well-formed empty result
+    # Honest label: this one CANNOT be a substitution probe in this lane.
+    # haf_stats_backend.account_financial_daily has no writer in the stub setup
+    # chain (db/process_financial.sql is not run), so the table is empty for every
+    # account and no window makes this stage discriminate. It stays a shape and
+    # reachability check; substitution for this rule is covered by its anchoring
+    # probe above and by the select= stage in the first document.
+    request:
+      url: "{rewriter_url}/account/zzz-no-such-account/financial-summary"
+      method: GET
+      params: {from_date: "2019-10-01", to_date: "2021-06-01"}
     response: {status_code: 200, json: []}
   - name: interactions is empty for an account that does not exist
-    request: {url: "{rewriter_url}/account/zzz-no-such-account/interactions", method: GET}
+    # Same window as the ixtester stage above, so the pair is a two-sided check:
+    # that account yields eight rows, this one yields none.
+    request:
+      url: "{rewriter_url}/account/zzz-no-such-account/interactions"
+      method: GET
+      params: {from_date: "2021-03-01", to_date: "2021-03-01"}
     response: {status_code: 200, json: []}

@@ -14,9 +14,12 @@ scripts/process_openapi.py
 tests/tavern/.pytest_cache/
 *.log
 
-# Fetched on demand by scripts/openapi_rewrite.sh (not vendored)
-
 # Created by scripts/openapi_rewrite.sh: a private virtualenv for the pinned
-# generator dependencies, and the generator's staging tree.
-scripts/.openapi_venv/
+# generator dependencies, the generator's staging tree, and the rewrite_rules.conf
+# the generator drops in the CWD. All three are removed by the script's EXIT trap;
+# they are ignored as well because the repo-root one in particular lands where a
+# `git add -A` would sweep it up, and the drift gate is scoped to endpoints/ so it
+# would not be seen there either.
+.openapi_venv/
 scripts/openapi_out/
+/rewrite_rules.conf

@@ -6,7 +6,8 @@
 #
 # Requires: python3 with the venv module, and network access -- it fetches
 #           process_openapi.py from common-ci-configuration and installs three
-#           pinned packages into a PRIVATE virtualenv under scripts/.openapi_venv.
+#           pinned packages into a PRIVATE virtualenv at .openapi_venv/ in the
+#           repo root (gitignored).
 #           Nothing is installed into your system or user site-packages.
 #
 #           COMMON_CI_OFFLINE=1 reuses both the downloaded generator and the
@@ -19,7 +20,11 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPTDIR}/.."
 ENDPOINTS_DIR="${REPO_ROOT}/endpoints"
 OUTPUT_DIR="${SCRIPTDIR}/openapi_out"
-VENV_DIR="${SCRIPTDIR}/.openapi_venv"
+# Deliberately at the repo ROOT, not under scripts/: shell-lint runs
+# `find scripts/ docker/ -name "*.sh"` and sql-lint runs `sqlfluff lint scripts/`,
+# and find descends dot-directories. A venv under scripts/ would put third-party
+# package contents in both jobs' path.
+VENV_DIR="${REPO_ROOT}/.openapi_venv"
 OFFLINE="${COMMON_CI_OFFLINE:-0}"
 
 # The generator drops rewrite_rules.conf into the CWD it is run from, which is the
