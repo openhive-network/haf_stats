@@ -61,16 +61,16 @@ print_help() {
 # environment rather than being overridden by it.
 for arg in "$@"; do
     case "$arg" in
-        --swagger-url=*) SWAGGER_URL="${arg#*=}" ;;
+        --swagger-url=*) require_flag_value "$arg"; SWAGGER_URL="${arg#*=}" ;;
 
         # Matching balance_tracker, haf_block_explorer and hivesense, whose docker
         # entrypoints forward these. Without them the documented upstream operator form,
         # `run --rm <svc> install_app --host=haf`, fails on an app claiming to implement
         # the same contract. balance_tracker spells it --postgres-host and takes nothing
         # else; the other two use --host. The trio does not agree, so accept both.
-        --host=*|--postgres-host=*) POSTGRES_HOST="${arg#*=}" ;;
-        --port=*|--postgres-port=*) POSTGRES_PORT="${arg#*=}" ;;
-        --user=*|--postgres-user=*) POSTGRES_USER="${arg#*=}" ;;
+        --host=*|--postgres-host=*) require_flag_value "$arg"; POSTGRES_HOST="${arg#*=}" ;;
+        --port=*|--postgres-port=*) require_flag_value "$arg"; POSTGRES_PORT="${arg#*=}" ;;
+        --user=*|--postgres-user=*) require_flag_value "$arg"; POSTGRES_USER="${arg#*=}" ;;
 
         # RECOGNISED AND REFUSED, deliberately -- not warn-and-continue like --schema,
         # and not "is not a valid option" either.

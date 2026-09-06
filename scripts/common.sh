@@ -13,6 +13,27 @@ log() {
     echo "[haf_stats $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
 }
 
+# shellcheck source=arg_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/arg_guard.sh"
+
+# The same values reach these variables through the ENVIRONMENT, where the flag guard
+# never runs. Empty is already handled: the `:=` above is the COLON form, which
+# substitutes on unset OR null, so POSTGRES_HOST="" becomes haf. Whitespace-only is not,
+# and without this the identical value would be refused as --host=" " and accepted as
+# POSTGRES_HOST=" " -- the same operator error, opposite verdicts, depending only on
+# which channel it arrived through.
+for _var in POSTGRES_HOST POSTGRES_PORT POSTGRES_DB POSTGRES_USER; do
+    case "${!_var}" in
+        *[![:space:]]*) : ;;
+        *)  log "ERROR: ${_var} is set to a whitespace-only value."
+            log "       Refused for the same reason as the equivalent flag: it cannot"
+            log "       be what the caller meant."
+            exit 2
+            ;;
+    esac
+done
+unset _var
+
 wait_for_postgres() {
     log "Waiting for PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}..."
     until pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -q; do

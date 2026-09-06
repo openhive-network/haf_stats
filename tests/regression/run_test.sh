@@ -21,15 +21,18 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=../../scripts/arg_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../scripts/arg_guard.sh"
+
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_USER="${POSTGRES_USER:-haf_admin}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --host=*) POSTGRES_HOST="${1#*=}" ;;
-        --port=*) POSTGRES_PORT="${1#*=}" ;;
-        --user=*) POSTGRES_USER="${1#*=}" ;;
+        --host=*) require_flag_value "$1"; POSTGRES_HOST="${1#*=}" ;;
+        --port=*) require_flag_value "$1"; POSTGRES_PORT="${1#*=}" ;;
+        --user=*) require_flag_value "$1"; POSTGRES_USER="${1#*=}" ;;
         --help|-h) echo "Usage: $0 [--host=H] [--port=P] [--user=U]"; exit 0 ;;
         *) echo "ERROR: unknown option: $1"; exit 1 ;;
     esac

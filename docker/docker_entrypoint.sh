@@ -33,10 +33,10 @@ usage() {
 usage: $0 <verb> [args...]
 
 verbs:
-  install_app [--swagger-url=HOST] [--is_forking=FALSE] [--host=] [--port=] [--user=]
+  install_app [--swagger-url=HOST] [--is_forking=FALSE] [--host=HOST] [--port=PORT] [--user=USER]
                                      install/upgrade schemas, endpoints and roles
   process_blocks                     run the block-processing loop (blocks forever)
-  uninstall_app [--force] [--host=] [--port=] [--user=]
+  uninstall_app [--force] [--host=HOST] [--port=PORT] [--user=USER]
                                      remove context, schemas and roles (DESTRUCTIVE)
 
 Connection settings default from the environment -- POSTGRES_HOST (haf),
