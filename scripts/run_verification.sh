@@ -62,6 +62,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# shellcheck source=arg_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/arg_guard.sh"
+
 MODE="compose"
 PG_HOST=""
 PG_PORT="5432"
@@ -69,9 +72,9 @@ PG_USER="haf_admin"
 
 for arg in "$@"; do
   case "$arg" in
-    --host=*) PG_HOST="${arg#*=}"; MODE="tcp" ;;
-    --port=*) PG_PORT="${arg#*=}" ;;
-    --user=*) PG_USER="${arg#*=}" ;;
+    --host=*) require_flag_value "$arg"; PG_HOST="${arg#*=}"; MODE="tcp" ;;
+    --port=*) require_flag_value "$arg"; PG_PORT="${arg#*=}" ;;
+    --user=*) require_flag_value "$arg"; PG_USER="${arg#*=}" ;;
     --help|-h)
       echo "Usage: $0 [--host=H [--port=P] [--user=U]]"
       echo "  no args        run against docker-compose-test.yml's haf container (local)"

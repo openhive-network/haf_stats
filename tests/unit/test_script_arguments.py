@@ -558,26 +558,83 @@ def test_a_valid_connection_flag_value_is_still_accepted(bash, tmp_path):
         )
 
 
-def test_every_connection_flag_in_the_loop_is_guarded():
-    """Source-text, and honest about it: this is a completeness check over the option
-    loop, not a behavioural one. It exists because the behavioural tests above can only
-    cover flags someone remembered to list, and the failure mode for #67 was precisely
-    that a guard was added to one flag and not its neighbours.
+CONNECTION_FLAGS = ("--host", "--port", "--user", "--postgres-url", "--url",
+                    "--postgres-host", "--postgres-port", "--postgres-user",
+                    "--postgres-access")
 
-    Any option arm that assigns a POSTGRES_* variable must call require_flag_value
-    first.
+# Every shell file in the repo, discovered rather than listed. The first version of this
+# test listed the three scripts the fix touched, and was therefore blind to the three it
+# did not -- including tests/regression/run_test.sh, which CREATEs a schema on whatever
+# it connects to. Discovery is the point: a new script with a --host= arm has to be
+# guarded or fail here, without anyone remembering to add it.
+def _all_shell_files() -> list[Path]:
+    root = Path(__file__).resolve().parents[2]
+    found = [p for p in root.rglob("*.sh")
+             if ".git" not in p.parts and "node_modules" not in p.parts]
+    assert len(found) > 5, f"shell-file discovery found only {len(found)} files"
+    return sorted(found)
+
+
+def test_every_connection_flag_arm_validates_its_value():
+    """Source-text, and honest about it: a completeness check, not a behavioural one.
+    The behavioural tests can only cover flags and scripts someone remembered to list,
+    and forgetting a neighbour is exactly how #67 arose -- twice. The first fix for it
+    guarded three scripts and missed three more.
+
+    An arm is recognised by SHAPE -- `--flag=*)` that assigns from ${arg#*=} or ${1#*=}
+    -- not by the variable it assigns to, because one of the missed scripts assigns to
+    PG_HOST rather than POSTGRES_HOST.
     """
     missing = []
-    for script in (INSTALL, UNINSTALL, PROCESS):
-        for line in script.read_text(encoding="utf-8").splitlines():
+    considered = 0
+    for script in _all_shell_files():
+        for lineno, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
-            if not stripped.startswith("--") or "POSTGRES_" not in stripped:
+            if not stripped.startswith("--"):
                 continue
-            if "=${arg#*=}" not in stripped.replace(" ", ""):
+            flag = stripped.split("=")[0].split(")")[0].split("|")[0]
+            if flag not in CONNECTION_FLAGS:
                 continue
+            squashed = stripped.replace(" ", "")
+            # an assignment from the argument itself, in either spelling
+            if "${arg#*=}" not in squashed and "${1#*=}" not in squashed:
+                continue
+            considered += 1
             if "require_flag_value" not in stripped:
-                missing.append(f"{script.name}: {stripped}")
+                rel = script.relative_to(Path(__file__).resolve().parents[2])
+                missing.append(f"{rel}:{lineno}: {stripped}")
+
+    # The FIRST version of this test was vacuous, not merely narrow: its filter looked
+    # for the substring "=${arg#*=}", but the arms are written
+    # POSTGRES_HOST="${arg#*=}" -- a quote sits between the = and the $. It considered
+    # ZERO arms and passed with every guard deleted. Assert the scan found something, so
+    # the next reformatting cannot silently switch this test off.
+    assert considered >= 12, (
+        f"the completeness scan matched only {considered} option arms, which means its "
+        f"pattern has gone stale rather than that the repo got safer"
+    )
     assert not missing, (
-        "these option arms assign a connection variable without checking the value "
-        "first, which is the #67 bug:\n  " + "\n  ".join(missing)
+        "these option arms take a connection value without validating it first, which "
+        "is the #67 bug. An empty value is not ignored by libpq -- it substitutes its "
+        "own default, and for --host= that is the local socket:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_the_guard_is_reachable_from_every_script_that_uses_it():
+    """A script can call require_flag_value and still be broken, if it never sourced the
+    file that defines it -- and three of the six do NOT source common.sh, deliberately:
+    inheriting its POSTGRES_* defaults would change what they connect to.
+    """
+    unsourced = []
+    for script in _all_shell_files():
+        text = script.read_text(encoding="utf-8")
+        if "require_flag_value" not in text:
+            continue
+        if "arg_guard.sh" in text or "common.sh" in text:
+            continue
+        unsourced.append(script.name)
+    assert not unsourced, (
+        "these call require_flag_value without sourcing anything that defines it: "
+        + ", ".join(unsourced)
     )

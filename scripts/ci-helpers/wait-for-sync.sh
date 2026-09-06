@@ -26,12 +26,15 @@ OPTIONS:
 EOF
 }
 
+# shellcheck source=../arg_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../arg_guard.sh"
+
 POSTGRES_ACCESS="postgresql://haf_admin@localhost:5432/haf_block_log"
 TIMEOUT=5400
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --postgres-access=*) POSTGRES_ACCESS="${1#*=}" ;;
+    --postgres-access=*) require_flag_value "$1"; POSTGRES_ACCESS="${1#*=}" ;;
     --timeout=*)         TIMEOUT="${1#*=}" ;;
     --help|-h|-\?)       print_help; exit 0 ;;
     *) echo "ERROR: '$1' is not a valid option"; print_help; exit 2 ;;

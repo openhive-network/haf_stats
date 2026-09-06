@@ -61,7 +61,7 @@ print_help() {
 # environment rather than being overridden by it.
 for arg in "$@"; do
     case "$arg" in
-        --swagger-url=*) SWAGGER_URL="${arg#*=}" ;;
+        --swagger-url=*) require_flag_value "$arg"; SWAGGER_URL="${arg#*=}" ;;
 
         # Matching balance_tracker, haf_block_explorer and hivesense, whose docker
         # entrypoints forward these. Without them the documented upstream operator form,
