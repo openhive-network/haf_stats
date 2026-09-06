@@ -69,6 +69,20 @@ TYPE_ALIASES = {
     "serial4": "serial", "serial8": "bigserial",
 }
 
+# Types whose canonical name is several words. These must be recognised BEFORE the
+# "a leading identifier is the parameter name" heuristic, which cannot tell
+# `v DOUBLE PRECISION` from `DOUBLE PRECISION` and silently kept `precision`.
+# Longest first, so TIMESTAMP WITH TIME ZONE wins over TIMESTAMP.
+MULTIWORD_TYPES = sorted(
+    (
+        "timestamp without time zone", "timestamp with time zone",
+        "time without time zone", "time with time zone",
+        "national character varying", "national character",
+        "character varying", "bit varying", "double precision",
+    ),
+    key=len, reverse=True,
+)
+
 
 def _installed_sql_files() -> list[Path]:
     """The files install_app.sh actually executes.
@@ -177,16 +191,53 @@ def _split_args(arglist: str) -> list[str]:
 
 
 def _arg_type(arg: str) -> str:
-    """The normalised TYPE of one argument, discarding mode, name and DEFAULT."""
+    """The normalised TYPE of one argument, discarding mode, name and DEFAULT.
+
+    Returns "" for an OUT parameter, which callers drop: PostgreSQL identifies a
+    function by its IN/INOUT/VARIADIC argument types only, so an OUT parameter is not
+    part of the signature DROP FUNCTION matches on. Counting them made this test demand
+    a DROP for a function that does not exist -- accepted by IF EXISTS, leaving the real
+    one in place, with the suite green.
+    """
     a = re.sub(r"(?i)\bDEFAULT\b.*$", "", arg).strip()
-    a = re.sub(r"(?i)^(IN|OUT|INOUT|VARIADIC)\s+", "", a).strip()
+    mode = re.match(r"(?i)^(IN|OUT|INOUT|VARIADIC)\s+", a)
+    if mode:
+        if mode.group(1).upper() == "OUT":
+            return ""
+        a = a[mode.end():].strip()
+
+    a = re.sub(r"\(.*?\)", "", a)            # NUMERIC(10,2) -> NUMERIC
+    a = re.sub(r"\s+", " ", a).strip()
+
+    # Array-ness is part of the identity: f(text) and f(text[]) are different
+    # functions. Capture it before any name-stripping, and put it back at the end.
+    suffix = ""
+    while a.endswith("]"):
+        stripped = re.sub(r"\[\s*\]$", "", a)
+        if stripped == a:
+            break
+        suffix += "[]"
+        a = stripped.strip()
+
+    low = a.lower()
+    for mw in MULTIWORD_TYPES:
+        if low == mw:
+            return mw + suffix
+        # `<name> <multiword type>` -- the name is whatever precedes it.
+        if low.endswith(" " + mw):
+            return mw + suffix
+
     # A leading identifier is the parameter NAME only if something follows it.
     parts = a.split()
     if len(parts) > 1 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0], re.I):
         a = " ".join(parts[1:])
-    a = re.sub(r"\(.*?\)", "", a)            # NUMERIC(10,2) -> NUMERIC
-    a = re.sub(r"\s+", " ", a).strip().lower().rstrip("[] ")
-    return TYPE_ALIASES.get(a, a)
+    a = a.strip().lower()
+    return TYPE_ALIASES.get(a, a) + suffix
+
+
+def _signature_of(arglist: str) -> tuple:
+    """The tuple PostgreSQL would match a DROP against: OUT parameters removed."""
+    return tuple(t for t in (_arg_type(a) for a in _split_args(arglist)) if t)
 
 
 def _balanced_args(text: str, open_paren: int) -> str:
@@ -205,7 +256,7 @@ def _signatures(pattern, text: str) -> list[tuple[str, tuple[str, ...], int]]:
     out = []
     for m in pattern.finditer(text):
         args = _balanced_args(text, text.index("(", m.end() - 1))
-        types = tuple(_arg_type(a) for a in _split_args(args))
+        types = _signature_of(args)
         out.append((m.group(1).lower().replace('"', ""), types, m.start()))
     return out
 
@@ -278,7 +329,12 @@ def test_other_object_types_are_created_idempotently(path: Path):
     the highest-risk class, and one the first version did not scan.
     """
     text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
-    kinds = ("TYPE", "SCHEMA", "TABLE", "INDEX", "UNIQUE INDEX", "VIEW",
+    # No "UNIQUE INDEX": the exemption search is built from the same string, so it
+    # looked for `DROP UNIQUE INDEX IF EXISTS`, which is a syntax error -- the only way
+    # to satisfy the assertion was IF NOT EXISTS or invalid SQL. Indexes drop with
+    # DROP INDEX regardless of uniqueness, and the INDEX pattern below already matches
+    # CREATE UNIQUE INDEX via the optional qualifier.
+    kinds = ("TYPE", "SCHEMA", "TABLE", "INDEX", "VIEW",
              "MATERIALIZED VIEW", "SEQUENCE", "TRIGGER", "POLICY", "EXTENSION")
     problems = []
     for kind in kinds:
@@ -286,7 +342,7 @@ def test_other_object_types_are_created_idempotently(path: Path):
         # UNNAMED (CREATE INDEX ON tbl (...)), where PostgreSQL derives the name. The
         # first cut captured "CONCURRENTLY" and "ON" as object names.
         pat = re.compile(
-            r"(?i)^[ \t]*CREATE\s+(?:UNLOGGED\s+)?%s\s+(?:CONCURRENTLY\s+)?"
+            r"(?i)^[ \t]*CREATE\s+(?:UNLOGGED\s+|UNIQUE\s+)?%s\s+(?:CONCURRENTLY\s+)?"
             r"(?!IF\s+NOT\s+EXISTS)(?!ON\b)(?!CONCURRENTLY\b)([a-z0-9_.\"]+)"
             % kind.replace(" ", r"\s+"), re.MULTILINE)
         for m in pat.finditer(text):
@@ -321,12 +377,30 @@ def test_other_object_types_are_created_idempotently(path: Path):
         ("flag BOOL DEFAULT TRUE, n INT4", ("boolean", "integer")),
         ("", ()),
         ("BOOLEAN, BOOLEAN", ("boolean", "boolean")),
-        ("VARIADIC parts TEXT[]", ("text",)),
+        # An array is NOT its element type -- f(text) and f(text[]) are different
+        # functions. This case previously expected ("text",), which made the test
+        # accept a DROP that resolves nothing: #60 with an array type.
+        ("VARIADIC parts TEXT[]", ("text[]",)),
         ("s VARCHAR(64)", ("character varying",)),
+        # Multi-word types, in BOTH spellings. The DROP form omits the parameter name
+        # -- it is what pg_dump emits -- and used to normalise to a different string
+        # than the CREATE form, flagging correct code.
+        ("DOUBLE PRECISION", ("double precision",)),
+        ("v DOUBLE PRECISION", ("double precision",)),
+        ("TIMESTAMP WITH TIME ZONE", ("timestamp with time zone",)),
+        ("ts TIMESTAMP WITH TIME ZONE", ("timestamp with time zone",)),
+        ("TIMESTAMPTZ", ("timestamp with time zone",)),
+        # Distinct types that both used to collapse to "varying".
+        ("CHARACTER VARYING", ("character varying",)),
+        ("BIT VARYING", ("bit varying",)),
+        # OUT parameters are not part of the identity DROP FUNCTION matches on.
+        ("a integer, OUT b text", ("integer",)),
+        ("INOUT a integer", ("integer",)),
+        ("_from DATE, OUT lead_from DATE, OUT lead_to DATE", ("date",)),
     ],
 )
 def test_the_signature_parser(arglist, expected):
-    assert tuple(_arg_type(a) for a in _split_args(arglist)) == expected
+    assert _signature_of(arglist) == expected
 
 
 def test_block_comments_are_stripped():
