@@ -66,6 +66,19 @@ TYPE_ALIASES = {
     "int8": "bigint", "float4": "real", "float8": "double precision",
     "varchar": "character varying", "char": "character", "decimal": "numeric",
     "timestamptz": "timestamp with time zone", "timetz": "time with time zone",
+    # The bare spellings ARE the "without time zone" types. pg_dump and \df print the
+    # long form, which is where a DROP list gets copied from, so without these the two
+    # spellings of one type normalised differently and flagged each other.
+    "timestamp": "timestamp without time zone", "time": "time without time zone",
+    # NATIONAL is discarded sugar -- these ARE character varying / character, and no
+    # PostgreSQL catalog ever prints the NATIONAL spelling. They were briefly listed in
+    # MULTIWORD_TYPES, which normalised a real type to a name the other side of the
+    # pair could not match, regressing correct code.
+    "national character varying": "character varying",
+    "national char varying": "character varying",
+    "char varying": "character varying",
+    "national character": "character", "nchar": "character",
+    "varbit": "bit varying", "dec": "numeric",
     "serial4": "serial", "serial8": "bigserial",
 }
 
@@ -77,8 +90,7 @@ MULTIWORD_TYPES = sorted(
     (
         "timestamp without time zone", "timestamp with time zone",
         "time without time zone", "time with time zone",
-        "national character varying", "national character",
-        "character varying", "bit varying", "double precision",
+        "character varying", "char varying", "bit varying", "double precision",
     ),
     key=len, reverse=True,
 )
@@ -199,7 +211,10 @@ def _arg_type(arg: str) -> str:
     a DROP for a function that does not exist -- accepted by IF EXISTS, leaving the real
     one in place, with the suite green.
     """
-    a = re.sub(r"(?i)\bDEFAULT\b.*$", "", arg).strip()
+    # `=` is a documented synonym for DEFAULT, and this repo writes it
+    # (db/process_account_cohorts.sql, db/process_content_cohorts.sql). Stripping only
+    # DEFAULT normalised `_from_month DATE = NULL` to the non-type `date = null`.
+    a = re.sub(r"(?i)(\bDEFAULT\b|=).*$", "", arg).strip()
     mode = re.match(r"(?i)^(IN|OUT|INOUT|VARIADIC)\s+", a)
     if mode:
         if mode.group(1).upper() == "OUT":
@@ -209,30 +224,62 @@ def _arg_type(arg: str) -> str:
     a = re.sub(r"\(.*?\)", "", a)            # NUMERIC(10,2) -> NUMERIC
     a = re.sub(r"\s+", " ", a).strip()
 
+    # INTERVAL takes field qualifiers (INTERVAL DAY TO SECOND). pg_proc.proargtypes is
+    # an oidvector, so typmods are discarded and every one of them is just `interval`.
+    # Unnamed these normalised to `day to second` and named to `interval day to second`
+    # -- the same DROP/CREATE spelling asymmetry this parser exists to remove.
+    a = re.sub(r"(?i)\b(INTERVAL)\s+(?:YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)"
+               r"(?:\s+TO\s+(?:MONTH|DAY|HOUR|MINUTE|SECOND))?\s*$", r"\1", a).strip()
+
     # Array-ness is part of the identity: f(text) and f(text[]) are different
-    # functions. Capture it before any name-stripping, and put it back at the end.
+    # functions. But DIMENSIONALITY and SIZE are not -- PostgreSQL does not honour
+    # them, so text[], text[][] and text[4] are one type and a DROP naming any of them
+    # resolves the others. Collapse the whole run to a single [].
     suffix = ""
-    while a.endswith("]"):
-        stripped = re.sub(r"\[\s*\]$", "", a)
-        if stripped == a:
+    while True:
+        stripped = re.sub(r"\[\s*\d*\s*\]$", "", a.strip())
+        if stripped == a.strip():
             break
-        suffix += "[]"
-        a = stripped.strip()
+        suffix = "[]"
+        a = stripped
+    a = a.strip()
 
     low = a.lower()
     for mw in MULTIWORD_TYPES:
-        if low == mw:
-            return mw + suffix
-        # `<name> <multiword type>` -- the name is whatever precedes it.
-        if low.endswith(" " + mw):
-            return mw + suffix
+        # Still resolved through TYPE_ALIASES: `char varying` is a real spelling whose
+        # canonical name is `character varying`, and the heuristic below would strip
+        # CHAR as if it were the parameter name and leave the non-type `varying`.
+        if low == mw or low.endswith(" " + mw):
+            return TYPE_ALIASES.get(mw, mw) + suffix
 
     # A leading identifier is the parameter NAME only if something follows it.
+    # A quoted name is still a name. endpoints/endpoint_schema.sql writes
+    # `"from_date" TEXT = NULL` throughout, which the unquoted-only pattern left as the
+    # non-type `"from_date" text`. That shape is what #73's remediation will produce.
     parts = a.split()
-    if len(parts) > 1 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0], re.I):
+    if len(parts) > 1 and re.fullmatch(r'[a-z_][a-z0-9_]*|"[^"]*"', parts[0], re.I):
         a = " ".join(parts[1:])
     a = a.strip().lower()
     return TYPE_ALIASES.get(a, a) + suffix
+
+
+# Not every object kind has an IF NOT EXISTS form. Offering it for TRIGGER, POLICY,
+# VIEW or TYPE prescribes invalid SQL -- the same defect as the DROP UNIQUE INDEX
+# message this file used to emit.
+_REMEDIES = {
+    "TYPE": "CREATE TYPE has no IF NOT EXISTS form: DROP TYPE IF EXISTS it first.",
+    "VIEW": "Use CREATE OR REPLACE VIEW, or DROP VIEW IF EXISTS it first "
+            "(there is no CREATE VIEW IF NOT EXISTS).",
+    "MATERIALIZED VIEW": "Use CREATE MATERIALIZED VIEW IF NOT EXISTS, or DROP it first.",
+    "TRIGGER": "Use CREATE OR REPLACE TRIGGER (PG14+), or DROP TRIGGER IF EXISTS it "
+               "first (there is no CREATE TRIGGER IF NOT EXISTS).",
+    "POLICY": "DROP POLICY IF EXISTS it first (there is no CREATE POLICY IF NOT EXISTS "
+              "and no CREATE OR REPLACE POLICY).",
+}
+
+
+def _remedy_for(kind: str) -> str:
+    return _REMEDIES.get(kind, f"Use CREATE {kind} IF NOT EXISTS, or DROP it first.")
 
 
 def _signature_of(arglist: str) -> tuple:
@@ -267,7 +314,7 @@ def test_the_parser_recognises_every_function_definition(path: Path):
     file then passes with zero findings. This turns every parser blind spot into a loud
     failure instead of a silent pass, which is the single guard the first version most
     needed."""
-    text = _strip_comments(path.read_text(encoding="utf-8"))
+    text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
     loose = len(ANY_CREATE_FN.findall(text))
     strict = len(CREATE_FN.findall(text)) + len(CREATE_OR_REPLACE_FN.findall(text))
     assert loose == strict, (
@@ -285,7 +332,7 @@ def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
     Matched on normalised argument TYPES, not on arity: DROP (BOOLEAN,BOOLEAN) followed
     by CREATE (INT,INT) is the #60 bug exactly, and an arity match waves it through.
     """
-    text = _strip_comments(path.read_text(encoding="utf-8"))
+    text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
     drops = _signatures(DROP_FN, text)
     problems = []
     for name, types, pos in _signatures(CREATE_FN, text):
@@ -357,8 +404,10 @@ def test_other_object_types_are_created_idempotently(path: Path):
                 continue
             problems.append(f"{kind} {name}")
     assert not problems, (
-        f"{path.name}: a re-install aborts on {problems}. Use IF NOT EXISTS, or DROP it "
-        f"first (CREATE TYPE has no IF NOT EXISTS form and always needs the DROP)."
+        f"{path.name}: a re-install aborts on {problems}. "
+        + " ".join(sorted({_remedy_for(k.split()[0] if k.split()[0] != "MATERIALIZED"
+                                       else "MATERIALIZED VIEW")
+                           for k in problems}))
     )
 
 
@@ -397,6 +446,39 @@ def test_other_object_types_are_created_idempotently(path: Path):
         ("a integer, OUT b text", ("integer",)),
         ("INOUT a integer", ("integer",)),
         ("_from DATE, OUT lead_from DATE, OUT lead_to DATE", ("date",)),
+        # `=` is a synonym for DEFAULT and this repo writes it. Stripping only DEFAULT
+        # yielded the non-type `date = null`, and told the author to drop it by that name.
+        ("_from_month DATE = NULL", ("date",)),
+        ("_as_of TIMESTAMP, _from DATE = NULL", ("timestamp without time zone", "date")),
+        # The bare spellings ARE the "without time zone" types.
+        ("TIMESTAMP", ("timestamp without time zone",)),
+        ("TIMESTAMP WITHOUT TIME ZONE", ("timestamp without time zone",)),
+        ("TIME", ("time without time zone",)),
+        # Dimensionality and size are not part of an array type's identity.
+        ("TEXT[]", ("text[]",)),
+        ("TEXT[][]", ("text[]",)),
+        ("TEXT[4]", ("text[]",)),
+        ("v INT4[]", ("integer[]",)),
+        # NATIONAL is sugar; these are character varying / character. Listing them as
+        # multi-word type NAMES regressed correct code from pass to fail.
+        ("NATIONAL CHARACTER VARYING(10)", ("character varying",)),
+        ("NATIONAL CHARACTER", ("character",)),
+        ("CHAR VARYING", ("character varying",)),
+        ("x CHAR VARYING", ("character varying",)),
+        ("VARBIT", ("bit varying",)),
+        ("DEC(10,2)", ("numeric",)),
+        ("NCHAR(3)", ("character",)),
+        # Typmods are discarded from a function's argument types.
+        ("INTERVAL DAY TO SECOND", ("interval",)),
+        ("x INTERVAL DAY TO SECOND", ("interval",)),
+        ("INTERVAL HOUR TO MINUTE(3)", ("interval",)),
+        ("INTERVAL", ("interval",)),
+        # Quoted parameter names -- the style endpoint_schema.sql uses, and the shape
+        # #73's remediation will produce.
+        ('"from_date" TEXT = NULL', ("text",)),
+        ('"page" INT = 1, "page_size" INT = 20', ("integer", "integer")),
+        ('"g" INT', ("integer",)),
+        ('"g" CHARACTER VARYING = NULL', ("character varying",)),
     ],
 )
 def test_the_signature_parser(arglist, expected):
