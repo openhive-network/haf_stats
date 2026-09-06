@@ -465,3 +465,119 @@ def test_the_apps_own_schema_name_is_matched_exactly(bash, tmp_path, value):
     prefix-vs-equality bug this repo has hit before. Only haf_stats_app is quiet."""
     out = run_with_stub_db(bash, tmp_path, INSTALL, f"--schema={value}")
     assert "WARNING: --schema" in out, f"--schema={value} was accepted silently"
+
+
+# --- #67: an empty connection-flag value silently retargets the connection ----------
+#
+# libpq does not treat an empty value as absent and does not error on it -- it
+# substitutes its own default. Measured against PostgreSQL 17 in the node's haf
+# container:
+#
+#     pg_isready -h ""    ->  :5432 - accepting connections          the LOCAL SOCKET
+#     pg_isready -p ""    ->  127.0.0.1: - accepting connections     the default port
+#     pg_isready -U ""    ->  accepting connections                  the OS user
+#
+# So `uninstall_app --force --host=${HAF_HOST}` with HAF_HOST unset does not fail; it
+# connects somewhere else and drops all three schemas there. --force skips the
+# type-the-database-name gate and is the form docker-compose.yml ships, so the refusal
+# in the option loop is the only thing standing in the way.
+#
+# The assertions below are behavioural on purpose. The one that matters is not "an
+# error was printed" but "no connection was ever attempted" -- a guard that logs and
+# then carries on would satisfy a message-only assertion while still dropping schemas.
+
+EMPTY_VALUE_FLAGS = [
+    "--host=", "--postgres-host=",
+    "--port=", "--postgres-port=",
+    "--user=", "--postgres-user=",
+]
+
+
+@pytest.mark.parametrize("script", [INSTALL, UNINSTALL, PROCESS],
+                         ids=lambda p: p.name)
+@pytest.mark.parametrize("flag", EMPTY_VALUE_FLAGS)
+def test_an_empty_connection_flag_value_is_refused(bash, tmp_path, script, flag):
+    r = run(bash, tmp_path, script, flag)
+    assert r.returncode == 2, (
+        f"{script.name} {flag} exited {r.returncode}, not 2. An empty value is not "
+        f"ignored by libpq -- it substitutes its own default, which for --host= is the "
+        f"local socket."
+    )
+    assert "empty value" in (r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("script", [INSTALL, UNINSTALL, PROCESS],
+                         ids=lambda p: p.name)
+@pytest.mark.parametrize("flag", ["--host=   ", "--port= ", "--user=\t"])
+def test_a_whitespace_only_connection_flag_value_is_refused(bash, tmp_path, script, flag):
+    """--host= and --port= happen to fail loudly on whitespace (pg_isready reports no
+    response), but --user= accepts it, and it cannot be what the caller meant on any
+    of them."""
+    r = run(bash, tmp_path, script, flag)
+    assert r.returncode == 2, f"{script.name} {flag!r} exited {r.returncode}, not 2"
+    assert "whitespace-only" in (r.stdout + r.stderr)
+
+
+def test_the_refusal_happens_before_any_connection_is_attempted(bash, tmp_path):
+    """The point of the guard. A version that logged an error and carried on would
+    pass a message-only assertion and still drop the schemas -- so assert that neither
+    psql nor pg_isready was ever invoked.
+
+    Run with --force, which is the shape docker-compose.yml ships and the one that
+    skips the type-the-database-name gate.
+    """
+    bindir = stub_bin(tmp_path)
+    calls = tmp_path / "calls.log"
+    for tool in ("psql", "pg_isready"):
+        write_exec(bindir / tool,
+                   f"#!/bin/sh\necho \"{tool} $*\" >> {calls.as_posix()!r}\nexit 0\n")
+
+    r = subprocess.run(
+        [bash, str(UNINSTALL), "--force", "--host="],
+        env=clean_env(bindir), capture_output=True, text=True, timeout=TIMEOUT,
+    )
+
+    assert r.returncode == 2
+    assert not calls.exists(), (
+        "a connection was attempted despite the empty --host=:\n"
+        + calls.read_text(encoding="utf-8")
+    )
+
+
+def test_a_valid_connection_flag_value_is_still_accepted(bash, tmp_path):
+    """The guard must reject empty and whitespace-only values, not values in general.
+    A value containing a space is legitimate -- PostgreSQL role names may contain
+    them -- and must not be caught by the whitespace-only branch."""
+    for args in (
+        ("--host=otherhost", "--port=6543", "--user=someone", "--help"),
+        ("--user=my user", "--help"),
+    ):
+        r = run(bash, tmp_path, UNINSTALL, *args)
+        assert r.returncode == 0, (
+            f"uninstall_app {' '.join(args)} exited {r.returncode}: {r.stdout}{r.stderr}"
+        )
+
+
+def test_every_connection_flag_in_the_loop_is_guarded():
+    """Source-text, and honest about it: this is a completeness check over the option
+    loop, not a behavioural one. It exists because the behavioural tests above can only
+    cover flags someone remembered to list, and the failure mode for #67 was precisely
+    that a guard was added to one flag and not its neighbours.
+
+    Any option arm that assigns a POSTGRES_* variable must call require_flag_value
+    first.
+    """
+    missing = []
+    for script in (INSTALL, UNINSTALL, PROCESS):
+        for line in script.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("--") or "POSTGRES_" not in stripped:
+                continue
+            if "=${arg#*=}" not in stripped.replace(" ", ""):
+                continue
+            if "require_flag_value" not in stripped:
+                missing.append(f"{script.name}: {stripped}")
+    assert not missing, (
+        "these option arms assign a connection variable without checking the value "
+        "first, which is the #67 bug:\n  " + "\n  ".join(missing)
+    )
