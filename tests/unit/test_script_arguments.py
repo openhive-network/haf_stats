@@ -479,12 +479,13 @@ def test_the_apps_own_schema_name_is_matched_exactly(bash, tmp_path, value):
 #
 # So `uninstall_app --force --host=${HAF_HOST}` with HAF_HOST unset does not fail; it
 # connects somewhere else and drops all three schemas there. --force skips the
-# type-the-database-name gate and is the form docker-compose.yml ships, so the refusal
-# in the option loop is the only thing standing in the way.
+# type-the-database-name gate and is the form docker-compose.yml ships.
 #
-# The assertions below are behavioural on purpose. The one that matters is not "an
-# error was printed" but "no connection was ever attempted" -- a guard that logs and
-# then carries on would satisfy a message-only assertion while still dropping schemas.
+# Every assertion below names the BRANCH it expects, not a phrase shared between
+# branches. An earlier version asserted `"empty value" in output`, which also matches
+# the whitespace message's explanatory second line ("Refused for the same reason as an
+# empty value") -- so deleting the empty branch entirely left the suite green while an
+# operator debugging an unset variable was told the value was "whitespace-only".
 
 EMPTY_VALUE_FLAGS = [
     "--host=", "--postgres-host=",
@@ -492,82 +493,148 @@ EMPTY_VALUE_FLAGS = [
     "--user=", "--postgres-user=",
 ]
 
+_EMPTY_CASES = [(s, f) for s in (INSTALL, UNINSTALL, PROCESS) for f in EMPTY_VALUE_FLAGS]
 
-@pytest.mark.parametrize("script", [INSTALL, UNINSTALL, PROCESS],
-                         ids=lambda p: p.name)
-@pytest.mark.parametrize("flag", EMPTY_VALUE_FLAGS)
+
+@pytest.mark.parametrize("script,flag", _EMPTY_CASES,
+                         ids=[f"{s.stem}{f}" for s, f in _EMPTY_CASES])
 def test_an_empty_connection_flag_value_is_refused(bash, tmp_path, script, flag):
     r = run(bash, tmp_path, script, flag)
+    out = r.stdout + r.stderr
     assert r.returncode == 2, (
         f"{script.name} {flag} exited {r.returncode}, not 2. An empty value is not "
-        f"ignored by libpq -- it substitutes its own default, which for --host= is the "
-        f"local socket."
+        f"ignored by libpq -- it substitutes its own default, which for --host= is "
+        f"the local socket.\n{out}"
     )
-    assert "empty value" in (r.stdout + r.stderr)
+    # the flag's own name, and the branch that should have fired
+    assert f"ERROR: {flag} was given an empty value." in out, out
+    assert "whitespace-only" not in out, (
+        f"{flag} took the WHITESPACE branch, not the empty one. The empty branch may "
+        f"have been deleted:\n{out}"
+    )
 
 
-@pytest.mark.parametrize("script", [INSTALL, UNINSTALL, PROCESS],
-                         ids=lambda p: p.name)
-@pytest.mark.parametrize("flag", ["--host=   ", "--port= ", "--user=\t"])
-def test_a_whitespace_only_connection_flag_value_is_refused(bash, tmp_path, script, flag):
-    """--host= and --port= happen to fail loudly on whitespace (pg_isready reports no
-    response), but --user= accepts it, and it cannot be what the caller meant on any
-    of them."""
-    r = run(bash, tmp_path, script, flag)
-    assert r.returncode == 2, f"{script.name} {flag!r} exited {r.returncode}, not 2"
-    assert "whitespace-only" in (r.stdout + r.stderr)
+_WS_CASES = [(s, f, v)
+             for s in (INSTALL, UNINSTALL, PROCESS)
+             for f in ("--host=", "--port=", "--user=")
+             for v in ("   ", "\t")]
 
 
-def test_the_refusal_happens_before_any_connection_is_attempted(bash, tmp_path):
-    """The point of the guard. A version that logged an error and carried on would
-    pass a message-only assertion and still drop the schemas -- so assert that neither
-    psql nor pg_isready was ever invoked.
+@pytest.mark.parametrize("script,flag,value", _WS_CASES,
+                         ids=[f"{s.stem}{f}{'sp' if v == '   ' else 'tab'}"
+                              for s, f, v in _WS_CASES])
+def test_a_whitespace_only_connection_flag_value_is_refused(bash, tmp_path, script,
+                                                            flag, value):
+    """Covers all three flags, not just --user=. --host= and --port= happen to fail
+    loudly on whitespace (pg_isready reports no response) while --user= is accepted
+    silently, so a guard that special-cased --user would still be wrong -- and would
+    pass a --user-only test."""
+    r = run(bash, tmp_path, script, flag + value)
+    out = r.stdout + r.stderr
+    assert r.returncode == 2, f"{script.name} {flag}{value!r} exited {r.returncode}\n{out}"
+    assert f"ERROR: {flag} was given a whitespace-only value." in out, out
 
-    Run with --force, which is the shape docker-compose.yml ships and the one that
-    skips the type-the-database-name gate.
+
+def test_a_newline_in_a_connection_flag_value_is_refused(bash, tmp_path):
+    """A newline makes every message that echoes the value print only its first line,
+    so the log would name one target while libpq is handed another.
+
+    Driven through `bash -c` with the newline inside the SCRIPT TEXT rather than as an
+    argv element. On Windows a newline does not survive subprocess argument passing at
+    all -- measured, bash receives only the text before it -- so the obvious spelling
+    of this test would silently exercise `--host=haf` and pass for the wrong reason.
+    """
+    nl = chr(10)
+    script = (
+        "source '" + (SCRIPTS / "common.sh").as_posix() + "' 2>/dev/null" + nl
+        + 'require_flag_value "--host=haf' + nl + 'evil"' + nl
+        + "echo ACCEPTED" + nl
+    )
+    proc = subprocess.run(
+        [bash, "-c", script], env=clean_env(stub_bin(tmp_path)),
+        capture_output=True, text=True, timeout=TIMEOUT,
+    )
+    out = proc.stdout + proc.stderr
+    assert "ACCEPTED" not in out, "the newline value was accepted:" + nl + out
+    assert proc.returncode == 2, f"exited {proc.returncode}, not 2:" + nl + out
+    assert "newline" in out
+
+
+_REFUSAL_CASES = [(s, f) for s in (INSTALL, UNINSTALL, PROCESS)
+                  for f in ("--host=", "--port=", "--user=")]
+
+
+@pytest.mark.parametrize("script,flag", _REFUSAL_CASES,
+                         ids=[f"{s.stem}{f}" for s, f in _REFUSAL_CASES])
+def test_the_refusal_happens_before_any_connection_is_attempted(bash, tmp_path,
+                                                                script, flag):
+    """The point of the guard. A version that logged an error and carried on would pass
+    a message-only assertion and still drop the schemas -- so assert that neither psql
+    nor pg_isready was ever invoked.
+
+    Covers all three verbs, not just uninstall. Validating AFTER wait_for_postgres
+    produces an identical exit code and message while the connection to the wrong
+    target has already been made, and a uninstall-only test cannot see that.
+
+    Carries a POSITIVE CONTROL: with the recorder in place a valid run must record
+    something. Without it, "no calls were recorded" is indistinguishable from a broken
+    stub, and this test would assert nothing while staying green.
     """
     bindir = stub_bin(tmp_path)
     calls = tmp_path / "calls.log"
     for tool in ("psql", "pg_isready"):
-        write_exec(bindir / tool,
-                   f"#!/bin/sh\necho \"{tool} $*\" >> {calls.as_posix()!r}\nexit 0\n")
+        write_exec(
+            bindir / tool,
+            "#!/bin/sh\necho \"%s $*\" >> '%s'\nexit 0\n" % (tool, calls.as_posix()),
+        )
 
-    r = subprocess.run(
-        [bash, str(UNINSTALL), "--force", "--host="],
-        env=clean_env(bindir), capture_output=True, text=True, timeout=TIMEOUT,
+    # control: prove the recorder works before trusting its silence
+    subprocess.run([bash, str(PROCESS), "--host=otherhost"],
+                   env=clean_env(bindir), capture_output=True, text=True,
+                   timeout=TIMEOUT)
+    assert calls.exists(), (
+        "the psql/pg_isready recorder never fired on a valid run, so its silence below "
+        "would prove nothing"
     )
+    calls.unlink()
+
+    args = ["--force", flag] if script is UNINSTALL else [flag]
+    r = subprocess.run([bash, str(script), *args], env=clean_env(bindir),
+                       capture_output=True, text=True, timeout=TIMEOUT)
 
     assert r.returncode == 2
     assert not calls.exists(), (
-        "a connection was attempted despite the empty --host=:\n"
+        f"{script.name} {flag} attempted a connection despite the empty value:\n"
         + calls.read_text(encoding="utf-8")
     )
 
 
-def test_a_valid_connection_flag_value_is_still_accepted(bash, tmp_path):
+@pytest.mark.parametrize("script", [INSTALL, UNINSTALL, PROCESS], ids=lambda p: p.name)
+def test_a_valid_connection_flag_value_is_still_accepted(bash, tmp_path, script):
     """The guard must reject empty and whitespace-only values, not values in general.
-    A value containing a space is legitimate -- PostgreSQL role names may contain
-    them -- and must not be caught by the whitespace-only branch."""
+
+    Covers all three verbs. process_blocks.sh matters most: docker_entrypoint.sh passes
+    it --host="${POSTGRES_HOST:-haf}" unconditionally, so a guard that rejected valid
+    values there would be a block processor that refuses every start -- and on a service
+    with a restart policy, a crash-loop. That path had no test until this one.
+
+    A value containing a space is legitimate -- PostgreSQL role names may contain one --
+    and must not be caught by the whitespace-only branch.
+    """
     for args in (
         ("--host=otherhost", "--port=6543", "--user=someone", "--help"),
         ("--user=my user", "--help"),
     ):
-        r = run(bash, tmp_path, UNINSTALL, *args)
+        r = run(bash, tmp_path, script, *args)
         assert r.returncode == 0, (
-            f"uninstall_app {' '.join(args)} exited {r.returncode}: {r.stdout}{r.stderr}"
+            f"{script.name} {' '.join(args)} exited {r.returncode}, so a VALID "
+            f"connection value was rejected:\n{r.stdout}{r.stderr}"
         )
 
 
-CONNECTION_FLAGS = ("--host", "--port", "--user", "--postgres-url", "--url",
-                    "--postgres-host", "--postgres-port", "--postgres-user",
-                    "--postgres-access")
-
-# Every shell file in the repo, discovered rather than listed. The first version of this
-# test listed the three scripts the fix touched, and was therefore blind to the three it
-# did not -- including tests/regression/run_test.sh, which CREATEs a schema on whatever
-# it connects to. Discovery is the point: a new script with a --host= arm has to be
-# guarded or fail here, without anyone remembering to add it.
 def _all_shell_files() -> list[Path]:
+    """Discovered, not listed. The first version of this scan listed the three scripts
+    the fix touched and was therefore blind to three more that carry the same arm."""
     root = Path(__file__).resolve().parents[2]
     found = [p for p in root.rglob("*.sh")
              if ".git" not in p.parts and "node_modules" not in p.parts]
@@ -575,40 +642,44 @@ def _all_shell_files() -> list[Path]:
     return sorted(found)
 
 
+# An option arm is recognised by what it ASSIGNS, not by the flag name it matches. A
+# flag whitelist cannot see a new spelling -- adding an unguarded `--dbhost=*)` arm
+# passed a whitelist-based version of this scan -- and one of the missed scripts assigns
+# to PG_HOST rather than POSTGRES_HOST.
+_CONNECTION_ASSIGN = re.compile(
+    r"(?:^|[;\s])(?:POSTGRES_\w+|PG_\w+)\s*="
+    r"|printf\s+-v\s+(?:POSTGRES_\w+|PG_\w+)"
+    r"|eval\b[^#]*(?:POSTGRES_\w+|PG_\w+)"
+)
+
+
 def test_every_connection_flag_arm_validates_its_value():
     """Source-text, and honest about it: a completeness check, not a behavioural one.
     The behavioural tests can only cover flags and scripts someone remembered to list,
-    and forgetting a neighbour is exactly how #67 arose -- twice. The first fix for it
-    guarded three scripts and missed three more.
-
-    An arm is recognised by SHAPE -- `--flag=*)` that assigns from ${arg#*=} or ${1#*=}
-    -- not by the variable it assigns to, because one of the missed scripts assigns to
-    PG_HOST rather than POSTGRES_HOST.
+    and forgetting a neighbour is exactly how #67 arose -- twice.
     """
     missing = []
     considered = 0
+    root = Path(__file__).resolve().parents[2]
     for script in _all_shell_files():
         for lineno, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if not stripped.startswith("--"):
                 continue
-            flag = stripped.split("=")[0].split(")")[0].split("|")[0]
-            if flag not in CONNECTION_FLAGS:
-                continue
-            squashed = stripped.replace(" ", "")
-            # an assignment from the argument itself, in either spelling
-            if "${arg#*=}" not in squashed and "${1#*=}" not in squashed:
+            # Blank the ${...} expansions first: they contain '#' (as in ${arg#*=}),
+            # which would otherwise look like the start of a trailing comment.
+            blanked = re.sub(r"\$\{[^}]*\}", "${}", stripped)
+            code = blanked.split("#", 1)[0]
+            if not _CONNECTION_ASSIGN.search(code):
                 continue
             considered += 1
-            if "require_flag_value" not in stripped:
-                rel = script.relative_to(Path(__file__).resolve().parents[2])
-                missing.append(f"{rel}:{lineno}: {stripped}")
+            if "require_flag_value" not in code:
+                missing.append(f"{script.relative_to(root)}:{lineno}: {stripped}")
 
     # The FIRST version of this test was vacuous, not merely narrow: its filter looked
     # for the substring "=${arg#*=}", but the arms are written
     # POSTGRES_HOST="${arg#*=}" -- a quote sits between the = and the $. It considered
-    # ZERO arms and passed with every guard deleted. Assert the scan found something, so
-    # the next reformatting cannot silently switch this test off.
+    # ZERO arms and passed with every guard deleted. Assert the scan found something.
     assert considered >= 12, (
         f"the completeness scan matched only {considered} option arms, which means its "
         f"pattern has gone stale rather than that the repo got safer"
@@ -616,21 +687,22 @@ def test_every_connection_flag_arm_validates_its_value():
     assert not missing, (
         "these option arms take a connection value without validating it first, which "
         "is the #67 bug. An empty value is not ignored by libpq -- it substitutes its "
-        "own default, and for --host= that is the local socket:\n  "
-        + "\n  ".join(missing)
+        "own default, and for --host= that is the local socket:" + "".join(
+            chr(10) + "  " + m for m in missing)
     )
 
 
 def test_the_guard_is_reachable_from_every_script_that_uses_it():
-    """A script can call require_flag_value and still be broken, if it never sourced the
-    file that defines it -- and three of the six do NOT source common.sh, deliberately:
-    inheriting its POSTGRES_* defaults would change what they connect to.
-    """
+    """A script can call require_flag_value and still be broken if it never sourced the
+    file defining it -- and three of the six do NOT source common.sh, deliberately:
+    inheriting its POSTGRES_* defaults would change what they connect to."""
     unsourced = []
     for script in _all_shell_files():
         text = script.read_text(encoding="utf-8")
         if "require_flag_value" not in text:
             continue
+        if "require_flag_value()" in text:
+            continue          # this file DEFINES it
         if "arg_guard.sh" in text or "common.sh" in text:
             continue
         unsourced.append(script.name)
