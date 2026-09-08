@@ -356,6 +356,89 @@ tags:
     description: Health and version endpoints
 servers:
   - url: /haf-stats-api
+components:
+  schemas:
+    # NULLABILITY CRITERION for this document (#68): a field is declared
+    # `[type, "null"]` when the code that WRITES it can emit a null -- the SELECT
+    # passes it through NULLIF, or a nullable column is populated by an expression
+    # that can yield null. Not "the DDL permits null": haf_stats_backend
+    # .governance_concentration_snapshot.total_hp_holders is a nullable column, but
+    # its only writer sets it from COUNT(*) OVER () and emits no row at all when
+    # there is nothing to count, so it cannot arrive null and is not marked. Its
+    # five siblings on that same row CAN, because a zero total_vesting_fund_hive
+    # nulls the ratio they derive from.
+    #
+    # Defensive NULLIFs are included even where a null looks unreachable today: if
+    # it is genuinely unreachable the NULLIF should be removed, and until it is,
+    # the document should not claim more than the query guarantees. Stated here
+    # because an earlier pass marked some NULLIF-derived fields and not others with
+    # nothing recording why.
+    PostgrestError:
+      # The body PostgREST returns for any request it rejects. Declared once and
+      # referenced from every path: the shape is PostgREST's, not ours, and is identical
+      # everywhere. Lifted from the negative tavern suites (under tests/tavern, in files
+      # named .pat.json) rather than invented.
+      #
+      # Note for editors, kept here rather than in a response description because that
+      # text is published to API consumers: never write a C-style comment open or close
+      # sequence anywhere in these annotations. Either one ends or nests the enclosing
+      # block, and psql then reports an unterminated comment hundreds of lines away from
+      # the line that caused it. tests/unit/test_sql_comment_balance.py enforces this.
+      type: object
+      required: [code, message, details, hint]
+      properties:
+        code:
+          type: string
+          description: >-
+            PostgreSQL SQLSTATE, or a PostgREST code for a request rejected before any
+            function runs. Measured on this API: 22023 (an endpoint rejected an
+            argument), 22P02 (a non-integer where an integer was expected), 42703 (an
+            unknown column in a PostgREST filter), PGRST100 (an unparseable query
+            string), and 53000 on /sync-status, which shares this schema for its 503.
+            Do not switch on 22023 alone.
+        message:
+          type: string
+          description: Human-readable explanation, usually naming the offending value.
+        details:
+          type:
+            - string
+            - "null"
+        hint:
+          type:
+            - string
+            - "null"
+          description: >-
+            Frequently populated for enum-valued parameters, e.g. "Must be one of: day,
+            week, month".
+  responses:
+    BadRequest:
+      description: >-
+        The request was rejected. This covers both an endpoint rejecting an argument
+        (SQLSTATE 22023, raised by the endpoint function or by
+        haf_stats_app.to_filter_date) and PostgREST rejecting the request before any
+        function runs -- an unparseable query string, an unknown column in a filter, or
+        a value that will not cast to the parameter's type. The rewriter passes the
+        query string through untouched, so the latter applies to every path including
+        those that declare no parameters of their own.
+
+        Declared for the same reason /sync-status declares its 503: prose in a 200
+        description is not part of any machine-readable contract, so a client generated
+        from a 200-only spec models the endpoint as infallible and throws on the body
+        below.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostgrestError'
+          # PGRST100 deliberately, not a 22023 parameter error: this response is
+          # shared by all 24 paths, and six of them declare no parameters at all, so a
+          # `invalid granularity` example would document an error those paths cannot
+          # produce -- the same defect as omitting a reachable one. Measured reachable
+          # on every path, including /version and /health, via `?order=;`.
+          example:
+            code: PGRST100
+            message: '"failed to parse order ()" (line 1, column 1)'
+            details: 'unexpected end of input expecting field name (* or [a..z0..9_])'
+            hint: null
  */
 
 -- ---------------------------------------------------------------------------
@@ -411,6 +494,60 @@ DECLARE
       "url": "/haf-stats-api"
     }
   ],
+  "components": {
+    "schemas": {
+      "PostgrestError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "details",
+          "hint"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "PostgreSQL SQLSTATE, or a PostgREST code for a request rejected before any function runs. Measured on this API: 22023 (an endpoint rejected an argument), 22P02 (a non-integer where an integer was expected), 42703 (an unknown column in a PostgREST filter), PGRST100 (an unparseable query string), and 53000 on /sync-status, which shares this schema for its 503. Do not switch on 22023 alone."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation, usually naming the offending value."
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Frequently populated for enum-valued parameters, e.g. \"Must be one of: day, week, month\"."
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request was rejected. This covers both an endpoint rejecting an argument (SQLSTATE 22023, raised by the endpoint function or by haf_stats_app.to_filter_date) and PostgREST rejecting the request before any function runs -- an unparseable query string, an unknown column in a filter, or a value that will not cast to the parameter's type. The rewriter passes the query string through untouched, so the latter applies to every path including those that declare no parameters of their own.\nDeclared for the same reason /sync-status declares its 503: prose in a 200 description is not part of any machine-readable contract, so a client generated from a 200-only spec models the endpoint as infallible and throws on the body below.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PostgrestError"
+            },
+            "example": {
+              "code": "PGRST100",
+              "message": "\"failed to parse order ()\" (line 1, column 1)",
+              "details": "unexpected end of input expecting field name (* or [a..z0..9_])",
+              "hint": null
+            }
+          }
+        }
+      }
+    }
+  },
   "paths": {
     "/version": {
       "get": {
@@ -430,6 +567,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -472,6 +612,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -518,33 +661,15 @@ DECLARE
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "503": {
             "description": "Temporarily unavailable, and the two cases are distinguished by message rather than by status. Either the HAF instance is still in massive sync (hafd.blocks' primary key is dropped for the duration, so the call fails fast instead of seq-scanning the largest table in the database), or the HAF context is missing or not visible to the reader. Both are raised as SQLSTATE 53000, which PostgREST maps to 503. Declared because prose in a 200 description is not part of any machine-readable contract: a client generated from a 200-only spec models this endpoint as infallible and throws on the error body below.",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "code": {
-                      "type": "string",
-                      "description": "PostgreSQL SQLSTATE, '53000' for both cases"
-                    },
-                    "message": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "hint": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  }
+                  "$ref": "#/components/schemas/PostgrestError"
                 },
                 "example": {
                   "code": "53000",
@@ -657,6 +782,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -763,6 +891,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -820,8 +951,10 @@ DECLARE
                     "type": "object",
                     "properties": {
                       "community": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Community account name (e.g. hive-139531), or null for the personal-blog / no-community bucket"
                       },
                       "title": {
@@ -841,6 +974,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -932,8 +1068,10 @@ DECLARE
                         "description": "One of reply, vote, transfer, reblog, follow"
                       },
                       "partner": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Counterparty account name, or null for the Others band"
                       },
                       "interaction_count": {
@@ -958,6 +1096,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1040,7 +1181,10 @@ DECLARE
                         "type": "integer"
                       },
                       "pct": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Percentage of total RC consumed"
                       }
                     }
@@ -1048,6 +1192,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1184,13 +1331,17 @@ DECLARE
                         "description": "Operation type name"
                       },
                       "app": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Resolved DApp name for custom_json ops (custom_json_app_registry match, falling back to the raw id); null for non-custom_json ops"
                       },
                       "custom_json_id": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Raw custom_json id (null for non-custom_json ops)"
                       },
                       "rc_consumed": {
@@ -1206,6 +1357,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1277,12 +1431,16 @@ DECLARE
                       "description": "Estimated total RC consumed (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily; a calibrated estimate, not real RC spend)"
                     },
                     "top_category": {
-                      "type": "string",
-                      "nullable": true
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "top_dapp": {
-                      "type": "string",
-                      "nullable": true
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "categories": {
                       "type": "array",
@@ -1297,13 +1455,19 @@ DECLARE
                             "type": "integer"
                           },
                           "pct": {
-                            "type": "number"
+                            "type": [
+                              "number",
+                              "null"
+                            ]
                           },
                           "rc_estimated": {
                             "type": "integer"
                           },
                           "rc_pct": {
-                            "type": "number"
+                            "type": [
+                              "number",
+                              "null"
+                            ]
                           }
                         }
                       }
@@ -1324,13 +1488,19 @@ DECLARE
                             "type": "integer"
                           },
                           "pct": {
-                            "type": "number"
+                            "type": [
+                              "number",
+                              "null"
+                            ]
                           },
                           "rc_estimated": {
                             "type": "integer"
                           },
                           "rc_pct": {
-                            "type": "number"
+                            "type": [
+                              "number",
+                              "null"
+                            ]
                           }
                         }
                       }
@@ -1339,6 +1509,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1375,8 +1548,10 @@ DECLARE
                         "description": "Registry category (the group_by=category label)"
                       },
                       "homepage": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "DApp homepage URL, or null if unknown"
                       }
                     }
@@ -1384,6 +1559,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1466,6 +1644,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1560,6 +1741,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1650,18 +1834,24 @@ DECLARE
                     "type": "object",
                     "properties": {
                       "json_id": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Raw custom_json id (null when group_by=app or category)"
                       },
                       "app_name": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Resolved DApp name; Others on the aggregated tail row, which is identified by category rather than by this name (null when group_by=category)"
                       },
                       "category": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "DApp category (Uncategorized if unregistered). Marks the aggregated tail row - null when group_by=app, since that band spans categories, and Others when group_by=category"
                       },
                       "op_count": {
@@ -1681,6 +1871,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1712,15 +1905,24 @@ DECLARE
                         "type": "integer"
                       },
                       "pct_accounts": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Percentage of all accounts in this bucket"
                       },
                       "total_hp": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Total HP held by all accounts in this bucket (sum of actual VESTS-converted balances)"
                       },
                       "pct_hp": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "This bucket's total_hp as a percentage of the sum of all buckets' total_hp"
                       }
                     }
@@ -1728,6 +1930,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1752,17 +1957,26 @@ DECLARE
                     "type": "object",
                     "properties": {
                       "gini": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Gini coefficient of HP across all holders (0 = perfect equality, 1 = one account holds everything)",
                         "example": 0.94
                       },
                       "top_1pct_hp_share": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Percentage of total HP held by the richest 1% of accounts",
                         "example": 71.2
                       },
                       "top_10pct_hp_share": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Percentage of total HP held by the richest 10% of accounts",
                         "example": 93.4
                       },
@@ -1772,12 +1986,18 @@ DECLARE
                         "example": 164780
                       },
                       "median_hp": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Median HP per holder",
                         "example": 12.4
                       },
                       "mean_hp": {
-                        "type": "number",
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "Mean HP per holder",
                         "example": 284.1
                       }
@@ -1786,6 +2006,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1841,46 +2064,67 @@ DECLARE
                         "type": "integer"
                       },
                       "eligible_at_7d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_7d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_7d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "eligible_at_30d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_30d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_30d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "eligible_at_90d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_90d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_90d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       }
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1936,46 +2180,67 @@ DECLARE
                         "type": "integer"
                       },
                       "eligible_at_30d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_30d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_30d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "eligible_at_90d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_90d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_90d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "eligible_at_180d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "active_at_180d": {
-                        "type": "integer",
-                        "nullable": true
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
                       },
                       "pct_180d": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       }
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2066,6 +2331,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2151,14 +2419,19 @@ DECLARE
                         "type": "integer"
                       },
                       "downvote_pct": {
-                        "type": "number",
-                        "nullable": true
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       }
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2239,6 +2512,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2280,7 +2556,7 @@ DECLARE
             "required": false,
             "schema": {
               "x-sql-datatype": "TEXT",
-              "x-sql-default-value": "'day'",
+              "default": "day",
               "type": "string",
               "enum": [
                 "day",
@@ -2310,22 +2586,37 @@ DECLARE
                         "type": "integer"
                       },
                       "avg_votes_per_post": {
-                        "type": "number"
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "avg_comments_per_post": {
-                        "type": "number"
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "zero_vote_post_pct": {
-                        "type": "number"
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       },
                       "zero_comment_post_pct": {
-                        "type": "number"
+                        "type": [
+                          "number",
+                          "null"
+                        ]
                       }
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2460,6 +2751,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2562,13 +2856,17 @@ DECLARE
                     "type": "object",
                     "properties": {
                       "period": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "ISO-8601 date string for the aggregation bucket (null in leaderboard mode)"
                       },
                       "producer": {
-                        "type": "string",
-                        "nullable": true,
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "description": "Witness account name (null in a network-wide series, i.e. granularity set without witness)"
                       },
                       "missed_count": {
@@ -2580,30 +2878,40 @@ DECLARE
                         "description": "Blocks the witness produced in the window"
                       },
                       "rate": {
-                        "type": "number",
-                        "nullable": true,
+                        "type": [
+                          "number",
+                          "null"
+                        ],
                         "description": "missed/(produced+missed), a fraction in [0,1] to 6 decimals; null only when the window holds no slots"
                       },
                       "first_missed_block": {
-                        "type": "integer",
-                        "nullable": true,
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
                         "description": "Block at which the first miss in the window was recorded (null if nothing was missed)"
                       },
                       "last_missed_block": {
-                        "type": "integer",
-                        "nullable": true,
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
                         "description": "Block at which the last miss in the window was recorded (null if nothing was missed)"
                       },
                       "first_missed_at": {
-                        "type": "string",
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "format": "date-time",
-                        "nullable": true,
                         "description": "Timestamp of first_missed_block; with last_missed_at this separates a single outage from sustained flakiness"
                       },
                       "last_missed_at": {
-                        "type": "string",
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "format": "date-time",
-                        "nullable": true,
                         "description": "Timestamp of last_missed_block"
                       }
                     }
@@ -2611,6 +2919,9 @@ DECLARE
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -2643,6 +2954,8 @@ $func$;
           application/json:
             schema:
               type: string
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_version;
@@ -2696,6 +3009,8 @@ $$;
                       scripts/rebuild_content_volume.sh has not been run yet.
                       get_account_community_activity still answers on such a node, but
                       reports everything under the personal-blog bucket.
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_health;
@@ -2788,6 +3103,8 @@ $$;
             example:
               last_block_num: 5000000
               last_block_time: '2016-09-15T19:47:21'
+      '400':
+        $ref: '#/components/responses/BadRequest'
       '503':
         description: >-
           Temporarily unavailable, and the two cases are distinguished by message
@@ -2802,21 +3119,10 @@ $$;
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                code:
-                  type: string
-                  description: PostgreSQL SQLSTATE, '53000' for both cases
-                message:
-                  type: string
-                details:
-                  type:
-                    - string
-                    - "null"
-                hint:
-                  type:
-                    - string
-                    - "null"
+              # The same wire shape as every other error on this API. Two independent
+              # definitions of one shape would make a generator emit two model classes,
+              # so a consumer could not catch one error type across the endpoints.
+              $ref: '#/components/schemas/PostgrestError'
             example:
               code: '53000'
               message: HAF instance is not ready (massive sync in progress)
@@ -2941,6 +3247,8 @@ $$;
                     type: integer
                   op_count:
                     type: integer
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_financial_summary;
@@ -3074,6 +3382,8 @@ $$;
                     type: integer
                   author_reward_vests_nai:
                     type: integer
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_content_stats;
@@ -3222,8 +3532,9 @@ $$;
                 type: object
                 properties:
                   community:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Community account name (e.g. hive-139531), or null for the personal-blog / no-community bucket
                   title:
                     type: string
@@ -3234,6 +3545,8 @@ $$;
                   comment_count:
                     type: integer
                     description: Replies created anywhere in a thread rooted in this community
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_community_activity;
@@ -3432,8 +3745,9 @@ $$;
                     type: string
                     description: One of reply, vote, transfer, reblog, follow
                   partner:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Counterparty account name, or null for the Others band
                   interaction_count:
                     type: integer
@@ -3450,6 +3764,8 @@ $$;
                     type: string
                     format: date
                     description: Start of the window actually scanned; equals from_date unless the server op ceiling truncated it
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_interactions;
@@ -3922,8 +4238,12 @@ $$;
                   op_count:
                     type: integer
                   pct:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Percentage of total RC consumed
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint;
@@ -4207,14 +4527,16 @@ $$;
                     type: string
                     description: Operation type name
                   app:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: >-
                       Resolved DApp name for custom_json ops (custom_json_app_registry match,
                       falling back to the raw id); null for non-custom_json ops
                   custom_json_id:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Raw custom_json id (null for non-custom_json ops)
                   rc_consumed:
                     type: integer
@@ -4224,6 +4546,8 @@ $$;
                     description: >-
                       Per-account operation sequence number (dense, monotonic with time); pass the
                       last row's value as before_seq to fetch the next page
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_rc_footprint_timeline;
@@ -4498,11 +4822,13 @@ $$;
                   type: integer
                   description: Estimated total RC consumed (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily; a calibrated estimate, not real RC spend)
                 top_category:
-                  type: string
-                  nullable: true
+                  type:
+                    - string
+                    - "null"
                 top_dapp:
-                  type: string
-                  nullable: true
+                  type:
+                    - string
+                    - "null"
                 categories:
                   type: array
                   description: Per-category totals (donut chart)
@@ -4514,11 +4840,15 @@ $$;
                       op_count:
                         type: integer
                       pct:
-                        type: number
+                        type:
+                          - number
+                          - "null"
                       rc_estimated:
                         type: integer
                       rc_pct:
-                        type: number
+                        type:
+                          - number
+                          - "null"
                 dapps:
                   type: array
                   description: Per-app totals (registered app name), each tagged with its category (drill-down bars)
@@ -4532,11 +4862,17 @@ $$;
                       op_count:
                         type: integer
                       pct:
-                        type: number
+                        type:
+                          - number
+                          - "null"
                       rc_estimated:
                         type: integer
                       rc_pct:
-                        type: number
+                        type:
+                          - number
+                          - "null"
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_account_dapp_footprint;
@@ -4714,9 +5050,12 @@ $$;
                     type: string
                     description: Registry category (the group_by=category label)
                   homepage:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: DApp homepage URL, or null if unknown
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_custom_json_app_registry;
@@ -4797,6 +5136,8 @@ $$;
                     additionalProperties:
                       type: integer
                     description: RC per operation type or DApp
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_rc_utilization;
@@ -4978,6 +5319,8 @@ $$;
                   rc_estimate:
                     type: number
                     description: Estimated RC consumed by those ops (may exceed 2^63)
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_custom_json_usage;
@@ -5118,16 +5461,19 @@ $$;
                 type: object
                 properties:
                   json_id:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Raw custom_json id (null when group_by=app or category)
                   app_name:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Resolved DApp name; Others on the aggregated tail row, which is identified by category rather than by this name (null when group_by=category)
                   category:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: DApp category (Uncategorized if unregistered). Marks the aggregated tail row - null when group_by=app, since that band spans categories, and Others when group_by=category
                   op_count:
                     type: integer
@@ -5138,6 +5484,8 @@ $$;
                   rc_estimate:
                     type: number
                     description: Estimated RC consumed by those ops (may exceed 2^63)
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_top_custom_json;
@@ -5413,14 +5761,22 @@ $$;
                   account_count:
                     type: integer
                   pct_accounts:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Percentage of all accounts in this bucket
                   total_hp:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Total HP held by all accounts in this bucket (sum of actual VESTS-converted balances)
                   pct_hp:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: This bucket's total_hp as a percentage of the sum of all buckets' total_hp
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_hp_distribution;
@@ -5483,15 +5839,21 @@ $$;
                 type: object
                 properties:
                   gini:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Gini coefficient of HP across all holders (0 = perfect equality, 1 = one account holds everything)
                     example: 0.94
                   top_1pct_hp_share:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Percentage of total HP held by the richest 1% of accounts
                     example: 71.2
                   top_10pct_hp_share:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Percentage of total HP held by the richest 10% of accounts
                     example: 93.4
                   total_hp_holders:
@@ -5499,13 +5861,19 @@ $$;
                     description: Number of accounts holding a positive VESTS balance
                     example: 164780
                   median_hp:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Median HP per holder
                     example: 12.4
                   mean_hp:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                     description: Mean HP per holder
                     example: 284.1
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_governance_influence_concentration;
@@ -5581,32 +5949,43 @@ $$;
                   new_accounts:
                     type: integer
                   eligible_at_7d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_7d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_7d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
                   eligible_at_30d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_30d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_30d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
                   eligible_at_90d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_90d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_90d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_account_funnel;
@@ -5695,32 +6074,43 @@ $$;
                   first_post_accounts:
                     type: integer
                   eligible_at_30d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_30d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_30d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
                   eligible_at_90d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_90d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_90d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
                   eligible_at_180d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   active_at_180d:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                   pct_180d:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_author_retention;
@@ -5829,6 +6219,8 @@ $$;
                   operations:
                     type: integer
                     description: Distinct operations authored in the period
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_daily_active_users;
@@ -6046,8 +6438,11 @@ $$;
                   unique_voters:
                     type: integer
                   downvote_pct:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_vote_stats;
@@ -6178,6 +6573,8 @@ $$;
                     type: integer
                   unique_authors:
                     type: integer
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_content_volume;
@@ -6285,7 +6682,15 @@ $$;
         required: false
         schema:
           x-sql-datatype: TEXT
-          x-sql-default-value: "'day'"
+          # `default`, not x-sql-default-value. The generator checks `default` FIRST and
+          # only falls back to x-sql-default-value, so carrying both would leave the
+          # latter driving nothing while looking authoritative -- an editor changing it
+          # would see no effect on the SQL signature and no CI failure. `default` also
+          # reaches the published document, which x-sql-default-value does not: with
+          # only the latter this endpoint advertised a plain optional string while its
+          # siblings advertised `day` (#71). All 13 other defaulted parameters in this
+          # document carry `default` alone; this now matches them.
+          default: day
           type: string
           enum: [day, week, month]
         description: Bucketing granularity (day, week, or month)
@@ -6306,13 +6711,23 @@ $$;
                   total_posts:
                     type: integer
                   avg_votes_per_post:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                   avg_comments_per_post:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                   zero_vote_post_pct:
-                    type: number
+                    type:
+                      - number
+                      - "null"
                   zero_comment_post_pct:
-                    type: number
+                    type:
+                      - number
+                      - "null"
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_engagement;
@@ -6499,6 +6914,8 @@ $$;
                     type: integer
                   op_count:
                     type: integer
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_network_top_accounts;
@@ -7154,12 +7571,14 @@ $$;
                 type: object
                 properties:
                   period:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: ISO-8601 date string for the aggregation bucket (null in leaderboard mode)
                   producer:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - "null"
                     description: Witness account name (null in a network-wide series, i.e. granularity set without witness)
                   missed_count:
                     type: integer
@@ -7168,27 +7587,34 @@ $$;
                     type: integer
                     description: Blocks the witness produced in the window
                   rate:
-                    type: number
-                    nullable: true
+                    type:
+                      - number
+                      - "null"
                     description: missed/(produced+missed), a fraction in [0,1] to 6 decimals; null only when the window holds no slots
                   first_missed_block:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                     description: Block at which the first miss in the window was recorded (null if nothing was missed)
                   last_missed_block:
-                    type: integer
-                    nullable: true
+                    type:
+                      - integer
+                      - "null"
                     description: Block at which the last miss in the window was recorded (null if nothing was missed)
                   first_missed_at:
-                    type: string
+                    type:
+                      - string
+                      - "null"
                     format: date-time
-                    nullable: true
                     description: Timestamp of first_missed_block; with last_missed_at this separates a single outage from sustained flakiness
                   last_missed_at:
-                    type: string
+                    type:
+                      - string
+                      - "null"
                     format: date-time
-                    nullable: true
                     description: Timestamp of last_missed_block
+      '400':
+        $ref: '#/components/responses/BadRequest'
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS haf_stats_endpoints.get_witness_missed_blocks;
