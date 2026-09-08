@@ -5,6 +5,7 @@
 -- DAU is computed here as distinct accounts with at least one non-virtual op.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_network_stats;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_network_stats(
     _first_block INT,
     _last_block INT
@@ -76,6 +77,7 @@ $$;
 -- virtual op embedded at the start of each block.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_supply_snapshot;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_supply_snapshot(
     _first_block INT,
     _last_block INT

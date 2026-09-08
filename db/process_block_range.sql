@@ -3,6 +3,7 @@ SET ROLE haf_stats_owner;
 -- Block range dispatcher.
 -- Calls domain-specific processors in order. Add calls here as features are implemented.
 
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_authored_ops;
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_authored_ops(
     _first_block INT,
     _last_block INT
@@ -81,6 +82,7 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_block_range;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_block_range(
     _first_block INT,
     _last_block INT

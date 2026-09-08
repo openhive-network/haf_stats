@@ -115,6 +115,7 @@ GRANT SELECT ON haf_stats_backend.account_financial_monthly TO haf_stats_user;
 -- covers from daily, matching refresh_active_users_periods. Passing NULL _hi restates
 -- from _lo forward (one-time genesis backfill). Only the leaderboard categories are
 -- materialised (see the table comment above).
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_financial_monthly;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_financial_monthly(
     _lo DATE,
     _hi DATE DEFAULT NULL
@@ -192,6 +193,7 @@ $$;
 -- a full-history financial rebuild drops from ~tens of hours to ~1-2h.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_financial;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_financial(
     _first_block INT,
     _last_block INT

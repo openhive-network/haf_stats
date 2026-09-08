@@ -70,6 +70,7 @@ GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
 -- mainnet.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_network_custom_json;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_network_custom_json(
     _first_block INT,
     _last_block INT

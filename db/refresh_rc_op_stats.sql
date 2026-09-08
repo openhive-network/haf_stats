@@ -31,6 +31,12 @@ BEGIN
     END;
 
     EXECUTE $ddl$
+        -- Deliberately inside this dollar-quoted DDL string rather than at top level:
+        -- the enclosing block RETURNs early when plpython3u is unavailable, so a
+        -- top-level DROP would remove a working sampler without recreating it.
+        -- Drop and create belong together. (Do not name the quote tag in here --
+        -- a dollar-quoted body is literal text, so the tag would close the string.)
+        DROP FUNCTION IF EXISTS haf_stats_app.refresh_rc_op_stats;
         CREATE OR REPLACE FUNCTION haf_stats_app.refresh_rc_op_stats()
         RETURNS INTEGER
         LANGUAGE plpython3u

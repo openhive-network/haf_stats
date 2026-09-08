@@ -103,6 +103,7 @@ ON haf_stats_backend.rc_op_stats_daily (op_type_id, day);
 -- The pick selects a ROW and COALESCEs afterwards, deliberately: avg_cost_rc is NULLABLE, and
 -- a COALESCE pushed inside the probe would fall through to an OLDER sample whenever the
 -- winning row's avg_cost_rc happened to be NULL, silently pricing at the wrong era's rate.
+DROP FUNCTION IF EXISTS haf_stats_app.rc_avg_cost;
 CREATE OR REPLACE FUNCTION haf_stats_app.rc_avg_cost(_op_type_id SMALLINT, _day DATE)
 RETURNS BIGINT
 LANGUAGE sql
@@ -140,6 +141,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.rc_avg_cost(SMALLINT, DATE) TO haf_stats
 --
 -- Both columns come from the SAME picked row (see the block comment above), so a rate is never
 -- assembled from two different eras' samples.
+DROP FUNCTION IF EXISTS haf_stats_app.rc_rate;
 CREATE OR REPLACE FUNCTION haf_stats_app.rc_rate(_op_type_id SMALLINT, _day DATE)
 RETURNS TABLE (base_rc BIGINT, byte_rc NUMERIC)
 LANGUAGE sql
@@ -187,6 +189,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.rc_rate(SMALLINT, DATE) TO haf_stats_use
 -- the app-scoped view wraps every row in a computed-block ceiling (operation_id_to_block_num <=
 -- context.min_block), which is unindexable and made the helper + endpoint ~92s. The footprint
 -- reads committed chain history directly, so the global view is both correct and ~100x faster.
+DROP FUNCTION IF EXISTS haf_stats_app.account_op_seq_range;
 CREATE OR REPLACE FUNCTION haf_stats_app.account_op_seq_range(
     _account_id INT,
     _from_block INT,

@@ -79,6 +79,7 @@ GRANT SELECT ON haf_stats_backend.author_cohort_retention TO haf_stats_user;
 -- Summary refresh
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_author_cohort_retention;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_author_cohort_retention(
     _as_of TIMESTAMP,
     _from_month DATE = NULL,
@@ -132,6 +133,7 @@ $$;
 -- Incremental processor
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_content_cohorts;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_content_cohorts(
     _first_block INT,
     _last_block INT

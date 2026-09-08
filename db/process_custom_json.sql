@@ -57,6 +57,7 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_custom_json;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_custom_json(
     _first_block INT,
     _last_block INT

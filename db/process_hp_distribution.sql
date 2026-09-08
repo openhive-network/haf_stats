@@ -48,6 +48,7 @@ GRANT SELECT ON haf_stats_backend.hp_distribution_snapshot TO haf_stats_user;
 -- number of snapshot rows written (0..8).
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_hp_distribution_snapshot;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_hp_distribution_snapshot()
 RETURNS INTEGER
 LANGUAGE plpgsql
