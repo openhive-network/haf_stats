@@ -14,6 +14,8 @@
 #   sync   : sync             -> install + process to head, cache `haf_haf_stats_sync`
 #   test   : pattern-test      -> tavern .pat.json exact-value suite (cached stack)
 #            regression-test    -> parity + external hived regression guards
+#   publish: publish_latest    -> :latest on develop, AFTER the test lanes
+#            publish_images     -> mirror :<tag> to registry.hive.blog (protected tags)
 #   cleanup: cache_cleanup     -> manual NFS cache pruning
 #
 # The fast stub gate (endpoint-tests, docker-compose-ci.yml) still runs on every
@@ -695,17 +697,15 @@ docker-build:
     # image that exists, and an operator had to hand-pin a SHA for the app while the
     # rest of the node moved by version.
     #
-    # `latest` tracks develop. Note it does NOT fix the default resolution above,
-    # which produces a version string and never `latest`; it helps only an operator
-    # who sets HAF_STATS_VERSION=latest explicitly. The tag half is what unblocks
-    # haf_api_node.
+    # `latest` is NOT pushed here -- see publish_latest in the publish stage. This job
+    # is in `build`, so anything it pushed would precede every test lane, and this
+    # repo's own docker/.env sets HAF_STATS_VERSION=latest with docker-compose.yml
+    # defaulting to it. Publishing `latest` from here would mean `cd docker && docker
+    # compose up -d`, which README calls the production path, could silently pull a
+    # develop-HEAD image whose tests went red.
     - |
       if [ -n "${CI_COMMIT_TAG:-}" ]; then
         docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
-      fi
-      if [ "$CI_COMMIT_BRANCH" = "develop" ]; then
-        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:latest"
-        docker push "$CI_REGISTRY_IMAGE:latest"
       fi
   rules:
     # Branches AND tags. Workflows/Branch-Pipelines.gitlab-ci.yml creates pipelines
@@ -723,9 +723,24 @@ docker-build:
     #      pipeline. If this job did not, GitLab would refuse to create the pipeline
     #      at all: "'sync' job needs 'docker-build' job, but it does not exist".
     #
-    # Rebuilding on a tag is safe here BECAUSE those lanes run on tags: sync,
-    # pattern-test, regression-test and reinstall-test are all unrules'd, so a tag
-    # pipeline exercises what it builds. (Only endpoint-tests is branch-gated.)
+    # Rebuilding on a tag is acceptable here, but be precise about why -- an earlier
+    # revision of this comment overstated it twice and both are corrected:
+    #
+    #   * SEVEN jobs are branch-gated, not one: sql-lint, openapi-drift, shell-lint,
+    #     shell-tests, hadolint, compose-validate and endpoint-tests. So a tag pipeline
+    #     runs FEWER checks than a branch pipeline -- no linting, no fast stub gate.
+    #   * Of the four lanes that do run on tags, only reinstall-test reliably exercises
+    #     the built image. It pulls ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+    #     explicitly. sync sets HAF_STATS_IMAGE too but short-circuits on an app-cache
+    #     hit keyed by that same short SHA, so on a tag over an already-built develop
+    #     commit it exits in seconds. pattern-test and regression-test run with
+    #     HAF_STATS_IMAGE unset and never touch it. NOTHING exercises the pushed
+    #     REWRITER image, which publish_images mirrors regardless.
+    #
+    # What actually makes the rebuild safe is narrower and verifiable: both Dockerfiles
+    # are COPY-only over pinned bases (Dockerfile:1 psql:14-2, Dockerfile.rewriter:6
+    # nginx:9f5e12cd...) with no package installs and no network fetches, so a rebuild
+    # of the same commit is content-equivalent to what develop tested.
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
@@ -746,20 +761,16 @@ docker-build-rewriter:
   script:
     - docker build -f Dockerfile.rewriter
         --build-arg GIT_COMMIT_SHA="$CI_COMMIT_SHA"
-        --build-arg GIT_CURRENT_BRANCH="$CI_COMMIT_REF_NAME"
+        --build-arg GIT_CURRENT_BRANCH="${CI_COMMIT_BRANCH:-}"
         --build-arg GIT_LAST_LOG_MESSAGE="$CI_COMMIT_TITLE"
         --build-arg BUILD_TIME="$CI_JOB_STARTED_AT"
         -t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
         ${CI_COMMIT_TAG:+-t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_TAG"} .
     - docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
-    # Tag + latest -- see the note on docker-build (hive/haf_stats#66).
+    # Tag only; `latest` is published by publish_latest after the tests.
     - |
       if [ -n "${CI_COMMIT_TAG:-}" ]; then
         docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_TAG"
-      fi
-      if [ "$CI_COMMIT_BRANCH" = "develop" ]; then
-        docker tag "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE/rewriter:latest"
-        docker push "$CI_REGISTRY_IMAGE/rewriter:latest"
       fi
   rules:
     # Branches and tags, same as docker-build -- the publish job pulls this image
@@ -1481,13 +1492,67 @@ install-test:
 # resolves (`1.28.6`), not `v1.28.6`.
 publish_images:
   extends: .docker_publish_job_template
+  # NAMES EVERY LANE THAT RUNS ON A TAG. `needs` overrides stage ordering, so a job
+  # listing only some of them starts as soon as those finish and can mirror a release
+  # while another lane is still running -- or after it has failed. An earlier revision
+  # named only sync and reinstall-test and described that as "a release cannot be
+  # mirrored until the pipeline has passed"; it was the weaker gate, not the stronger.
+  #
+  # pattern-test and regression-test are the correctness lanes and belong here.
+  # endpoint-tests and the six lint jobs deliberately are NOT: they are branch-gated,
+  # and a non-optional `needs` on a job absent from a tag pipeline is exactly the
+  # config error that made the first revision of this MR unable to create one at all.
   needs:
     - job: docker-build
     - job: docker-build-rewriter
     - job: sync
+    - job: pattern-test
+    - job: regression-test
     - job: reinstall-test
   variables:
     PUBLISH_IMAGES: "haf_stats rewriter"
+
+# `latest` tracks develop, published HERE rather than from docker-build so that it only
+# ever names a commit whose test lanes went green.
+#
+# That distinction matters more in this repo than in the siblings, because this repo
+# CONSUMES its own `latest`: docker/.env sets HAF_STATS_VERSION=latest and
+# docker/docker-compose.yml defaults three services to it, and README calls
+# `cd docker && docker compose up -d` the production path. Today that chain fails loudly
+# with `manifest unknown` because no `latest` exists. The moment one does, a red develop
+# build published from the `build` stage would resolve silently instead -- turning a loud
+# failure into a wrong image. docker/docker-compose-ci-test.yml and the comment above
+# reinstall-test both already name that as the hazard they defend against.
+#
+# It does NOT fix haf_api_node's default resolution, which produces a version string and
+# never `latest`; only the tag half does that. This is for developers and for anyone who
+# sets HAF_STATS_VERSION=latest deliberately.
+publish_latest:
+  stage: publish
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  needs:
+    - job: docker-build
+    - job: docker-build-rewriter
+    - job: sync
+    - job: pattern-test
+    - job: regression-test
+    - job: reinstall-test
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      set -e
+      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/rewriter"; do
+        docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
+        docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:latest"
+        docker push "${repo}:latest"
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
 
 # =============================================================================
 # CLEANUP — manual NFS cache pruning.
