@@ -23,3 +23,14 @@ tests/tavern/.pytest_cache/
 .openapi_venv/
 scripts/openapi_out/
 /rewrite_rules.conf
+
+# Scratch output of the reinstall-test CI lane (.gitlab-ci.yml). Written to docker/
+# in CI, and by anyone reproducing the lane locally, where a `git add -A` would sweep
+# them up -- same reason /rewrite_rules.conf is listed above.
+/docker/schema-before.sql
+/docker/schema-after.sql
+/docker/schema.diff
+# Written into the same directory by the shared CI template's compose startup
+# and teardown, for the same reason.
+/docker/ci.env
+/docker/container-logs.tar.gz

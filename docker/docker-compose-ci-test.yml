@@ -60,6 +60,47 @@ services:
       haf:
         condition: service_healthy
 
+  # Re-install over the already-installed cache datadir (#74). Behind a profile so
+  # `docker compose up` (what .haf_app_dind_compose_startup runs for every other test
+  # job) never starts it -- only `docker compose run haf-stats-setup` does, which
+  # activates the profile implicitly. Without the profile this would install on every
+  # pattern-test and regression-test run too, changing what those lanes measure.
+  #
+  # The datadir here is the haf_haf_stats_sync cache: a database that already has the
+  # full schema installed. Running install_app against it is precisely the operation
+  # #60 broke, and the one no CI lane performed until this service existed.
+  # PARITY: docker/docker-compose.yml declares the deployment copy of this service
+  # and is the source of truth for its command/environment. Nothing asserts the two
+  # stay in step, so a variable added there (--swagger-url, POSTGRES_PORT, ...) and
+  # not here would leave this lane testing a different install than operators run.
+  haf-stats-setup:
+    profiles: ["reinstall"]
+    # NOT `:?`, and NOT a real published tag. Both are wrong here:
+    #
+    #   `:?`  breaks the SIBLING lanes. Compose interpolates the WHOLE file at `config`
+    #         and `up` time -- `profiles:` gates whether a service STARTS, not whether
+    #         its definition is interpolated -- so pattern-test and regression-test,
+    #         which use this file and never set HAF_STATS_IMAGE, fail before starting
+    #         anything. (Learned the hard way: pipeline 178863.)
+    #   a real tag (e.g. haf_stats:latest) would let reinstall-test go GREEN having
+    #         installed a DIFFERENT commit, which is the one outcome that makes the
+    #         whole lane worthless.
+    #
+    # So: a default that interpolates cleanly for everyone but cannot resolve as an
+    # image. Siblings never pull it; reinstall-test sets the real value and, if it ever
+    # stopped doing so, dies on a pull whose name says exactly what went wrong.
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-reinstall-test-job:invalid}
+    command: ["install_app"]
+    environment:
+      POSTGRES_HOST: haf
+      POSTGRES_USER: haf_admin   # matches docker-compose.yml: install creates roles/context
+      POSTGRES_DB:   haf_block_log
+    networks:
+      - haf-network
+    depends_on:
+      haf:
+        condition: service_healthy
+
 networks:
   haf-network:
     name: haf-network-test

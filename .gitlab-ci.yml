@@ -439,6 +439,13 @@ compose-validate:
     - cd docker
     - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
     - docker compose -f docker-compose-ci-test.yml config --quiet
+    # ...and again with HAF_STATS_IMAGE UNSET, which is how pattern-test and
+    # regression-test actually read this file. The dummy above masks that: on pipeline
+    # 178863 a `${HAF_STATS_IMAGE:?}` in the PROFILED haf-stats-setup service passed
+    # this lint and then broke both sibling lanes, because compose interpolates EVERY
+    # service in the file -- `profiles:` gates whether a service STARTS, not whether
+    # its definition is interpolated. This turns that incident into a 15-second gate.
+    - env -u HAF_STATS_IMAGE docker compose -f docker-compose-ci-test.yml config --quiet
     - docker compose -f docker-compose-ci.yml config --quiet
     - docker compose --env-file .env -f docker-compose-test.yml config --quiet
   rules:
@@ -832,6 +839,188 @@ regression-test:
     when: always
     paths:
       - docker/container-logs.tar.gz
+    expire_in: 1 week
+
+# =============================================================================
+# Re-install gate (#74) -- install_app.sh over an ALREADY-INSTALLED database.
+# =============================================================================
+# Until this lane existed nothing in CI ran install_app.sh twice, so re-install
+# failures could only be caught by static analysis of the SQL text. #60 reached a
+# node exactly that way: green in every lane, exit 3 on the first re-install.
+#
+# WHAT THIS DOES AND DOES NOT COVER. Both installs run the SAME image, so this is
+# an idempotency guard, not an upgrade guard:
+#
+#   COVERED -- a statement that raises only on the SECOND run: #60 itself (a DROP
+#     whose signature does not match its plain CREATE), but also ALTER TABLE ADD
+#     CONSTRAINT (no IF NOT EXISTS form), DML without ON CONFLICT, and anything in
+#     the ~13 inline `psql_cmd -c` statements in install_app.sh, which live in no
+#     .sql file the static scanner reads. Proven by negative control #1.
+#     Note tests/unit/test_sql_idempotency.py already covers much of this class in
+#     ~3s, so the marginal value here is only what its regexes do not model.
+#   COVERED -- installer NON-CONVERGENCE in privileges/ACLs, which the schema diff
+#     catches and an exit code cannot. Proven by negative control #2: a
+#     `GRANT ... ON ALL FUNCTIONS IN SCHEMA` placed before the functions exist is a
+#     silent no-op on install 1 and grants them on install 2 (it is a snapshot, not
+#     a rule). Both installs exit 0; 239 lines differed. No static rule over SQL
+#     text can model this -- the outcome depends on database STATE when the
+#     statement runs. This is the one class the lane uniquely owns.
+#     Note the diff is SCHEMA-SCOPED to the three app schemas. Role-level state is
+#     outside it: db/builtin_roles.sql runs ALTER ROLE and GRANT/REVOKE on roles and
+#     on schemas hafd/hive on every install, and none of that appears in
+#     `pg_dump --schema-only -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints`.
+#     A regression there is caught only if it makes the install exit non-zero.
+#   NOT COVERED -- DATA-level idempotency. Assertion 2 is --schema-only, so a
+#     backfill that double-counts or a rollup refreshed twice passes green. Only
+#     data defects that RAISE are caught, via the exit code.
+#   NOT COVERED -- a return-type change under CREATE OR REPLACE, which is the
+#     class #73's nine DROPs defend against. That failure only exists BETWEEN
+#     releases, and installing one commit over itself cannot produce it. Closing
+#     it needs the first install to come from the merge target's image; tracked as
+#     #78. Do not read a green run here as evidence that #73's DROPs work.
+#
+# Placement is the test stage, not the end of `sync`, because `sync` returns early
+# on a cache hit,
+#
+#     CACHE_HIT=$(cat /tmp/cache_hit ...); if [[ "$CACHE_HIT" == "true" ]]; then exit 0
+#
+# and exits before the stack is ever started -- so a re-install appended there
+# would be skipped on exactly the common case, while #74 requires it to run on a
+# cache hit. The test stage extracts the same cache and starts the same HAF on
+# every pipeline.
+reinstall-test:
+  extends: .haf_stats_dind_test
+  needs:
+    # Inherited needs cover detect_changes/find_haf_image/sync, and sync needs
+    # docker-build -- so on a fresh pipeline the per-commit tag always exists. Named
+    # explicitly anyway: this is the only test-stage job that pulls
+    # ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}, and the sibling lanes replay from the
+    # cached datadir without an app image. On a single-job retry of an old pipeline
+    # after registry cleanup has reaped that tag, this job alone dies on the pull.
+    # haf_stats#51 was this class against hive/haf's registry.
+    - job: detect_changes
+      artifacts: true
+      optional: true
+    - job: find_haf_image
+      artifacts: true
+    - job: sync
+      artifacts: true
+    - job: docker-build
+  # A red run here cannot block a merge (only_allow_merge_if_pipeline_succeeds is off),
+  # so a flake is pure noise that people learn to ignore. Retry only infrastructure
+  # classes -- never script_failure, which is the signal this lane exists to produce.
+  # Note stuck_or_timeout_failure covers a job never picked up, NOT one exceeding the
+  # inherited 30-minute timeout -- that is job_execution_timeout, deliberately absent,
+  # because a 30-minute hang here wants investigating rather than repeating.
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  variables:
+    # The other test jobs never need this (the ci-test stack has no haf_stats
+    # service of its own), so it is set here rather than in .haf_stats_dind_test.
+    # Same tag docker-build pushes and sync consumes.
+    HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  script:
+    - |
+      cd "${CI_PROJECT_DIR}/docker"
+      # Record WHAT WAS ACTUALLY INSTALLED. The compose default only protects against
+      # an unset/empty variable; a valid-but-wrong tag (:latest, a develop tag, a
+      # typo'd registry) sails past it and the lane goes green having installed a
+      # different commit. It cannot be recovered after the fact -- `compose config`
+      # filters inactive-profile services out of its output -- so print it.
+      echo "reinstall-test: image under test = ${HAF_STATS_IMAGE}"
+    - |
+      cd "${CI_PROJECT_DIR}/docker"
+      # The PG binaries are not reliably on PATH in the haf image -- `sync` already has
+      # to locate pg_ctl this way for the same reason -- so find pg_dump rather than
+      # assume it. Failing here with a clear message beats a bare "executable file not
+      # found" from docker exec. tr -d matches the idiom sync uses for pg_ctl.
+      PG_DUMP=$(docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf bash -c 'command -v pg_dump || find /usr/lib/postgresql -name pg_dump -type f 2>/dev/null | head -1' | tr -d '\r\n')
+      if [[ -z "$PG_DUMP" ]]; then
+        echo "FAIL: pg_dump not found inside the haf container; cannot take a schema snapshot."
+        exit 1
+      fi
+      echo "Using pg_dump at: ${PG_DUMP}"
+      echo "Capturing the installed schema before re-installing..."
+      # pg_dump 17 emits a RANDOM nonce in its restrict/unrestrict guard lines on every
+      # run (they exist to stop a dump smuggling psql meta-commands into a restore).
+      # They are not schema and they differ on every invocation, so they are stripped
+      # before comparing -- otherwise this assertion fails 100% of the time. Observed
+      # across three runs of this lane: 10875 lines, stable, with exactly the two nonce
+      # lines differing.
+      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-before.sql
+      # --strict-names above is what guarantees all three schemas are really present:
+      # without it `pg_dump -n a -n b -n c` errors only when NO pattern matches, so a
+      # renamed schema would silently narrow the dump to the survivors and a
+      # byte-comparison of two equally-narrowed dumps would still "pass". A grep for the
+      # schema NAMES cannot substitute for it -- db/op_type_registry.sql embeds all three
+      # as string literals inside a function body, so one dumped function satisfies the
+      # grep even when two schemas are missing entirely.
+      #
+      # The line floor is only a second line of defence against a TRUNCATED dump, and
+      # it deliberately avoids a constant pinned to today's schema size: such a
+      # constant decays, because nobody edits CI when the schema grows, and it
+      # eventually asserts nothing while looking like it asserts something. This is a
+      # catastrophic-empty check only; the after-dump is compared to the before-dump
+      # below, which self-calibrates and needs no maintenance.
+      LINES=$(wc -l < schema-before.sql)
+      echo "schema-before.sql: ${LINES} lines"
+      if [[ "${LINES}" -lt 1000 ]]; then
+        echo "FAIL: schema dump is only ${LINES} lines; the install cannot have succeeded."
+        exit 1
+      fi
+    - |
+      cd "${CI_PROJECT_DIR}/docker"
+      echo "Re-running install_app over the already-installed cache database..."
+      # --no-deps: haf is already running from the template's compose startup. Without
+      # it, compose would try to (re)create the dependency and disturb the very stack
+      # the assertions read.
+      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never run --rm --no-deps haf-stats-setup
+      echo "Second install exited 0."
+    - |
+      cd "${CI_PROJECT_DIR}/docker"
+      echo "Capturing the schema after..."
+      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-after.sql
+      # Compare the two dumps to EACH OTHER rather than to a constant: this catches a
+      # truncation that hit only the second dump, and stays correct as the schema
+      # grows. An identical truncation of both would still pass, but that needs
+      # pipefail off AND both dumps failing the same way.
+      AFTER_LINES=$(wc -l < schema-after.sql)
+      echo "schema-after.sql: ${AFTER_LINES} lines (before: ${LINES})"
+      if [[ "${AFTER_LINES}" -lt $(( LINES * 95 / 100 )) ]]; then
+        echo "FAIL: after-dump is ${AFTER_LINES} lines against ${LINES} before -- that is"
+        echo "a truncated dump, not a schema change; the diff would be unreliable."
+        exit 1
+      fi
+      if diff -u schema-before.sql schema-after.sql > schema.diff; then
+        echo "OK: the second install left the schema byte-identical."
+        # Nothing to publish on success: the diff is empty and the dumps are identical.
+        # A failure exits before this line, so the evidence survives exactly when needed.
+        rm -f schema-before.sql schema-after.sql schema.diff
+      else
+        echo "FAIL: the second install changed the schema."
+        echo "A function recreated without its GRANT (DROP discards privileges where"
+        echo "CREATE OR REPLACE preserves them), or an object rebuilt with different"
+        echo "properties, appears below. See hive/haf_stats#73 and #74."
+        head -200 schema.diff
+        exit 1
+      fi
+  artifacts:
+    # `artifacts:` is a HASH, not a list -- one `when:` for the whole job, so the dumps
+    # cannot be declared on_failure separately from the logs. Instead the success path
+    # DELETES them (see the final script block): on a green run schema.diff is empty and
+    # the two dumps are identical, so uploading ~10875 lines twice per pipeline is pure
+    # storage cost. On any failure the script exits before that cleanup and the files
+    # survive to be uploaded. schema-before.sql exists even on the install-failure path;
+    # only schema-after.sql is absent there, and a missing path is a warning, not an error.
+    when: always
+    paths:
+      - docker/container-logs.tar.gz
+      - docker/schema.diff
+      - docker/schema-before.sql
+      - docker/schema-after.sql
     expire_in: 1 week
 
 # =============================================================================
