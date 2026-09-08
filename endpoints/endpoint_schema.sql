@@ -10,6 +10,7 @@ SET ROLE haf_stats_owner;
 -- number therefore resolves to the head irreversible block's date. Harmless at the
 -- day-bucket granularity of these endpoints.
 -- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS haf_stats_app.to_filter_date;
 CREATE OR REPLACE FUNCTION haf_stats_app.to_filter_date(_input TEXT, _default DATE)
 RETURNS DATE
 LANGUAGE plpgsql
@@ -69,6 +70,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.to_filter_date(TEXT, DATE) TO haf_stats_
 --
 -- Co-located here (not db/) for the same reason as to_filter_date above: the stub stack
 -- loads only this file, so a helper in an unmounted db/*.sql would not exist there.
+DROP FUNCTION IF EXISTS haf_stats_app.try_jsonb;
 CREATE OR REPLACE FUNCTION haf_stats_app.try_jsonb(_txt TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -109,6 +111,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.try_jsonb(TEXT) TO haf_stats_user;
 -- under any production-sane ceiling, so a hardcoded constant would be untestable in both CI
 -- lanes — the vacuous-pass trap. Same inlinable-constant shape as
 -- haf_stats_app.community_start_block().
+DROP FUNCTION IF EXISTS haf_stats_app.max_interaction_ops;
 CREATE OR REPLACE FUNCTION haf_stats_app.max_interaction_ops()
 RETURNS INT
 LANGUAGE sql
@@ -132,6 +135,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.max_interaction_ops() TO haf_stats_user;
 -- short-circuited there while falling through to the seq binary search in the other two.
 -- Returns NULLs when the range selects no blocks or comes out inverted, so every caller
 -- short-circuits identically.
+DROP FUNCTION IF EXISTS haf_stats_app.block_range_for_dates;
 CREATE OR REPLACE FUNCTION haf_stats_app.block_range_for_dates(_from DATE, _to DATE)
 RETURNS TABLE (from_block INT, to_block INT)
 LANGUAGE plpgsql
@@ -172,6 +176,7 @@ DROP FUNCTION IF EXISTS haf_stats_app.interaction_covered_from(INT, BIGINT, BIGI
 -- the resolved label is identical across them by construction. Co-located here (not
 -- db/) so it installs with the endpoints, including the stub endpoint-test stack.
 -- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS haf_stats_app.resolve_dapp_name;
 CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp_name(_json_id TEXT)
 RETURNS TEXT
 LANGUAGE sql
@@ -199,6 +204,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_name(TEXT) TO haf_stats_use
 -- get_account_rc_footprint group_by=category and get_account_rc_footprint_timeline
 -- category_filter, so the category label is identical across them by construction.
 -- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS haf_stats_app.resolve_dapp_category;
 CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp_category(_json_id TEXT)
 RETURNS TEXT
 LANGUAGE sql
@@ -234,6 +240,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp_category(TEXT) TO haf_stats
 -- drops its driving row. Returns the same labels as the two scalars for every input, fallbacks
 -- included; keep all three in step if the match rule ever changes.
 -- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS haf_stats_app.resolve_dapp;
 CREATE OR REPLACE FUNCTION haf_stats_app.resolve_dapp(_json_id TEXT)
 RETURNS TABLE (app_name TEXT, category TEXT)
 LANGUAGE sql
@@ -271,6 +278,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.resolve_dapp(TEXT) TO haf_stats_user;
 -- must come from daily to stay byte-exact even when queried on its final calendar day.
 -- Interior/leading rollup months are always strictly before the trailing month (hence
 -- sealed); a leading current month only arises in the same-month all-daily case.
+DROP FUNCTION IF EXISTS haf_stats_app.top_accounts_window;
 CREATE OR REPLACE FUNCTION haf_stats_app.top_accounts_window(
     _from DATE,
     _to DATE,
@@ -354,6 +362,7 @@ servers:
 -- root() - serves the full OpenAPI spec at GET /
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_endpoints.root;
 CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
 LANGUAGE plpgsql STABLE
 AS $func$

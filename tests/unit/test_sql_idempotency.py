@@ -255,7 +255,9 @@ def _arg_type(arg: str) -> str:
     # A leading identifier is the parameter NAME only if something follows it.
     # A quoted name is still a name. endpoints/endpoint_schema.sql writes
     # `"from_date" TEXT = NULL` throughout, which the unquoted-only pattern left as the
-    # non-type `"from_date" text`. That shape is what #73's remediation will produce.
+    # non-type `"from_date" text`. (#73 ended up using paren-less DROPs, which carry no
+    # argument list at all, so it is the file's existing quoted-parameter style -- not
+    # #73 -- that this has to parse.)
     parts = a.split()
     if len(parts) > 1 and re.fullmatch(r'[a-z_][a-z0-9_]*|"[^"]*"', parts[0], re.I):
         a = " ".join(parts[1:])
@@ -473,8 +475,8 @@ def test_other_object_types_are_created_idempotently(path: Path):
         ("x INTERVAL DAY TO SECOND", ("interval",)),
         ("INTERVAL HOUR TO MINUTE(3)", ("interval",)),
         ("INTERVAL", ("interval",)),
-        # Quoted parameter names -- the style endpoint_schema.sql uses, and the shape
-        # #73's remediation will produce.
+        # Quoted parameter names -- the style endpoint_schema.sql uses throughout.
+        # (Not produced by #73, which used paren-less DROPs.)
         ('"from_date" TEXT = NULL', ("text",)),
         ('"page" INT = 1, "page_size" INT = 20', ("integer", "integer")),
         ('"g" INT', ("integer",)),
