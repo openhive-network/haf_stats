@@ -41,6 +41,7 @@ SET ROLE haf_stats_owner;
 -- per-row in the content processor's hot path and must not become a function call.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.community_start_block;
 CREATE OR REPLACE FUNCTION haf_stats_app.community_start_block()
 RETURNS INT
 LANGUAGE sql
@@ -49,6 +50,7 @@ AS $$
     SELECT 37500000;
 $$;
 
+DROP FUNCTION IF EXISTS haf_stats_app.is_community_name;
 CREATE OR REPLACE FUNCTION haf_stats_app.is_community_name(_name TEXT)
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -115,6 +117,7 @@ GRANT SELECT ON haf_stats_backend.community_role TO haf_stats_user;
 -- is what lets install_app.sh self-heal it with a plain backfill call.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_community_registry;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_community_registry(
     _first_block INT,
     _last_block INT

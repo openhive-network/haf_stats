@@ -37,6 +37,7 @@ GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_network_ops;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_network_ops(
     _first_block INT,
     _last_block INT

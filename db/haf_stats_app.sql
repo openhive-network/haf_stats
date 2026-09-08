@@ -78,6 +78,7 @@ GRANT SELECT ON haf_stats_app.app_version TO haf_stats_user;
 -- Lifecycle control functions
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.continue_processing;
 CREATE OR REPLACE FUNCTION haf_stats_app.continue_processing()
 RETURNS BOOL
 LANGUAGE sql STABLE
@@ -92,6 +93,7 @@ AS $$
     SELECT COALESCE(BOOL_AND(continue_processing), TRUE) FROM haf_stats_app.app_status;
 $$;
 
+DROP FUNCTION IF EXISTS haf_stats_app.allow_processing;
 CREATE OR REPLACE FUNCTION haf_stats_app.allow_processing()
 RETURNS VOID
 LANGUAGE sql
@@ -99,6 +101,7 @@ AS $$
     UPDATE haf_stats_app.app_status SET continue_processing = TRUE;
 $$;
 
+DROP FUNCTION IF EXISTS haf_stats_app.stop_processing;
 CREATE OR REPLACE FUNCTION haf_stats_app.stop_processing()
 RETURNS VOID
 LANGUAGE sql
@@ -128,6 +131,7 @@ $$;
 -- burn) — only modest per-row overhead, verified not to regress massive sync.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.get_required_authorities_safe;
 CREATE OR REPLACE FUNCTION haf_stats_app.get_required_authorities_safe(_body JSONB)
 RETURNS TABLE (account_name TEXT)
 LANGUAGE plpgsql STABLE
@@ -143,6 +147,7 @@ $$;
 -- HAF context registration (called once at install)
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.create_context_if_not_exists;
 CREATE OR REPLACE FUNCTION haf_stats_app.create_context_if_not_exists()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -278,6 +283,14 @@ $$;
 -- pointer — unlike the older hive.app_next_block() function which does not.
 -- ---------------------------------------------------------------------------
 
+-- DROP PROCEDURE, not DROP FUNCTION: PG11+ refuses to drop a procedure through
+-- DROP FUNCTION, so the FUNCTION form used for the rest of this file would have
+-- been a silent no-op here. Paren-less for the same reason as the others -- it
+-- covers every overload, so a future signature change needs no edit in step.
+-- Procedures have no return type, but CREATE OR REPLACE still aborts with
+-- "cannot change name of input parameter", and an added parameter would
+-- accumulate a second overload rather than replace this one.
+DROP PROCEDURE IF EXISTS haf_stats_app.main;
 CREATE OR REPLACE PROCEDURE haf_stats_app.main(
     IN _context hafd.CONTEXT_NAME DEFAULT 'haf_stats'
 )
@@ -345,6 +358,7 @@ $$;
 -- container, which the processor waits on, so the rollup is populated before serving.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.backfill_rollup_if_empty;
 CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rollup_if_empty(
     _rollup REGCLASS,
     _source REGCLASS,
@@ -384,6 +398,7 @@ $$;
 -- genesis node the rollup is empty, so EXISTS is false and this is a no-op.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.backfill_rollup_if_column_null;
 CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rollup_if_column_null(
     _rollup REGCLASS,
     _sentinel_col TEXT,

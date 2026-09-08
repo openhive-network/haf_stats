@@ -257,6 +257,7 @@ GRANT SELECT ON haf_stats_backend.active_users_account_monthly TO haf_stats_user
 -- months from their first day (see refresh_financial_monthly for the identical
 -- rationale). Only op_class -1 is materialised (the sole consumer). REPLACE semantics;
 -- NULL _hi restates from _lo forward for a one-time genesis backfill.
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_active_users_account_monthly;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_active_users_account_monthly(
     _lo DATE,
     _hi DATE DEFAULT NULL
@@ -310,6 +311,7 @@ $$;
 --    operations PK range-scan is preferred over a bitmap heap scan.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_active_users;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_active_users(
     _first_block INT,
     _last_block INT

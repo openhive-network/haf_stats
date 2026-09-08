@@ -331,6 +331,7 @@ GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
 -- rebuild script's one-transaction-per-batch loop cleans up after itself.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_community_batch_stage;
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_community_batch_stage()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -385,6 +386,7 @@ $$;
 -- (with community still NULL) — which is why the earlier-batch base case below must
 -- exclude parents that have a staged creation of their own, or an in-batch parent would
 -- resolve to its own not-yet-computed NULL.
+DROP FUNCTION IF EXISTS haf_stats_app.resolve_community_batch;
 CREATE OR REPLACE FUNCTION haf_stats_app.resolve_community_batch()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -721,6 +723,7 @@ $$;
 -- re-scanning the millions-of-rows post_engagement per period.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_full;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_full()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -739,6 +742,7 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_touched;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_touched()
 RETURNS VOID
 LANGUAGE plpgsql
@@ -864,6 +868,7 @@ $$;
 --    compilation is pure overhead.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_content_stats;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_content_stats(
     _first_block INT,
     _last_block INT
@@ -1400,6 +1405,7 @@ DROP FUNCTION IF EXISTS haf_stats_app.process_content_volume_backfill(INT, INT);
 -- network tables and zeroes the account content columns before calling it. It is
 -- owner-only and reachable solely through that script, so this is accepted as a second
 -- "loaded gun" rather than fixed here; do not call it directly outside the script.
+DROP FUNCTION IF EXISTS haf_stats_app.process_content_volume;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_content_volume(
     _first_block INT,
     _last_block INT

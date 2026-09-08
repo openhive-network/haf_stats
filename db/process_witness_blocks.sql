@@ -81,6 +81,7 @@ GRANT SELECT ON haf_stats_backend.witness_blocks_daily TO haf_stats_user;
 -- process_financial resolves all of its types by name for the same reason.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.process_witness_blocks;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_witness_blocks(
     _first_block INT,
     _last_block INT

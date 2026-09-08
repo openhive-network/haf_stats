@@ -48,6 +48,7 @@ GRANT SELECT ON haf_stats_backend.governance_concentration_snapshot TO haf_stats
 -- snapshot rows written (1 when balances exist, else 0).
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_governance_concentration;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_governance_concentration()
 RETURNS INTEGER
 LANGUAGE plpgsql

@@ -76,6 +76,7 @@ GRANT SELECT ON haf_stats_backend.account_financial_alltime TO haf_stats_user;
 -- ~1200-block boundary. Runs daily via pg_cron + once at install.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_top_accounts_alltime;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_top_accounts_alltime()
 RETURNS VOID
 LANGUAGE plpgsql
