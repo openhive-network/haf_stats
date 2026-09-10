@@ -1,0 +1,48 @@
+# What Docker must NOT send to the daemon as build context.
+#
+# WHY THIS EXISTS (#61). docker/docker-compose.yml's haf-stats-rewriter declares
+# `build: context: ..` -- the REPO ROOT -- because Dockerfile.rewriter COPYs from both
+# endpoints/ and docker/. That build is not hypothetical: CI publishes only SHA tags, so
+# the default `:latest` does not resolve and Compose falls back to building it, which is
+# the behaviour the README documents.
+#
+# .gitignore does NOT restrict a build context; only this file does. Without it the
+# context tars up docker/blockchain/ -- the pre-synced HAF block_log the README's own
+# Prerequisites tell the operator to put there, which is multiple GB -- on every build.
+#
+# Keep endpoints/ and docker/ OUT of the exclusions: Dockerfile.rewriter COPYs
+# docker/haf_stats_nginx.conf.template, docker/rewriter_entrypoint.sh and
+# endpoints/rewrite_rules.conf, and the main Dockerfile COPYs db/, endpoints/ and
+# scripts/. Excluding a COPY source fails the build loudly, which is the good case --
+# but it fails it.
+
+# Chain data and runtime state. The big one.
+docker/blockchain/
+docker/blockchain
+**/datadir/
+**/shm_dir/
+*.log
+
+# Version control and CI metadata
+.git/
+.gitignore
+.gitlab-ci.yml
+.gitattributes
+
+# Local environment overrides
+docker/.env.local
+
+# Python caches and the venv scripts/openapi_rewrite.sh builds
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+.openapi_venv/
+.pytest_cache/
+**/.pytest_cache/
+
+# Documentation and tests: neither Dockerfile COPYs these.
+docs/
+tests/
+README.md
+CHANGELOG.md

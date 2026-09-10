@@ -163,6 +163,14 @@ services:
       # the block processor uses its own connection and is deliberately unaffected. (#48)
       PGRST_DB_URI:                      ${PGRST_DB_URI:-postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s}
       PGRST_DB_SCHEMA:                   ${PGRST_DB_SCHEMA:-haf_stats_endpoints}
+      # Without this, GET / serves PostgREST's own auto-generated introspection
+      # document instead of the curated spec in haf_stats_endpoints.root(), and the
+      # rewriter's `rewrite ^/$ /` rule is inert. Seven of the nine peer modules in
+      # haf_api_node set it (hafah uses `home`; hivemind's line is commented out)
+      # (balance_tracker.yaml, reputation_tracker.yaml). It was absent from this
+      # repo entirely -- the live node only served the right document because the
+      # private node config set it. (#61)
+      PGRST_DB_ROOT_SPEC:                ${PGRST_DB_ROOT_SPEC:-root}
       PGRST_DB_ANON_ROLE:                ${PGRST_DB_ANON_ROLE:-haf_stats_user}
       PGRST_DB_EXTRA_SEARCH_PATH:        ${PGRST_DB_EXTRA_SEARCH_PATH:-haf_stats_app}
       PGRST_DB_POOL:                     ${PGRST_DB_POOL:-20}
@@ -185,6 +193,65 @@ services:
         # Upstream does not couple these at all -- balance_tracker.yaml's postgrest
         # depends on its install job and pgbouncer, never on block-processing. Serving
         # slightly stale statistics is better than serving none.
+        condition: service_started
+
+  # The public REST surface. Without this service `docker compose up -d` gives bare
+  # PostgREST, where every documented path -- /network/engagement,
+  # /account/{account}/interactions -- 404s, because they only exist as rewrite rules
+  # mapping them onto /rpc/ calls. The image, its nginx template, its entrypoint and
+  # endpoints/rewrite_rules.conf all already existed and CI built and pushed the image
+  # on every commit; THIS file, the one operators run, never started it. (#61)
+  #
+  # docker-compose-ci.yml has built and run this Dockerfile since #62, with
+  # tests/tavern/rewriter/public_paths.tavern.yaml exercising all 24 rules against it, so
+  # the ROUTING was already proven. What was missing was only that an operator following
+  # this repo's README got PostgREST and no rewriter.
+  #
+  # Service shape copied from the deployment that proves it: POSTGREST_HOST/PORT are the
+  # only two knobs the entrypoint reads, and the healthcheck probes :81, which is a
+  # SEPARATE server block in the image serving only /health. Do not point it at :80/health
+  # -- that path is a rewrite rule reaching get_health in the database, so it would report
+  # the APP healthy rather than the PROXY alive.
+  #
+  # OPERATIONAL NOTE: haf_stats_nginx.conf.template becomes a literal
+  # `proxy_pass http://haf-stats-api:3000` with no `resolver` directive, so nginx resolves
+  # that name ONCE at startup and caches the IP. Recreating haf-stats-api (an image bump,
+  # --force-recreate) gives it a new IP and this container keeps serving 502s against the
+  # old one -- while reporting healthy, because the :81 probe is an unconditional 204 that
+  # never touches the upstream. Restart the rewriter after anything that recreates the API.
+  haf-stats-rewriter:
+    # One version for both images, matching haf_api_node/haf_stats.yaml, which pins this
+    # image at ${HAF_STATS_VERSION}. A second knob that must always be moved with the
+    # first is not a knob -- it is a skew waiting to happen.
+    image: ${HAF_STATS_REWRITER_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats/rewriter:${HAF_STATS_VERSION:-latest}}
+    build:
+      # So `docker compose build` works from a clone, which is how a developer will
+      # reach this service before any image exists for their commit.
+      context: ..
+      dockerfile: Dockerfile.rewriter
+    # Deliberately NO `restart:` key. No other service in this file has one, and both
+    # scripts/install_app.sh and README.md state that as fact while explaining why a
+    # missing --is_forking is a WARN rather than a failure. A restart policy on the proxy
+    # alone would falsify those two comments and leave a restarting proxy in front of a
+    # dead PostgREST. If this stack wants restart policies it should get them everywhere,
+    # as its own change.
+    ports:
+      # The rewriter is the front door; haf-stats-api stays published on 3000 for raw
+      # /rpc/ access and for anyone already depending on it.
+      - "${REWRITER_PORT:-3001}:80"
+    environment:
+      POSTGREST_HOST: ${POSTGREST_HOST:-haf-stats-api}
+      POSTGREST_PORT: ${POSTGREST_PORT:-3000}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 10
+    networks:
+      haf-network:
+    depends_on:
+      haf-stats-api:
         condition: service_started
 
 networks:

@@ -248,22 +248,11 @@ stages:
         last_block_time: !re_fullmatch '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
 
   # --- the two structural rules
-  - name: the spec root is served, not proxied to a function
-    # Discriminated on the content type rather than the body: the root answers with
-    # application/openapi+json and no /rpc/ route does, so repointing `^/$` at any
-    # function fails here, and deleting the rule sends `/` to the catch-all.
-    #
-    # Scope, so this is not read as more than it is: what CI serves at `/` is
-    # PostgREST's OWN auto-generated spec, because PGRST_DB_ROOT_SPEC is set only in
-    # haf_api_node/haf_stats.yaml and in none of this repo's compose files. So this
-    # stage covers the RULE, not the curated haf_stats_endpoints.root() document --
-    # nothing here exercises that, and #61 is where the shipped stack's missing
-    # rewriter and unset root spec belong.
-    request: {url: "{rewriter_url}/", method: GET}
-    response:
-      status_code: 200
-      headers:
-        content-type: !re_search "openapi"
+  # The `^/$` rule is asserted in the LAST test in this file, by body rather than by
+  # content type: once PGRST_DB_ROOT_SPEC is set, the root spec is served as plain
+  # `application/json`, exactly like every /rpc/ route, so the header separates nothing.
+  # Matching on the body needs `strict: json:off`, which is per-test -- hence the
+  # separate document.
 
   - name: the catch-all forwards an unmapped name to /rpc/
     request: {url: "{rewriter_url}/get_version", method: GET}
@@ -503,3 +492,60 @@ stages:
       method: GET
       params: {from_date: "2021-03-01", to_date: "2021-03-01"}
     response: {status_code: 200, json: []}
+
+---
+test_name: GET / serves the curated spec, not PostgREST's introspection document
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+  - !include rewriter_common.yaml
+
+# WHICH document `GET /` returns: PostgREST's auto-generated
+# introspection spec and haf_stats_endpoints.root() cannot be told apart by content
+# type. Measured: PostgREST serves ITS OWN document as application/openapi+json and a
+# FUNCTION-backed root spec as application/json -- the same as every /rpc/ route. So
+# asserting `openapi` FAILS once the root spec is set, and asserting `application/json`
+# separates the root from nothing. Only the body identifies the document.
+#
+# That mattered because PGRST_DB_ROOT_SPEC was set in no compose file in this repo --
+# the live node served the curated document only because the PRIVATE node config set it,
+# so following this repo's README got you the wrong spec with nothing to say so. #61 sets
+# it in docker/docker-compose.yml and in docker-compose-ci.yml, and this is the stage
+# that makes deleting it fail rather than silently downgrade the document.
+#
+# What this covers of the `^/$` rule: DELETING it is caught, because `/` then falls to
+# the catch-all, becomes `/rpc/` and does not answer 200. DE-ANCHORING it to `^/` is
+# caught by `an unknown path is a clean 404` above. REPOINTING it at `/rpc/root` is NOT
+# caught and cannot be -- root() is an ordinary zero-argument function that PostgREST
+# also serves at /rpc/root byte-identically, so `GET /root` returns this same document
+# through the catch-all today. That mutation leaves the served document correct, so it
+# is accepted rather than chased.
+#
+# NO content-type assertion here, deliberately. A root spec backed by a function is
+# served as `application/json; charset=utf-8`, NOT `application/openapi+json`; asserting
+# the latter fails, and asserting the former discriminates nothing, since every /rpc/
+# route answers with it too.
+#
+# `strict: json:off` is deliberate and confined to this one test: the response is the
+# whole ~2,470-line OpenAPI document, and the point is to identify it, not restate it.
+strict:
+  - json:off
+
+stages:
+  - name: the body is haf_stats_endpoints.root(), identified by info.title
+    # PostgREST's own document takes info.title from the database COMMENT, or defaults
+    # to "standard public schema" -- never this string, which exists only in the
+    # generated blob inside root(). Repointing `^/$` at any OTHER endpoint fails on
+    # `openapi`, which none of the 24 returns. (`/rpc/root` itself would pass, being the
+    # same function -- the rule is about which path serves it, not which function exists.)
+    request: {url: "{rewriter_url}/", method: GET}
+    response:
+      status_code: 200
+      json:
+        openapi: "3.1.0"
+        info:
+          title: "HAF Stats - Blockchain Analytics"
+          version: "1.0.0"
