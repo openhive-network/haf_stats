@@ -450,6 +450,12 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.root() RETURNS json
 LANGUAGE plpgsql STABLE
 AS $func$
 DECLARE
+    -- #70: the base URL the document advertises is deployment-specific, so it is
+    -- patched in below rather than baked into the generated blob. Declared BEFORE the
+    -- generated region -- scripts/openapi_rewrite.sh rewrites only what sits between
+    -- the markers, so anything added here or after them survives regeneration.
+    _base TEXT;
+
     -- The OpenAPI spec below is generated from the /** openapi ... */ annotations
     -- in this file by scripts/openapi_rewrite.sh (it fills the block after the
     -- "-- openapi-spec" marker). Edit the annotations, not the generated JSON.
@@ -2931,7 +2937,51 @@ DECLARE
 $$;
 -- openapi-generated-code-end
 BEGIN
-    RETURN openapi;
+    -- Read the operator's base URL, if this deployment set one. Wrapped because
+    -- haf_stats_app.app_config does not exist on every database that loads this file:
+    -- the CI stub lane hand-creates only the tables it needs, and a half-installed
+    -- database should still serve a document rather than 500 on GET /.
+    BEGIN
+        SELECT c.swagger_base_url INTO _base FROM haf_stats_app.app_config AS c LIMIT 1;
+    EXCEPTION
+        WHEN undefined_table OR insufficient_privilege THEN _base := NULL;
+    END;
+
+    -- Accept only something that can actually BE a base URL: an absolute path, or an
+    -- http(s) origin. This is not defensive padding -- haf_api_node passes
+    -- `--swagger-url=${PUBLIC_HOSTNAME}`, and PUBLIC_HOSTNAME is a BARE HOSTNAME
+    -- ("your.hostname.com" in its .env.example). Taking that literally would publish
+    -- `servers: [{url: "your.hostname.com"}]`, which is not a URL and is worse than the
+    -- hardcoded value it replaced. So a hostname-shaped value is ignored and the
+    -- default stands, which is correct on a node; a caller that wants to override
+    -- passes a path or an origin.
+    -- Two rejections that are not padding:
+    --
+    --   //evil.com   -- protocol-relative. It matches a naive `^/`, and Swagger UI
+    --                   resolves it as <current-scheme>//evil.com, so "Try it out" and
+    --                   any credentials typed into it go to ANOTHER ORIGIN. The path arm
+    --                   therefore refuses a second leading slash.
+    --   https://host -- an origin with NO PATH. haf_api_node routes this app only under
+    --                   /haf-stats-api/*, so publishing a bare origin would send every
+    --                   generated client to https://host/network/engagement -> 404. A
+    --                   scheme-prefixed PUBLIC_HOSTNAME is exactly how that would arrive,
+    --                   and falling back is strictly better than publishing it. Callers
+    --                   that mean it pass the path: https://host/haf-stats-api.
+    IF _base IS NULL OR _base !~ '^(/($|[^/])|https?://[^/]+/)' THEN
+        _base := '/haf-stats-api';
+    END IF;
+
+    -- jsonb, not text surgery: the generated blob is machine-written and its exact
+    -- spacing is not a contract, so matching on `"url": "/haf-stats-api"` would break
+    -- silently the first time the generator reformatted. jsonb_pretty keeps GET /
+    -- readable in a browser; it does reorder keys, which OpenAPI does not care about.
+    RETURN jsonb_pretty(
+        jsonb_set(
+            openapi::jsonb,
+            '{servers}',
+            jsonb_build_array(jsonb_build_object('url', _base))
+        )
+    )::json;
 END
 $func$;
 

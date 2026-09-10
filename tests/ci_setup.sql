@@ -528,6 +528,15 @@ CREATE TABLE IF NOT EXISTS haf_stats_app.app_version (
 );
 INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('ci-test');
 
+-- #70. Deliberately NOT the default '/haf-stats-api': the tavern stage asserts this
+-- exact string back out of GET /, so it can only pass if root() really read this row.
+-- Seeded here because this lane hand-creates the tables it needs rather than loading
+-- db/haf_stats_app.sql.
+CREATE TABLE IF NOT EXISTS haf_stats_app.app_config (
+    swagger_base_url TEXT
+);
+INSERT INTO haf_stats_app.app_config (swagger_base_url) VALUES ('/ci-base-url');
+
 -- ---------------------------------------------------------------------------
 -- Backend tables (from process_financial.sql, process_rc.sql,
 -- process_account_cohorts.sql, process_content_stats.sql)

@@ -71,8 +71,33 @@ CREATE TABLE IF NOT EXISTS haf_stats_app.app_version (
     git_hash TEXT NOT NULL
 );
 
+-- Deployment-specific settings that the SERVED document has to reflect, so they cannot
+-- be baked into the image: the same image runs behind a node route and on a bare
+-- `docker compose up -d`, and those need different base URLs. (#70)
+--
+-- Written once by install_app.sh --swagger-url and read at REQUEST time by
+-- haf_stats_endpoints.root(). A session GUC cannot carry this: install_app set
+-- `custom.swagger_url` in its own psql session, which PostgREST -- connecting later, on
+-- its own pool -- could never see. That is why the flag did nothing for as long as it
+-- existed. Persisting it is the whole fix.
+CREATE TABLE IF NOT EXISTS haf_stats_app.app_config (
+    swagger_base_url TEXT
+);
+
+-- Singleton, by the same constant-expression index as app_status above: a re-install
+-- must overwrite the setting rather than add a second row that readers pick from at
+-- random.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_config_singleton
+ON haf_stats_app.app_config ((TRUE));
+
+INSERT INTO haf_stats_app.app_config (swagger_base_url)
+SELECT NULL AS swagger_base_url
+WHERE NOT EXISTS (SELECT 1 AS one FROM haf_stats_app.app_config);
+
 GRANT SELECT ON haf_stats_app.app_status TO haf_stats_user;
 GRANT SELECT ON haf_stats_app.app_version TO haf_stats_user;
+-- root() runs as the anonymous role and reads this on every GET /.
+GRANT SELECT ON haf_stats_app.app_config TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
 -- Lifecycle control functions

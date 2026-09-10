@@ -466,7 +466,7 @@ path.
 
 | Verb | Runs | Notes |
 |------|------|-------|
-| `install_app [--swagger-url=HOST] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; safe to re-run |
+| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; safe to re-run |
 | `process_blocks [--host=] [--port=] [--user=]` | `scripts/process_blocks.sh` | infinite loop |
 | `uninstall_app [--force] [--host=] [--port=] [--user=]` | `scripts/uninstall_app.sh` | destructive |
 
@@ -557,6 +557,36 @@ than fail. Run `scripts/uninstall_app.sh` directly without `--force` to get a
 type-the-database-name confirmation. It reports what it could not remove rather than
 stopping at the first error, and re-running is safe.
 
+## Base URL published in the OpenAPI document
+
+`GET /` serves `haf_stats_endpoints.root()`, whose `servers:` entry tells every generated
+client and every Swagger *Try it out* where to send requests. That value is
+deployment-specific, so it is **not** baked into the image:
+
+```sh
+install_app --swagger-url=/haf-stats-api    # behind a haf_api_node route (the default)
+install_app --swagger-url=/                 # this repo's stack, where the rewriter is the root
+install_app --swagger-url=https://api.example.com   # an absolute origin
+```
+
+The value is stored in `haf_stats_app.app_config` at install time and read by `root()` on
+every request. It must be an **absolute path** or an **`http(s)` origin**; anything else —
+a bare hostname, say — is ignored and `/haf-stats-api` is used instead.
+
+> That rejection is deliberate rather than fussy. `haf_api_node` passes
+> `--swagger-url=${PUBLIC_HOSTNAME}`, and `PUBLIC_HOSTNAME` is a bare hostname, so taking
+> it literally would publish `servers: [{url: "your.hostname.com"}]` — not a URL at all.
+> Ignoring it leaves the correct node default in place, so this works with the node
+> exactly as it is configured today. (An `http(s)` value must carry a path for the same
+> reason: a bare origin would send clients to `https://host/network/engagement`, which a
+> node does not route.)
+>
+> Before this, `--swagger-url` set `custom.swagger_url` on the installer's own psql
+> session and **nothing ever read it** — PostgREST connects later on its own pool and
+> could never have seen it. The flag looked like the way to set the base URL and did
+> nothing at all.
+
+
 ## API Endpoints
 
 > **The development lane is different.** `docker/docker-compose-test.yml` (used by the
@@ -570,7 +600,7 @@ Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths 
 
 > ⚠️ **This changed.** PostgREST used to be published on `3001` (`docker/.env` shipped `API_PORT=3001`), which is why the base URL below looked right while every path under it 404'd. If you call `/rpc/` directly, it moved to **3000**. The paths below only exist on the rewriter -- calling them on `:3000` returns 404, because there they are `/rpc/<function>` instead. `GET /` on the rewriter serves the curated OpenAPI document (this needs `PGRST_DB_ROOT_SPEC=root`, which the shipped compose sets).
 
-> ⚠️ **That document's `servers:` entry is `/haf-stats-api`, which is the deployed node's route, not this stack's.** Load it into Swagger UI against `localhost:3001` and every *Try it out* resolves to `localhost:3001/haf-stats-api/<path>`, which the catch-all rewrites to `/rpc/haf-stats-api/<path>` and returns 404. The paths in the table below are correct; only the prefix the document prepends to them is wrong here. Tracked as [#70](https://gitlab.syncad.com/hive/haf_stats/-/issues/70) — before this change `GET /` served PostgREST's own document, whose base path matched whatever served it, so the mismatch had nowhere to show.
+> The document's `servers:` entry follows the deployment. This stack installs with `--swagger-url=/`, because here the rewriter **is** the root, so Swagger UI's *Try it out* resolves against `localhost:3001` directly. Behind a node the argument is ignored and the default `/haf-stats-api` stands — see *Base URL published in the OpenAPI document* above. ([#70](https://gitlab.syncad.com/hive/haf_stats/-/issues/70))
 
 | Endpoint | Status | Processor | Description |
 |---|---|---|---|

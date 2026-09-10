@@ -56,7 +56,11 @@ services:
     # same form a module would. Note what that does NOT buy: compose-validate only runs
     # `docker compose config`, which parses YAML and never starts a container. Nothing in
     # CI executes the dispatcher inside the image except the docker-build smoke tests.
-    command: ["install_app"]
+    # --swagger-url is the base URL the published OpenAPI document advertises. On this
+    # stack the rewriter IS the root -- there is no /haf-stats-api prefix, that is the
+    # node's route -- so Swagger UI's "Try it out" has to resolve against `/`. Left
+    # unset it falls back to the node's prefix and every generated call 404s here. (#70)
+    command: ["install_app", "--swagger-url=/"]
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_admin   # install runs as haf_admin to create roles/context

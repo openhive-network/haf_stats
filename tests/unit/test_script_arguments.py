@@ -275,6 +275,7 @@ def run_install_full_stub(bash, tmp_path, *args: str):
     bindir = stub_bin(tmp_path)
     sql_log = tmp_path / "sql.log"
     argv_log = tmp_path / "argv.log"
+    stdin_log = tmp_path / "stdin.log"
     write_exec(
         bindir / "psql",
         "#!/bin/sh\n"
@@ -286,31 +287,116 @@ def run_install_full_stub(bash, tmp_path, *args: str):
         f'  if [ "$prev" = "-c" ]; then printf "%s\n---\n" "$a" >> "{sql_log.as_posix()}"; fi\n'
         '  prev="$a"\n'
         "done\n"
+        # SQL also arrives on STDIN (psql -c cannot do :'var' substitution, so the
+        # swagger write is a heredoc). Without capturing this the suite is blind to
+        # the form the installer actually uses. stdin is /dev/null for the calls that
+        # do not redirect it, so this returns immediately for them.
+        f'cat >> "{stdin_log.as_posix()}"\n'
         "exit 0\n",
     )
     proc = subprocess.run(
         [bash, str(INSTALL), *args],
         env=clean_env(bindir), capture_output=True, text=True, timeout=TIMEOUT,
+        # Deterministic stdin, so the stub's `cat` never blocks on an inherited tty.
+        stdin=subprocess.DEVNULL,
     )
-    return proc, sql_log, argv_log
+    return proc, sql_log, argv_log, stdin_log
 
 
-def test_swagger_url_reaches_the_endpoint_load(bash, tmp_path):
-    """The installer's only functional option. Its default silently baked wrong example
-    URLs into the published Swagger page -- the failure the new unknown-option error
-    was added to prevent -- yet nothing asserted the flag has an effect when correct."""
-    _, sql_log, _ = run_install_full_stub(bash, tmp_path, "--swagger-url=example.com")
-    assert "SET custom.swagger_url = 'example.com';" in sql_log.read_text()
+def test_swagger_url_is_persisted_not_set_on_the_session(bash, tmp_path):
+    """The installer's only functional option, and until #70 it had no effect at all.
+
+    It ran `SET custom.swagger_url` on its own psql session. Nothing read that -- and
+    nothing could have: SET is session-scoped and PostgREST connects later on its own
+    pool, so the value was gone before any request could see it. The earlier version of
+    THIS test asserted the SET was issued, which is why the flag could be dead for so
+    long with a green suite: it pinned the mechanism instead of the effect.
+
+    So assert the write that outlives the session, and assert the dead form is gone.
+    """
+    _, sql_log, argv_log, stdin_log = run_install_full_stub(bash, tmp_path, "--swagger-url=/example")
+    log, argv = sql_log.read_text(), argv_log.read_text()
+
+    stdin_sql = stdin_log.read_text() if stdin_log.exists() else ""
+
+    assert "haf_stats_app.app_config" in stdin_sql, (
+        "--swagger-url must be persisted; a session GUC is invisible to PostgREST")
+
+    assert "custom.swagger_url" not in log + stdin_sql, (
+        "the session GUC is back; it is read by nothing and cannot be")
+
+    # The value must reach psql OUT OF BAND as a bound variable, never spliced into the
+    # SQL text -- `psql -c` runs multiple statements, so interpolating it made
+    # --swagger-url an arbitrary-SQL channel running as haf_admin:
+    #     --swagger-url="x'; DROP TABLE ...; --"
+    assert "swagger_url=/example" in argv, argv
+    assert "'/example'" not in log + stdin_sql, (
+        "the value is spliced into the SQL text again -- that is the injection")
+
+    # And it must be fed on STDIN. This is not a stylistic preference: psql's -c takes a
+    # string "completely parsable by the server", so :'var' is NOT substituted there and
+    # reaches PostgreSQL verbatim. The -c form aborted the real install in CI while every
+    # unit test passed, because both channels used to land in one log and nothing here
+    # could tell them apart.
+    assert ":'swagger_url'" in stdin_sql, (
+        "the swagger write must be fed on stdin; :'var' does not substitute under -c")
+    assert ":'swagger_url'" not in log, (
+        "the swagger write is back on -c, where :'var' is sent to the server literally")
 
 
-def test_swagger_url_defaults_to_localhost(bash, tmp_path):
-    _, sql_log, _ = run_install_full_stub(bash, tmp_path)
-    assert "SET custom.swagger_url = 'localhost';" in sql_log.read_text()
+SWAGGER_PATTERN = r"^(/($|[^/])|https?://[^/]+/)"
+
+
+def test_an_ignored_swagger_url_is_reported_at_install_time(bash, tmp_path):
+    """#70's actual failure scenario, which a silent fallback would leave open.
+
+    The issue's complaint is not only that the flag did nothing -- it is that the
+    operator "has no way to discover this short of reading the SQL, because the flag
+    they used is documented as the way to set it". haf_api_node passes a bare
+    ${PUBLIC_HOSTNAME}, so that operator is this scenario today. root() rejecting the
+    value silently would fix the mechanism and keep the surprise.
+    """
+    proc, _, _, _ = run_install_full_stub(bash, tmp_path, "--swagger-url=your.hostname.com")
+    out = proc.stdout + proc.stderr
+    assert "your.hostname.com" in out and "/haf-stats-api" in out, out
+    assert "WARNING" in out, out
+
+
+def test_a_usable_swagger_url_is_not_warned_about(bash, tmp_path):
+    """The other direction, so the warning cannot degrade into always firing."""
+    proc, _, _, _ = run_install_full_stub(bash, tmp_path, "--swagger-url=/")
+    out = proc.stdout + proc.stderr
+    assert "--swagger-url" not in out, out
+
+
+def test_the_installer_and_the_endpoint_agree_on_what_is_a_valid_base_url():
+    """Two copies of one rule, in two languages, that must not drift.
+
+    install_app.sh only REPORTS; haf_stats_endpoints.root() ENFORCES. If they disagree,
+    the installer either warns about a value that works or stays silent about one that
+    is discarded -- and the silent case is the bug #70 was filed for.
+    """
+    sh = INSTALL.read_text(encoding="utf-8")
+    sql = (SCRIPTS.parent / "endpoints" / "endpoint_schema.sql").read_text(encoding="utf-8")
+
+    assert SWAGGER_PATTERN in sh, f"install_app.sh no longer uses {SWAGGER_PATTERN}"
+    assert f"'{SWAGGER_PATTERN}'" in sql, f"root() no longer uses {SWAGGER_PATTERN}"
+
+
+def test_swagger_url_default_is_written_too(bash, tmp_path):
+    """Unset, the default is still written -- a re-install must be able to CLEAR a
+    previously configured value, not leave the old one in place because the operator
+    dropped the flag. root() is what decides `localhost` is not a usable base URL and
+    falls back to /haf-stats-api; the installer's job is only to record what was asked.
+    """
+    _, _, argv_log, stdin_log = run_install_full_stub(bash, tmp_path)
+    assert "haf_stats_app.app_config" in stdin_log.read_text()
+    assert "swagger_url=localhost" in argv_log.read_text(), argv_log.read_text()
 
 
 def test_user_flag_reaches_the_connection(bash, tmp_path):
     """Parsed-but-discarded is the exact failure mode this MR calls a bug elsewhere."""
-    _, _, argv_log = run_install_full_stub(bash, tmp_path, "--user=someone_else")
+    _, _, argv_log, _ = run_install_full_stub(bash, tmp_path, "--user=someone_else")
     assert "-U someone_else" in argv_log.read_text()
 
 
@@ -320,7 +406,7 @@ def test_postgres_host_is_accepted_as_a_synonym(bash, tmp_path):
     put restart: on-failure on their app services, which turns that into a crash-loop.
     (Not on haf-stats-setup: this repo's compose has no restart: key -- an earlier
     version of this docstring said otherwise, copied from the sibling app.)"""
-    _, _, argv_log = run_install_full_stub(bash, tmp_path, "--postgres-host=elsewhere")
+    _, _, argv_log, _ = run_install_full_stub(bash, tmp_path, "--postgres-host=elsewhere")
     assert "-h elsewhere" in argv_log.read_text()
 
 
@@ -449,8 +535,8 @@ def test_install_emits_identical_sql_with_and_without_schema(bash, tmp_path, val
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()
     b.mkdir()
-    _, base_log, _ = run_install_full_stub(bash, a)
-    _, flag_log, _ = run_install_full_stub(bash, b, f"--schema={value}")
+    _, base_log, _, _ = run_install_full_stub(bash, a)
+    _, flag_log, _, _ = run_install_full_stub(bash, b, f"--schema={value}")
     assert flag_log.read_text() == base_log.read_text(), (
         f"--schema={value} changed the SQL the installer emits"
     )

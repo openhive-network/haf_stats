@@ -410,6 +410,28 @@ def test_the_rewriter_serves_the_public_paths(services):
     assert "127.0.0.1:81/health" in probe, f"healthcheck must probe its own :81: {probe}"
 
 
+def test_the_install_sets_a_base_url_this_stack_can_serve(services):
+    """#70: the document has to advertise a base URL that resolves HERE.
+
+    endpoint_schema.sql defaults `servers` to `/haf-stats-api`, which is the node's
+    route. On this stack the rewriter IS the root, so a document carrying the node's
+    prefix sends every Swagger "Try it out" to /rpc/haf-stats-api/<path> -> 404.
+
+    root() accepts only an absolute path or an http(s) origin, so a bare hostname here
+    would be silently ignored and the wrong default would ship -- which is exactly what
+    happened for as long as haf_api_node passed ${PUBLIC_HOSTNAME}. Assert the shape,
+    not just the presence.
+    """
+    cmd = services[SETUP].get("command") or []
+    flags = [c for c in cmd if str(c).startswith("--swagger-url=")]
+    assert len(flags) == 1, f"{SETUP} must pass exactly one --swagger-url: {cmd}"
+
+    value = flags[0].split("=", 1)[1]
+    assert value.startswith("/") or value.startswith(("http://", "https://")), (
+        f"--swagger-url={value!r} is neither an absolute path nor an http(s) origin, so "
+        f"root() will ignore it and publish the node's /haf-stats-api prefix instead")
+
+
 # The PostgREST settings that decide whether the documented surface answers at all. A
 # wrong DB_SCHEMA 404s all 24 paths -- the same user-visible symptom as the missing root
 # spec, and a likelier edit -- so pinning only the root spec covered one of four.

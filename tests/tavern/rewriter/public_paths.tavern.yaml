@@ -549,3 +549,10 @@ stages:
         info:
           title: "HAF Stats - Blockchain Analytics"
           version: "1.0.0"
+        # #70: proves root() read haf_stats_app.app_config rather than serving the
+        # generated blob verbatim. ci_setup.sql seeds '/ci-base-url', which is NOT the
+        # '/haf-stats-api' default and appears nowhere in endpoint_schema.sql -- so this
+        # can only pass if the value travelled config -> root() -> the wire. Delete the
+        # patching from root() and this reverts to the default and fails.
+        servers:
+          - url: "/ci-base-url"
