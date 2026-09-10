@@ -81,9 +81,10 @@ db/
                             custom_json ops (owner/admin gated)
   process_witness_blocks.sql
                             ✓ Per-witness blocks produced + scheduled slots missed, per day
-  process_delegations.sql   HP delegation current state (graph traversal only; per-account list → balance-api)
-  process_governance.sql    Proxy chain current state only (witness + DHF proposal data → hafbe-api)
   process_network_stats.sql Supply snapshots from hafd.blocks (DAU/tx stats → hafbe-api)
+
+Dockerfile                  App image (one image, three services, dispatched by verb)
+Dockerfile.rewriter         The public REST surface: nginx + endpoints/rewrite_rules.conf
 
 endpoints/
   endpoint_schema.sql       All PostgREST-exposed SQL functions
@@ -112,9 +113,21 @@ scripts/
                             on already-synced nodes (install self-heals an empty table)
 
 docker/
-  docker-compose.yml        Production stack (4 services)
-  docker-compose-test.yml   Fast test stack (pre-synced block_log)
-  .env                      Image versions and registry
+  docker-compose.yml        Production stack (5 services + a profiled teardown)
+  docker-compose-test.yml   Fast test stack (pre-synced block_log; no rewriter)
+  .env                      Image versions, registry and host ports
+  haf_stats_nginx.conf.template
+                            The rewriter's nginx config; the entrypoint substitutes
+                            POSTGREST_HOST/PORT and inlines endpoints/rewrite_rules.conf
+  rewriter_entrypoint.sh    Renders the template above, then execs nginx
+  docker-compose-ci.yml     CI stub stack: builds Dockerfile.rewriter and runs the
+                            tavern suite against it, with no HAF instance
+  docker-compose-ci-test.yml
+                            CI stack for the install/reinstall and regression lanes
+  overrides/                Compose overrides layered on by CI (fast healthchecks, ci.yml)
+  docker_entrypoint.sh      Dispatches install_app / process_blocks / uninstall_app
+  block-processing-healthcheck.sh
+                            In-image healthcheck for haf-stats-process
 
 tests/
   tavern/                   API integration tests (pytest + Tavern)
@@ -126,7 +139,7 @@ tests/
 
 ```bash
 cd docker
-cp .env .env.local   # edit versions as needed
+# edit docker/.env directly -- compose reads THAT file, not .env.local
 docker compose -f docker-compose-test.yml up --abort-on-container-exit
 ```
 
@@ -136,6 +149,22 @@ docker compose -f docker-compose-test.yml up --abort-on-container-exit
 cd docker
 docker compose up -d
 ```
+
+> ⚠️ **Neither lane works from a clean clone yet, and this is not specific to
+> Production.** `.env` ships `HAF_STATS_VERSION=latest`, but CI publishes **only** SHA
+> tags — there is no `latest` for the app image or the rewriter. In the Production stack
+> `haf-stats-rewriter` survives it, being the one service with a `build:` stanza that
+> Compose falls back to; `haf-stats-setup` and `haf-stats-process` have no fallback. The
+> **development** stack above is worse: `docker-compose-test.yml` references
+> `${HAF_STATS_VERSION}` with no default and no `build:` at all, so it fails the same way
+> with nothing to fall back on.
+>
+> Until [#66](https://gitlab.syncad.com/hive/haf_stats/-/issues/66) adds release tagging,
+> pin a published SHA — one variable now covers the app image and the rewriter:
+>
+> ```bash
+> HAF_STATS_VERSION=<8-hex-sha> docker compose up -d
+> ```
 
 ### Rebuilding account cohorts
 
@@ -530,32 +559,45 @@ stopping at the first error, and re-running is safe.
 
 ## API Endpoints
 
-All endpoints are served via PostgREST. Base URL: `http://localhost:3001`
+> **The development lane is different.** `docker/docker-compose-test.yml` (used by the
+> Quick Start above) starts **no rewriter** and publishes PostgREST itself on
+> `${TEST_API_PORT:-3001}`. The clean paths below exist only in the full
+> `docker/docker-compose.yml` stack; on the test lane call `/rpc/<function>` directly.
+
+Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths onto PostgREST `/rpc/` calls. Base URL: `http://localhost:3001`.
+
+`docker compose up -d` publishes the rewriter on `3001` and PostgREST itself on `3000`.
+
+> ⚠️ **This changed.** PostgREST used to be published on `3001` (`docker/.env` shipped `API_PORT=3001`), which is why the base URL below looked right while every path under it 404'd. If you call `/rpc/` directly, it moved to **3000**. The paths below only exist on the rewriter -- calling them on `:3000` returns 404, because there they are `/rpc/<function>` instead. `GET /` on the rewriter serves the curated OpenAPI document (this needs `PGRST_DB_ROOT_SPEC=root`, which the shipped compose sets).
+
+> ⚠️ **That document's `servers:` entry is `/haf-stats-api`, which is the deployed node's route, not this stack's.** Load it into Swagger UI against `localhost:3001` and every *Try it out* resolves to `localhost:3001/haf-stats-api/<path>`, which the catch-all rewrites to `/rpc/haf-stats-api/<path>` and returns 404. The paths in the table below are correct; only the prefix the document prepends to them is wrong here. Tracked as [#70](https://gitlab.syncad.com/hive/haf_stats/-/issues/70) — before this change `GET /` served PostgREST's own document, whose base path matched whatever served it, so the mismatch had nowhere to show.
 
 | Endpoint | Status | Processor | Description |
 |---|---|---|---|
-| `GET /rpc/get_version` | ✅ Live | — | App git hash |
-| `GET /rpc/get_health` | ✅ Live | — | Last processed block + version (the app's own `app_status` clock) |
-| `GET /rpc/get_sync_status` | ✅ Live | — | Uniform HAF-app freshness signal: the block HAF's own context pointer says this node has consumed, plus its UTC timestamp |
-| `GET /rpc/get_account_financial_summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
-| `GET /rpc/get_account_content_stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
-| `GET /rpc/get_account_community_activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
-| `GET /rpc/get_account_interactions` | ✅ Live | *(on-demand, no processor)* | Per-account outgoing interactions by type (reply/vote/transfer/reblog/follow) and counterparty; Top-N partners per type plus an `Others` band |
-| `GET /rpc/get_account_rc_footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
-| `GET /rpc/get_network_rc_utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
-| `GET /rpc/get_network_custom_json_usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
-| `GET /rpc/get_network_top_custom_json` | ✅ Live | process_network_custom_json.sql | Most-used custom_json ids/DApps/categories by op_count, op_bytes, or estimated RC (`group_by=id/app/category`); `app`/`category` partition the window, so they append an `Others` band for everything past `limit_count` and always sum to the window total |
-| `GET /rpc/get_witness_missed_blocks` | ✅ Live | process_witness_blocks.sql | Missed vs produced blocks per witness. Omit `granularity` for a leaderboard (`order_by=missed/rate/last_missed`), set it for a series; `witness=` filters to one. Includes zero-miss producers so `rate` has a baseline; no `rank`/`is_active` (hafbe owns those) |
-| `GET /rpc/get_network_supply` | Pending | process_network_stats.sql | HIVE/HBD/VESTS supply time-series |
-| `GET /rpc/get_network_hp_distribution` | ✅ Live | *(cross-schema btracker_app)* | HP stake bucketed distribution |
-| `GET /rpc/get_governance_influence_concentration` | ✅ Live | process_governance_concentration.sql | Current HP concentration snapshot: Gini, top 1%/10% share, holder count, median and mean HP |
-| `GET /rpc/get_daily_active_users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
-| `GET /rpc/get_network_vote_stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
-| `GET /rpc/get_network_content_volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
-| `GET /rpc/get_network_author_retention` | ✅ Live | process_content_cohorts.sql | First-post author cohorts with created-content retention at 30/90/180 days |
-| `GET /rpc/get_network_top_accounts` | ✅ Live | *(reads financial + active-users tables)* | Top N accounts by rewards, transfer volume, HP balance, or op count |
-| `GET /rpc/get_hp_delegation_graph` | Shelved | — | No concrete consumer identified yet |
-| `GET /rpc/get_governance_proxy_chains` | Shelved | — | Proxy chains shallow in practice; single-level in hafbe-api |
+| `GET /version` | ✅ Live | — | App git hash |
+| `GET /health` | ✅ Live | — | Last processed block + version (the app's own `app_status` clock) |
+| `GET /sync-status` | ✅ Live | — | Uniform HAF-app freshness signal: the block HAF's own context pointer says this node has consumed, plus its UTC timestamp |
+| `GET /account/{account}/financial-summary` | ✅ Live | process_financial.sql | Per-account incoming/outgoing by category, granularity |
+| `GET /account/{account}/content-stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
+| `GET /account/{account}/community-activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
+| `GET /account/{account}/interactions` | ✅ Live | *(on-demand, no processor)* | Per-account outgoing interactions by type (reply/vote/transfer/reblog/follow) and counterparty; Top-N partners per type plus an `Others` band |
+| `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
+| `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql | Per-account estimated RC as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
+| `GET /account/{account}/dapp-footprint` | ✅ Live | process_custom_json.sql | Per-account custom_json activity resolved to DApp names and categories |
+| `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
+| `GET /network/content-volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
+| `GET /network/engagement` | ✅ Live | process_content_stats.sql | Network-wide posts, average votes/comments per post and zero-engagement shares, by period |
+| `GET /network/vote-stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
+| `GET /network/author-retention` | ✅ Live | process_content_cohorts.sql | First-post author cohorts with created-content retention at 30/90/180 days |
+| `GET /network/account-funnel` | ✅ Live | process_account_cohorts.sql | New-account cohorts and how many stay active at 7/30/90 days |
+| `GET /network/top-accounts` | ✅ Live | *(reads financial + active-users tables)* | Top N accounts by rewards, transfer volume, HP balance, or op count |
+| `GET /network/hp-distribution` | ✅ Live | process_hp_distribution.sql | HP stake bucketed distribution, served from a precomputed snapshot (the processor is what reads `btracker_app`) |
+| `GET /network/rc-utilization` | ✅ Live | process_network_ops.sql | Network-wide estimated RC per op type per period (read-time rates); op-type granularity, no per-DApp breakdown |
+| `GET /network/custom-json-usage` | ✅ Live | process_network_custom_json.sql | Per-id network custom_json usage over time (op_count, op_bytes, estimated RC), granularity |
+| `GET /network/top-custom-json` | ✅ Live | process_network_custom_json.sql | Most-used custom_json ids/DApps/categories by op_count, op_bytes, or estimated RC (`group_by=id/app/category`); `app`/`category` partition the window, so they append an `Others` band for everything past `limit_count` and always sum to the window total |
+| `GET /governance/influence-concentration` | ✅ Live | process_governance_concentration.sql | Current HP concentration snapshot: Gini, top 1%/10% share, holder count, median and mean HP |
+| `GET /witnesses/missed-blocks` | ✅ Live | process_witness_blocks.sql | Missed vs produced blocks per witness. Omit `granularity` for a leaderboard (`order_by=missed/rate/last_missed`), set it for a series; `witness=` filters to one. Includes zero-miss producers so `rate` has a baseline; no `rank`/`is_active` (hafbe owns those) |
+| `GET /custom-json-app-registry` | ✅ Live | seed_data.sql | The custom_json id -> DApp name/category registry the resolvers use |
 
 ### `/health` and `/sync-status` report different clocks, on purpose
 

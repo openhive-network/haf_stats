@@ -53,6 +53,8 @@ SETUP = "haf-stats-setup"
 PROCESS = "haf-stats-process"
 API = "haf-stats-api"
 UNINSTALL = "haf-stats-uninstall"
+REWRITER = "haf-stats-rewriter"
+ENV_FILE = ROOT / "docker" / ".env"
 
 
 @pytest.fixture(scope="module")
@@ -156,3 +158,293 @@ def test_no_inverted_pipeline_assertions_in_ci():
         and "#" not in line.split("!")[0]
     ]
     assert not offenders, f"inverted-pipeline assertions cannot fail a job: {offenders}"
+
+# --- the published surface (#61) ---------------------------------------------------
+#
+# Each assertion below names the failure it catches. They were chosen by mutation --
+# breaking the thing on purpose and checking that exactly one test fails -- because what
+# survives a mutation is the only honest measure of what a test asserts.
+
+CI_COMPOSE = ROOT / "docker" / "docker-compose-ci.yml"
+NETWORK = "haf-network"
+
+# The two ports whose OWNER is a contract, not a preference: 3001 is the base URL the
+# README documents, and it must be the rewriter. A uniqueness check alone is blind to
+# identity -- swapping the API and the rewriter keeps every port unique while putting raw
+# /rpc/ back on the documented URL, silently restoring the bug this MR fixes.
+#
+# 5432 is deliberately NOT here. `${HAF_PORT:-5432}` exists so an operator can move it,
+# and pinning it turned a legal change into a test failure.
+# port -> (service that must publish it, container port it must reach). The container
+# half is not decoration: PostgREST listens on 3000 and the rewriter's public server is
+# :80, so forwarding a correct host port to the wrong container port gives a published
+# port that connects to nothing -- with the host map, and any uniqueness check over it,
+# completely unchanged.
+PORT_OWNERS = {"3000": (API, "3000"), "3001": (REWRITER, "80")}
+
+_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^{}]*)\}")
+
+
+def _read_env(path: Path) -> dict:
+    """Parse a .env the way compose does, not the way a first draft assumed.
+
+    `export API_PORT=3001`, `API_PORT="3001"`, `API_PORT=3001 # front door` and the
+    COMBINATION of the last two are all compose-legal and all set the port. Mishandling
+    any of them reports no collision on a file that cannot start.
+    """
+    env = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip().lstrip("﻿")
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if value[:1] in ("'", '"'):
+            # Quoted: the closing quote ends the value; anything after it is a comment.
+            # Handling this only when the quote is the LAST character missed
+            # `API_PORT="3001" # front door` entirely.
+            close = value.find(value[0], 1)
+            value = value[1:close] if close != -1 else value[1:]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        env[key.strip()] = value
+    return env
+
+
+def _resolve(text, env: dict) -> str:
+    """Expand ${VAR:-default} with compose's semantics.
+
+    `:-` falls back when the variable is unset OR EMPTY. `env.get(name, default)` gets
+    the empty case wrong, and an empty value is what someone leaves behind when they
+    blank a line out rather than deleting it.
+    """
+    out, passes = str(text), 0
+    while "${" in out and passes < 10:                # ${A:-${B:-3001}} nests
+        out = _VAR.sub(lambda m: env.get(m.group(1)) or m.group(2), out)
+        passes += 1
+    assert "$" not in out, (
+        f"unresolved variable in {text!r}. Only ${{VAR:-default}} is handled -- give it a "
+        f"default, or teach _resolve the form you need.")
+    return out
+
+
+def _ports(spec, env: dict):
+    """(host, container) for one `ports:` entry, in every form compose accepts.
+
+    A mis-parsed entry is silent: it yields a key that collides with nothing. The
+    container half matters as much as the host half -- moving the rewriter's target from
+    :80 to :81 publishes the health stub, an unconditional 204, as the front door, while
+    every host port stays exactly where it was.
+    """
+    if isinstance(spec, dict):                        # long form
+        host = _resolve(spec.get("published", ""), env).split("/")[0]
+        return host, _resolve(spec.get("target", ""), env)
+    text = _resolve(spec, env).split("/")[0]          # drop a /tcp suffix
+    parts = text.split(":")
+    if len(parts) == 1:
+        return "", parts[0]                           # `- "80"` is a CONTAINER port
+    host, container = parts[-2], parts[-1]
+    assert re.fullmatch(r"\d+(-\d+)?", host), f"unparsed host port {host!r} in {spec!r}"
+    return host, container
+
+
+def _expand(host: str) -> list:
+    lo, _, hi = host.partition("-")
+    if not hi:
+        return [lo]
+    lo_n, hi_n = int(lo), int(hi)
+    assert lo_n <= hi_n, f"reversed port range {host!r}"
+    # A wide range would otherwise render thousands of entries into the assertion
+    # message, burying the diagnosis in the CI log.
+    assert hi_n - lo_n <= 64, f"port range {host!r} is too wide to check meaningfully"
+    return [str(n) for n in range(lo_n, hi_n + 1)]
+
+
+def _published(doc: dict, env: dict) -> dict:
+    seen = {}
+    for name, svc in doc["services"].items():
+        for spec in (svc or {}).get("ports", []) or []:
+            host, _container = _ports(spec, env)
+            if not host:
+                continue
+            for port in _expand(host):
+                assert port not in seen, (
+                    f"{name} and {seen[port]} both publish host port {port}. "
+                    f"`docker compose up -d` fails with `port is already allocated` and "
+                    f"whichever service loses the race never starts.")
+                seen[port] = name
+    return seen
+
+
+def _check_ports(doc: dict, env: dict, lane: str):
+    seen = _published(doc, env)
+    targets = {}
+    for name, svc in doc["services"].items():
+        for spec in (svc or {}).get("ports", []) or []:
+            host, container = _ports(spec, env)
+            if host:
+                targets[host] = container
+    for port, (owner, container) in PORT_OWNERS.items():
+        assert seen.get(port) == owner, (
+            f"[{lane}] host port {port} is published by {seen.get(port)}, not {owner}. "
+            f"3001 is the base URL the README documents and must reach the rewriter; "
+            f"swapping these keeps every port unique and silently restores the bug.")
+        assert targets.get(port) == container, (
+            f"[{lane}] host port {port} forwards to container port {targets.get(port)}, "
+            f"not {container}. The published port then connects to nothing, or -- for "
+            f"the rewriter's :81 -- to the health stub that answers everything.")
+
+
+def test_no_two_services_publish_the_same_host_port():
+    """The defect this module existed for and still missed.
+
+    #61's first revision added the rewriter on ${REWRITER_PORT:-3001} while the TRACKED
+    docker/.env said API_PORT=3001, so `docker compose up -d` bound 3001 twice and the
+    rewriter -- the whole point of the change -- was the service that failed to start.
+    `docker compose config` performs no cross-service host-port check (verified: it exits
+    0 on the colliding file), so compose-validate passed it.
+
+    Checked under BOTH resolutions, because they differ:
+
+      * with docker/.env applied -- what an operator gets; both READMEs `cd docker` first
+      * with nothing applied     -- the in-file defaults, which are what CI sees, since
+        `--env-file ci.env` REPLACES docker/.env rather than layering over it
+
+    A drift in the compose defaults alone passes the first and breaks the second. Note
+    the CI lane also merges overrides/ci.yml, which this does not model -- that file
+    replaces `haf`'s ports wholesale, so the defaults pass is a close proxy, not CI's
+    exact resolution.
+    """
+    y = _require_yaml()
+    doc = y.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    _check_ports(doc, _read_env(ENV_FILE), "docker/.env applied")
+    _check_ports(doc, {}, "compose defaults only")
+
+
+def test_every_service_is_on_the_app_network():
+    """The generalisation of the mutation that started this.
+
+    Deleting the rewriter's `networks:` key drops it onto compose's implicit `default`
+    while everything else is on haf-network, so `proxy_pass http://haf-stats-api:3000`
+    cannot resolve and EVERY documented path 502s -- while the container still reports
+    HEALTHY, because the :81 probe is an unconditional 204 that never touches the
+    upstream. `docker compose config` accepts it.
+
+    Asserted for every service, not just the rewriter: the same deletion on `haf` breaks
+    PGRST_DB_URI's `@haf`, and on haf-stats-setup it breaks the install -- each as total
+    as the original, each with `config` still exiting 0.
+    """
+    y = _require_yaml()
+    doc = y.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    for name, svc in doc["services"].items():
+        nets = list((svc or {}).get("networks") or [])
+        assert nets == [NETWORK], (
+            f"{name} is on {nets or 'the implicit default network'}, not [{NETWORK}]. "
+            f"It cannot resolve its siblings by name, and nothing in the stack reports "
+            f"that as unhealthy.")
+
+
+def test_no_service_carries_a_restart_policy(services):
+    """scripts/install_app.sh:136 and README.md both state this about the WHOLE file.
+
+    install_app.sh reasons from it, to justify WARN-rather-than-fail on a missing
+    --is_forking. It has to hold for every service, not just the rewriter, or the key can
+    be added elsewhere and falsify both documents silently.
+    """
+    for name, svc in services.items():
+        assert "restart" not in (svc or {}), (
+            f"{name} has a restart policy; install_app.sh and README.md both assert that "
+            f"no service in this file does, and install_app.sh reasons from it.")
+
+
+def test_the_rewriter_serves_the_public_paths(services):
+    """Without this service the documented API does not exist.
+
+    Every public path -- /network/engagement, /account/{account}/interactions -- is a
+    rewrite rule mapping onto a PostgREST /rpc/ call. Delete this service and
+    `docker compose up -d` gives bare PostgREST, where all 24 of them 404.
+    """
+    assert REWRITER in services, "the rewriter service is gone; every documented path 404s"
+    svc = services[REWRITER]
+
+    # It must be the REWRITER image. Repointed at the app image, `up` starts the wrong
+    # container on the front-door port.
+    assert "/rewriter:" in svc["image"], svc["image"]
+
+    # build: matters on its own -- CI publishes SHA tags only, never :latest, so the
+    # default image reference does not resolve and compose falls back to building. The
+    # context must be the REPO ROOT: Dockerfile.rewriter COPYs from endpoints/ and docker/.
+    assert "build" in svc, "no build: -- the default :latest tag has never been published"
+    assert svc["build"]["dockerfile"] == "Dockerfile.rewriter"
+    assert svc["build"]["context"] == "..", svc["build"]["context"]
+
+    # The CONTAINER side, not just the host side. :81 is a separate server block that
+    # answers /health with an unconditional 204; publishing it as the front door serves
+    # the health stub for every documented path while leaving the host port map -- and
+    # therefore test_no_two_services_publish_the_same_host_port -- completely unchanged.
+    targets = [_ports(spec, {})[1] for spec in svc.get("ports", [])]
+    assert targets == ["80"], (
+        f"the rewriter must publish container port 80, not {targets}. :81 is the health "
+        f"server: an unconditional 204 that answers everything and proxies nothing.")
+
+    # Resolved under BOTH lanes, for the same reason the port test is: a value set in
+    # docker/.env overrides the compose default, and pointing the proxy at a host that
+    # does not exist 502s every path while the container still reports healthy.
+    for lane, env in (("compose defaults", {}), ("docker/.env applied", _read_env(ENV_FILE))):
+        e = svc.get("environment", {})
+        assert _resolve(e.get("POSTGREST_HOST", ""), env) == API, (lane, e.get("POSTGREST_HOST"))
+        assert _resolve(e.get("POSTGREST_PORT", ""), env) == "3000", (lane, e.get("POSTGREST_PORT"))
+
+    # service_started, not service_healthy: haf-stats-api has no healthcheck, so a health
+    # condition here is accepted by `config` and refused by `up`.
+    dep = (svc.get("depends_on") or {}).get(API)
+    assert dep and dep.get("condition") == "service_started", dep
+
+    # :81 is a separate server block serving only /health. :80/health is a REWRITE RULE
+    # reaching get_health in the database, so probing it would report the APP healthy
+    # rather than the PROXY alive -- and would fail while the database is still syncing.
+    # Loopback specifically: pointed elsewhere it reports another host's liveness.
+    probe = " ".join(svc["healthcheck"]["test"])
+    assert "127.0.0.1:81/health" in probe, f"healthcheck must probe its own :81: {probe}"
+
+
+# The PostgREST settings that decide whether the documented surface answers at all. A
+# wrong DB_SCHEMA 404s all 24 paths -- the same user-visible symptom as the missing root
+# spec, and a likelier edit -- so pinning only the root spec covered one of four.
+PGRST_CONTRACT = {
+    "PGRST_DB_ROOT_SPEC": "root",
+    "PGRST_DB_SCHEMA": "haf_stats_endpoints",
+    "PGRST_DB_ANON_ROLE": "haf_stats_user",
+}
+
+
+@pytest.mark.parametrize("path", [COMPOSE, CI_COMPOSE], ids=lambda p: p.name)
+@pytest.mark.parametrize("key,expected", sorted(PGRST_CONTRACT.items()))
+def test_the_api_serves_the_curated_openapi_document(path: Path, key: str, expected: str):
+    """PGRST_DB_ROOT_SPEC was absent from every compose file in this repo.
+
+    Unset, PostgREST answers GET / with its own auto-generated introspection document
+    instead of haf_stats_endpoints.root(), and the rewriter's `rewrite ^/$ /` rule is
+    inert. The live node served the right document only because the PRIVATE node config
+    set it -- so an operator following this repo got the wrong spec with nothing to say
+    so. Neither document is identifiable from its content type: PostgREST serves its own
+    as application/openapi+json and a function-backed root spec as plain
+    application/json, the same as every /rpc/ route -- only the body distinguishes them.
+
+    Both compose files, because the CI one is what public_paths.tavern.yaml's body
+    assertion depends on. Removing it there would surface as a confusing title mismatch
+    inside a tavern stage rather than as the missing variable it is.
+    """
+    y = _require_yaml()
+    doc = y.safe_load(path.read_text(encoding="utf-8"))
+    svc = next((s for n, s in doc["services"].items()
+                if "postgrest" in (s or {}).get("image", "")), None)
+    assert svc is not None, f"no PostgREST service in {path.name}"
+
+    env = svc.get("environment", {})
+    assert key in env, f"{path.name}: {key} is unset"
+    # Equality, not a substring: `"root" in ...` also passes on `notroot` and `root_v2`,
+    # either of which makes PostgREST 404 the root spec.
+    assert _resolve(env[key], {}) == expected, (path.name, key, env[key])

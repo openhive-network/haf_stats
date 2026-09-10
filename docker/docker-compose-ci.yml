@@ -108,6 +108,21 @@ services:
       PGRST_DB_URI: "postgres://postgres:postgres@postgres/haf_block_log"
       PGRST_DB_SCHEMA: "haf_stats_endpoints"
       PGRST_DB_ANON_ROLE: "haf_stats_user"
+      # Without this PostgREST serves its OWN introspection document at GET /, and the
+      # curated haf_stats_endpoints.root() -- the thing operators and Swagger UI read --
+      # is exercised by nothing. The content type cannot tell the two apart: PostgREST
+      # serves its OWN document as application/openapi+json and a FUNCTION-backed root
+      # spec as application/json; charset=utf-8 -- the same as every /rpc/ route. So only
+      # the BODY identifies the document, which is what public_paths.tavern.yaml now
+      # asserts, and only once this is set. Matches the shipped docker/docker-compose.yml.
+      # (#61)
+      #
+      # Setting this therefore also CHANGES the content type of GET / in this lane, which
+      # is how the discrepancy surfaced: it broke the old header assertion outright. That
+      # matches what the live node returns -- https://testapi.hivescan.info/haf-stats-api/
+      # answers application/json, because the node config sets this -- so the lane now
+      # agrees with production rather than diverging from it.
+      PGRST_DB_ROOT_SPEC: "root"
       PGRST_DB_POOL: "5"
     depends_on:
       setup:
@@ -120,9 +135,9 @@ services:
   #
   # Scope, stated precisely, because the artifact and the container have different
   # reaches: what this proves is that every rule in endpoints/rewrite_rules.conf --
-  # the file production bind-mounts into its own (balance_tracker-derived) nginx --
-  # resolves to a live /rpc/ function. It does NOT cover that container's server
-  # block, nor the HAProxy path in front of it.
+  # which is BAKED INTO the published rewriter image, not bind-mounted; production runs
+  # that image -- resolves to a live /rpc/ function. It does NOT cover the HAProxy and
+  # Varnish path in front of it on a node.
   rewriter:
     build:
       context: ..

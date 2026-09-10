@@ -673,11 +673,19 @@ sync:
     - job: prepare_haf_data
       artifacts: true
     - job: docker-build
+    # sync starts docker-compose.yml, which since #61 includes haf-stats-rewriter.
+    - job: docker-build-rewriter
   variables:
     DOCKER_HOST: tcp://docker:2376
     DOCKER_CERT_PATH: /certs/client
     DOCKER_TLS_VERIFY: "1"
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    # Pin the SHA tag docker-build-rewriter just pushed. Left unset, the service falls
+    # back to :latest -- a tag CI never publishes, for this image or the app image. `up`
+    # logged `manifest unknown` and silently BUILT it instead (job 3270294), in a job
+    # whose before_script states no builder setup is needed here. It worked, but it
+    # exercised a local build rather than the artifact the pipeline produced.
+    HAF_STATS_REWRITER_IMAGE: "${CI_REGISTRY_IMAGE}/rewriter:${CI_COMMIT_SHORT_SHA}"
     POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
     POSTGRES_ACCESS: "postgresql://haf_admin@docker:5432/haf_block_log"
     COMPOSE_OPTIONS_STRING: "--env-file ci.env --file docker-compose.yml --file overrides/ci.yml --ansi never"
@@ -716,6 +724,7 @@ sync:
       HAF_IMAGE_NAME=${HAF_IMAGE_NAME}
       HAF_STATS_IMAGE=${HAF_STATS_IMAGE}
       POSTGREST_IMAGE=${POSTGREST_IMAGE}
+      HAF_STATS_REWRITER_IMAGE=${HAF_STATS_REWRITER_IMAGE}
       HAF_DATA_DIRECTORY=${HAF_DATA_DIRECTORY}
       HAF_SHM_DIRECTORY=${HAF_SHM_DIRECTORY}
       PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s
@@ -733,6 +742,20 @@ sync:
       echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
       "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
       echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
+      cd "${CI_PROJECT_DIR}/docker"
+      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+      # #61: this is the only lane with a real HAF behind the whole stack, and until
+      # now it started the rewriter and never sent it a request -- so a rewriter that
+      # exited with `host not found in upstream` (the failure haf_api_node documents
+      # for this image) left this job green. Ask for a PUBLIC path, not /rpc/: the
+      # point is that the rewrite rules resolve, which is what `up -d` cannot show.
+      # In-container, so it does not depend on a published host port.
+      docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-rewriter \
+        wget -q -O- --timeout=10 127.0.0.1/version
+      echo
+      echo -e "\e[0Ksection_end:$(date +%s):rewriter\r\e[0K"
     - |
       echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
       cd "${CI_PROJECT_DIR}/docker"
@@ -759,6 +782,7 @@ sync:
       docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log || true
       docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-setup > haf-stats-setup.log || true
       docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-process > haf-stats-process.log || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-rewriter > haf-stats-rewriter.log || true
       timeout 120 docker compose "${COMPOSE_OPTIONS[@]}" down --timeout "${COMPOSE_DOWN_TIMEOUT:-60}"
       # cwd is ${CI_PROJECT_DIR}/docker, so this lands at docker/container-logs.tar.gz
       # (the path .haf_app_sync_artifacts publishes).
