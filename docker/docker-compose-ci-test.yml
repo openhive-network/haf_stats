@@ -90,7 +90,10 @@ services:
     # image. Siblings never pull it; reinstall-test sets the real value and, if it ever
     # stopped doing so, dies on a pull whose name says exactly what went wrong.
     image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-reinstall-test-job:invalid}
-    command: ["install_app"]
+    # Mirrors docker-compose.yml's setup, including --swagger-url. The comment above
+    # warns that nothing asserts the two stay in step; #70 added this flag there, so it
+    # is added here too rather than becoming the first instance of that drift.
+    command: ["install_app", "--swagger-url=/"]
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_admin   # matches docker-compose.yml: install creates roles/context

@@ -3,7 +3,12 @@
 # Safe to re-run: all DDL uses IF NOT EXISTS / ON CONFLICT DO NOTHING.
 #
 # OPTIONS:                                                      # --- help-start ---
-#   --swagger-url=URL   Public hostname for Swagger UI example URLs (default: localhost)
+#   --swagger-url=BASE  Base URL the OpenAPI document advertises in `servers`. Must be
+#                       an absolute PATH (/haf-stats-api) or an http(s) URL that
+#                       INCLUDES a path (https://host/haf-stats-api); anything else --
+#                       a bare hostname or a bare origin -- is ignored in favour of the
+#                       default /haf-stats-api, with a warning. (default: localhost,
+#                       i.e. ignored)
 #   --host=VALUE        PostgreSQL host  (default: $POSTGRES_HOST, else haf)
 #   --port=NUMBER       PostgreSQL port  (default: $POSTGRES_PORT, else 5432)
 #   --user=VALUE        PostgreSQL user  (default: $POSTGRES_USER, else haf_stats_owner)
@@ -269,7 +274,56 @@ run_sql_file "${SCRIPT_DIR}/../db/sync_status.sql"
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
 
 # 6. API endpoints
-psql_cmd -c "SET custom.swagger_url = '${SWAGGER_URL}';" -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
+#
+# The base URL the published document advertises. This used to be
+# `SET custom.swagger_url` on THIS psql session, which nothing ever read -- and could
+# not have: PostgREST connects later on its own pool and never sees another session's
+# GUC. Persisted instead, and read by haf_stats_endpoints.root() at request time. (#70)
+#
+# Written before the endpoints load purely so a fresh install never has a window where
+# root() exists and the setting does not. root() tolerates both the row and the table
+# being absent, so the order is hygiene rather than a requirement.
+#
+# -v + :'swagger_url', NOT string interpolation. `psql -c` runs MULTIPLE statements, so
+# splicing the value into the SQL text makes --swagger-url an arbitrary-SQL channel:
+#
+#     --swagger-url="x'; CREATE TABLE pwned(i INT); --"
+#
+# closes the literal and runs the rest as haf_admin. An operator installing the app
+# already has that privilege, so this is not an escalation on the normal path -- but
+# haf_api_node feeds this from ${PUBLIC_HOSTNAME}, i.e. from a node's .env, and a value
+# containing a single apostrophe would break the install with a syntax error pointing
+# nowhere near the cause. :'var' hands psql the value out-of-band and lets it do the
+# quoting.
+# Tell the operator when their value will be ignored. This is the half of #70 that a
+# silent fallback would leave open: the issue's own failure scenario is an operator who
+# "has no way to discover this short of reading the SQL, because the flag they used is
+# documented as the way to set it". haf_api_node passes ${PUBLIC_HOSTNAME}, a bare
+# hostname, so today that operator IS this scenario -- and a warning in the install log
+# is where they would find out. Keep this pattern identical to the one in
+# haf_stats_endpoints.root(); root() remains the enforcer, this only reports.
+if ! printf '%s' "${SWAGGER_URL}" | grep -Eq '^(/($|[^/])|https?://[^/]+/)'; then
+    log "WARNING: --swagger-url='${SWAGGER_URL}' is not an absolute path or an http(s)"
+    log "         URL with a path, so the published OpenAPI document will advertise the"
+    log "         default base URL '/haf-stats-api' instead. Pass a path (e.g. '/' for a"
+    log "         standalone stack, '/haf-stats-api' behind a node) to set it."
+fi
+
+# Fed on STDIN, not with -c. psql's -c takes a string "completely parsable by the
+# server", so psql-level features are not processed there -- `:'swagger_url'` would
+# reach PostgreSQL verbatim and fail to parse. Substitution happens for -f and for
+# stdin, so the heredoc is what makes the binding work. (Learned from sync going red:
+# the -c form aborted haf-stats-setup with exit 1.)
+#
+# The heredoc delimiter is QUOTED, so the shell expands nothing inside it and the value
+# never touches the SQL text -- it travels only through -v.
+psql_cmd -v swagger_url="${SWAGGER_URL}" <<'SQL'
+    UPDATE haf_stats_app.app_config SET swagger_base_url = :'swagger_url';
+    INSERT INTO haf_stats_app.app_config (swagger_base_url)
+    SELECT :'swagger_url'
+    WHERE NOT EXISTS (SELECT 1 FROM haf_stats_app.app_config);
+SQL
+psql_cmd -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
 
 # 7. Grant read access on current and future objects to haf_stats_user
 psql_cmd -c "

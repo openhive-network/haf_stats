@@ -736,7 +736,17 @@ sync:
 
       IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
       docker compose "${COMPOSE_OPTIONS[@]}" config
-      docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull
+      # Dump the one-shot containers' logs if `up` fails. Log collection lives in the
+      # shutdown step below, which never runs when `up` itself aborts -- so an install
+      # failure reported only as `service "haf-stats-setup" didn't complete
+      # successfully: exit 1` left NOTHING to diagnose from, and the artifact upload
+      # then failed too because no *.log had been written.
+      if ! docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull; then
+        echo "--- up failed; dumping one-shot container logs ---"
+        docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color haf-stats-setup || true
+        docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color --tail 100 haf || true
+        exit 1
+      fi
       echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
     - |
       echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
