@@ -57,3 +57,36 @@ run_sql_file() {
     log "Executing ${file}..."
     psql_cmd -f "${file}"
 }
+
+# Load a file as ONE transaction, so a re-install never exposes a half-applied schema
+# and a failure leaves the previous one intact. (#79)
+#
+# NOT usable on every file. Two disqualifiers, both silent if ignored:
+#
+#   * A statement PostgreSQL refuses inside a transaction block. Four files use
+#     CREATE/DROP INDEX CONCURRENTLY (process_account_cohorts, process_active_users,
+#     process_content_stats, process_financial) and would abort outright.
+#   * A file that manages its OWN transaction. db/sync_status.sql opens with BEGIN and
+#     ends with COMMIT, so under this flag its COMMIT would end psql's transaction
+#     early -- the load would still succeed and the atomicity would quietly be gone.
+#     Note `END;` is a synonym for COMMIT, so a bare top-level END; counts too.
+#
+# tests/unit/test_install_atomicity.py enforces both conditions for every file loaded
+# this way, so adding a CONCURRENTLY index to one of them fails in CI rather than in an
+# operator's install.
+#
+# Two further traps, both of which make the flag do NOTHING while looking correct:
+#
+#   * It requires -c or -f. psql documents it as wrapping the *action list*, so SQL fed
+#     on stdin with neither is not wrapped and the flag is silently ignored. Note
+#     install_app.sh already feeds one statement on a heredoc (it has to -- psql -c does
+#     not substitute :'var'), so "unify these two idioms" is a real temptation that
+#     would quietly drop atomicity. Hence -f here, always.
+#   * It is married to ON_ERROR_STOP, set in psql_cmd above. Without it psql sends
+#     COMMIT on an already-aborted transaction, the server turns that into a rollback,
+#     and psql exits 0 -- an install that did nothing and reported success.
+run_sql_file_atomic() {
+    local file="$1"
+    log "Executing ${file} (single transaction)..."
+    psql_cmd --single-transaction -f "${file}"
+}

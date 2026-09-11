@@ -193,20 +193,20 @@ fi
 # 3. Block processors
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
-run_sql_file "${SCRIPT_DIR}/../db/process_rc.sql"
+run_sql_file_atomic "${SCRIPT_DIR}/../db/process_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 # Before process_content_stats: that file's community staging calls
 # haf_stats_app.is_community_name / community_start_block, defined here.
-run_sql_file "${SCRIPT_DIR}/../db/process_community_registry.sql"
+run_sql_file_atomic "${SCRIPT_DIR}/../db/process_community_registry.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_stats.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_witness_blocks.sql"
-run_sql_file "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
-run_sql_file "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
+run_sql_file_atomic "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
+run_sql_file_atomic "${SCRIPT_DIR}/../db/process_hp_distribution.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_top_accounts_alltime.sql"
 
 # 3b. RC rate auto-refresh sampler (#33). Self-guarded: a no-op where plpython3u is
@@ -323,7 +323,37 @@ psql_cmd -v swagger_url="${SWAGGER_URL}" <<'SQL'
     SELECT :'swagger_url'
     WHERE NOT EXISTS (SELECT 1 FROM haf_stats_app.app_config);
 SQL
-psql_cmd -f "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
+# ONE TRANSACTION. install_app re-runs on every `docker compose up -d` and
+# haf-stats-api is NOT restarted with it, so without this an ordinary redeploy replays
+# DROP/CREATE for all 25 endpoint functions underneath live traffic. A request landing
+# in a window gets `function ... does not exist` -- which PostgREST returns as 500, not
+# a retryable 503. haf_stats_app.to_filter_date is the worst of them, and the reason
+# this closes the hazard rather than merely narrowing it: despite its haf_stats_app
+# schema name it is DEFINED here, granted here, and all 36 of its call sites are in this
+# same file -- effectively every date-filtered endpoint. Definition and callers move
+# together in one transaction, so no caller can ever resolve a dropped one. Had the
+# callers been spread across db/, this would only have shrunk the window.
+#
+# (36, not the 42 an earlier revision claimed: that was the raw identifier count, which
+# includes the DROP, the CREATE, the GRANT and three prose mentions. Counting call sites
+# by grep is how the residual list below was wrong too.)
+#
+# Under one transaction the catalogue change is invisible to other sessions until
+# commit, so concurrent callers keep resolving the OLD definition and then see the new
+# one. Callers do not block, and the reason matters because it is easy to get wrong:
+# NOT because "functions take no lock" -- DROP FUNCTION takes an AccessExclusive lock on
+# the pg_proc entry, and this file has 34 of them -- but because function LOOKUP and
+# EXECUTION take no lock at all. That is why PostgreSQL lets you drop a function while
+# it is running, and it is what makes the swap invisible to a reader.
+#
+# Concurrent DDL is the exception: another session altering one of these functions now
+# waits for the whole file rather than one statement. docker-compose.yml documents one
+# such path (a --profile haf-stats-uninstall teardown racing a setup start); that one
+# degrades to uninstall_app.sh's lock_timeout rather than hanging.
+#
+# The failure semantics also improve: today a failed CREATE leaves the function
+# DROPPED; now the previous definition survives.
+run_sql_file_atomic "${SCRIPT_DIR}/../endpoints/endpoint_schema.sql"
 
 # 7. Grant read access on current and future objects to haf_stats_user
 psql_cmd -c "

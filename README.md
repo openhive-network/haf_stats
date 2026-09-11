@@ -535,6 +535,79 @@ durations — 300s tolerates iterations of roughly 150s. It is also not a sub-ba
 heartbeat, so on a long MASSIVE batch this check **can report unhealthy on a healthy
 replay**. The window is a deliberately wide guess; narrow it once a batch has been timed.
 
+## Redeploying against a node under load
+
+`install_app` re-runs on **every** `docker compose up -d` — `haf-stats-setup` starts
+unconditionally, while PostgREST is *not* restarted with it. So an ordinary redeploy
+replays the schema underneath live traffic. ([#79](https://gitlab.syncad.com/hive/haf_stats/-/issues/79))
+
+**Every function a request can reach is now replaced atomically.** `install_app` loads
+these with `--single-transaction`:
+
+| file | what it defines |
+|---|---|
+| `endpoints/endpoint_schema.sql` | all 25 `haf_stats_endpoints.*` functions, plus `to_filter_date` and 7 other helpers |
+| `db/process_rc.sql` | `rc_rate`, `rc_avg_cost`, `account_op_seq_range` |
+| `db/process_community_registry.sql` | `community_start_block` |
+| `db/process_governance_concentration.sql`, `db/process_hp_distribution.sql` | their refresh functions (no request calls them; included because it costs nothing) |
+
+`db/sync_status.sql` wraps *itself* in `BEGIN`/`COMMIT`, so `/sync-status` was always
+safe. Those five files plus that one cover every `haf_stats_app` function the endpoint
+schema actually calls — verified by parsing the SQL with comments and string literals
+stripped, because grepping raw text counts commented-out mentions as call sites.
+
+Inside one transaction the catalogue change is invisible to other sessions until commit,
+so concurrent callers keep resolving the previous definition and then see the new one.
+Callers do not block — not because functions take no lock, but because function *lookup
+and execution* take none. (`DROP FUNCTION` does take an `ACCESS EXCLUSIVE` lock on the
+`pg_proc` entry; that is why PostgreSQL can drop a function while it runs.) A failed load
+now rolls back and leaves the previous definitions in place, where before it could leave
+a function dropped.
+
+**What this does not cover:**
+
+- **Concurrent DDL.** Another session altering one of these functions now waits for the
+  whole file rather than one statement. The teardown path documented in
+  `docker/docker-compose.yml` is one such case; it degrades to `uninstall_app.sh`'s
+  `lock_timeout` rather than hanging.
+- **Processor-only functions** in the other `db/` files are still replayed
+  statement-by-statement. Nothing serves them, so no request can land in the window.
+- **A long-running call.** Catalogue lookups take a fresh snapshot per statement, so a
+  single multi-statement PL/pgSQL call can plan some sub-statements before the commit
+  and some after. Identical code either side makes that a no-op; a genuine upgrade can
+  mix old and new within one request.
+- **PostgREST's prepared statements.** If a redeploy changes an endpoint's *return
+  type*, pooled connections raise `cached plan must not change result type` (`0A000`)
+  until they are recycled. Atomic at the commit instant, but not prevented.
+
+Four `db/` files — `process_account_cohorts`, `process_active_users`,
+`process_content_stats`, `process_financial` — use `CREATE`/`DROP INDEX CONCURRENTLY`,
+which PostgreSQL refuses inside a transaction block, so they can never be loaded this
+way. `db/haf_stats_app.sql` is left non-atomic for a different reason: it writes the
+`app_status` singleton and creates two unique indexes, so an atomic load takes `SHARE` on
+tables `haf-stats-process` writes on every iteration. Nothing a request calls is defined
+there.
+
+**A hand-run load needs the flag too.** The guarantee comes from how the file is loaded,
+not from the file:
+
+```bash
+psql -v ON_ERROR_STOP=on --single-transaction -f endpoints/endpoint_schema.sql
+```
+
+**If you are redeploying under real load** and want no exposure at all, drain the
+HAProxy backend or stop the API container first:
+
+```bash
+cd docker
+docker compose stop haf-stats-api   # or drain the backend at the proxy
+docker compose up -d                # replays the schema, and restarts the API itself
+```
+
+A request that lands in one of the remaining windows gets `function ... does not exist`,
+which PostgREST returns as **500** — not a retryable 503, so clients will not back off
+and retry on their own.
+
 ## Uninstalling
 
 **Destructive and irreversible.** Drops the HAF context, all three schemas `CASCADE`
