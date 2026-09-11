@@ -349,6 +349,23 @@ ON CONFLICT (id) DO NOTHING;
 -- columns. (Later fixtures add far higher blocks; this only needs a resolvable one.)
 -- ---------------------------------------------------------------------------
 
+-- TWO CONSUMERS NOW. docker-compose-ci.yml (endpoint-tests) loads this file, and so does
+-- docker-compose-ci-install.yml (install-test), which then layers tests/ci_haf_stub.sql on
+-- top -- that file ADDs is_attached / is_forking / app_schema to this table and INSERTs a
+-- fixed column list. So: adding a NOT NULL column here without a default turns install-test
+-- red inside a plpgsql body in a file you may never have opened, and adding one of the
+-- shim's three columns here turns its ADD COLUMN IF NOT EXISTS into a silent no-op.
+--
+-- TWO MORE COUPLINGS, both of which fail in a file other than the one you edited:
+--   * consistent_block below is 6000, and tests/ci_seed_repair.sql hard-codes 5000
+--     against it (create_context_if_not_exists clamps the seed with LEAST). Lower 6000
+--     for the endpoint lane and install-test goes red at ci_install_verify.sql with
+--     "context pointer is X, expected 5000", naming neither file.
+--   * docker-compose-ci-install.yml's db-setup step de-vacuates this fixture by deleting
+--     the 'haf_stats' context row BY NAME, dropping exactly three haf_stats_* schemas BY
+--     NAME, and dropping haf_stats_owner / haf_stats_user BY NAME. Rename the context,
+--     add a second one, or add a fourth schema or role here, and that de-vacuation
+--     silently stops -- reintroducing the six-assertions-that-cannot-fail bug #84 fixed.
 CREATE TABLE IF NOT EXISTS hafd.contexts (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL CONSTRAINT uq_hive_context_name UNIQUE,

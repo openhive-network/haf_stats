@@ -439,6 +439,7 @@ compose-validate:
     - cd docker
     - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
     - docker compose -f docker-compose-ci-test.yml config --quiet
+    - docker compose -f docker-compose-ci-install.yml config --quiet
     # ...and again with HAF_STATS_IMAGE UNSET, which is how pattern-test and
     # regression-test actually read this file. The dummy above masks that: on pipeline
     # 178863 a `${HAF_STATS_IMAGE:?}` in the PROFILED haf-stats-setup service passed
@@ -927,7 +928,7 @@ reinstall-test:
   needs:
     # Inherited needs cover detect_changes/find_haf_image/sync, and sync needs
     # docker-build -- so on a fresh pipeline the per-commit tag always exists. Named
-    # explicitly anyway: this is the only test-stage job that pulls
+    # explicitly anyway: this and install-test are the only test-stage jobs that pull
     # ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}, and the sibling lanes replay from the
     # cached datadir without an app image. On a single-job retry of an old pipeline
     # after registry cleanup has reaped that tag, this job alone dies on the pull.
@@ -1090,6 +1091,68 @@ endpoint-tests:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
+    - if: $CI_COMMIT_BRANCH
+
+install-test:
+  stage: test
+  image: docker:24
+  # The published app image, so this lane runs the artifact the pipeline produced rather
+  # than a local rebuild. docker-build's rules are `if: $CI_COMMIT_BRANCH`, the same as
+  # this job's, so there is no pipeline where this exists and that one is skipped.
+  needs:
+    - job: docker-build
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    # #84: the REAL install_app.sh against a REAL PostgreSQL, in ~18s. Before this, the
+    # only lanes that ran the installer needed a replayed HAF -- `sync` (374.5-566.2s
+    # across the six successful runs in the project's last 100 jobs) and `reinstall-test`,
+    # which is gated behind it. Nothing cheap ran it: the unit suite stubs psql (so it
+    # cannot fail the way the server does) and the endpoint-tests lane psql's the SQL
+    # files directly without the script.
+    #
+    # Waiting on `verify` rather than `install` on purpose -- the install exiting 0 proves
+    # very little on a stubbed HAF, so the gate is what it LEFT BEHIND.
+    # `timeout` because compose's service_completed_successfully has none of its own, and
+    # install_app.sh opens with an UNBOUNDED `until pg_isready; do sleep 2; done`. If the
+    # database dies mid-lane, `up` never returns and an 18-second job holds a runner until
+    # the project's 3600s timeout -- the same shape as the 58-minute docker-build hang this
+    # file documents elsewhere. after_script still runs, so diagnosability is unaffected.
+    #
+    # BOTH commands are wrapped. An earlier revision timed out only the `up`, which left
+    # the `wait` below unbounded -- and `wait` is the one that actually blocks for the
+    # length of the lane, so the hole was in the half that mattered.
+    - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
+    # verify-gone is LAST in the chain (db-setup -> install -> seed-repair -> install-again
+    # -> verify -> uninstall -> verify-gone), so waiting on it gates the whole lane.
+    # Waiting on `verify` would let a teardown failure pass unnoticed.
+    - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
+  after_script:
+    # Both installs, because the second is where a non-idempotent step or a shim that
+    # quietly does nothing shows up -- the first run alone looks identical either way.
+    #
+    # postgres FIRST, and it is not optional. Every one-shot service below gates
+    # transitively on `postgres: service_healthy`, so if postgres fails to start or fails
+    # its healthcheck, NONE of them ever runs and none of them has any logs -- the job
+    # would emit seven empty sections and a `down -v`, with the actual cause nowhere.
+    # `ps -a` for the same reason: it shows exit codes for services that produced no
+    # output at all.
+    - docker compose -f docker/docker-compose-ci-install.yml ps -a || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs postgres || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs db-setup || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs install || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs seed-repair || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs install-again || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true
+    - docker compose -f docker/docker-compose-ci-install.yml down -v || true
+  rules:
     - if: $CI_COMMIT_BRANCH
 
 # =============================================================================
