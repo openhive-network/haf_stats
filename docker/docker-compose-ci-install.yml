@@ -1,0 +1,232 @@
+# The REAL scripts/install_app.sh against a REAL PostgreSQL, in seconds. (#84)
+#
+# WHY THIS LANE EXISTS. Before it, every lane that ran `install_app.sh` needed a REPLAYED
+# HAF -- `sync` starts haf-stats-setup, and `reinstall-test` compose-runs it but is gated
+# behind sync. Measured, sync runs 374.5-566.2s (6.2-9.4 min) across the six successful
+# runs in the project's last 100 jobs, plus find_haf_image and
+# prepare_haf_data. Everything cheaper tests something adjacent instead --
+#
+#   tests/unit/*            runs the script against a STUB psql that exits 0 for
+#                           everything, so it can assert what the script SENDS and never
+#                           what PostgreSQL does with it. It passed on SQL the server
+#                           cannot parse.
+#   docker-compose-ci.yml   has a real PostgreSQL but psql's the SQL files DIRECTLY; it
+#                           never runs the installer, and says so in its own comments. It
+#                           also never attempts db/haf_stats_app.sql or
+#                           db/builtin_roles.sql at all.
+#
+# So the cheapest way to run the real installer was to stand up a replayed HAF first.
+# That is how a `psql -c` bug -- `:'var'` is not substituted under -c, only under -f and
+# stdin -- got two red sync pipelines and an A/B across three of them to diagnose.
+#
+# This lane closes that: stub database, real script, seconds.
+#
+# WHAT IT DELIBERATELY DOES NOT COVER. No block processing -- tests/ci_haf_stub.sql
+# is context bookkeeping only, not a HAF emulator. Op-type assertion is skipped (see the
+# install service). Chain-data correctness stays with `sync` and the tavern suites.
+
+# Its own project name. Both this file and docker-compose-ci.yml live in docker/, so both
+# would otherwise default to the Compose project `docker` AND both define a service called
+# `postgres` -- harmless in CI (a fresh dind per job) but locally `down -v` here would take
+# volumes belonging to a running endpoint-tests stack.
+name: haf_stats_ci_install
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: haf_block_log
+    healthcheck:
+      # -h localhost, not the default. Without it pg_isready probes the UNIX SOCKET,
+      # which postgres binds before it accepts TCP -- and every dependent service here
+      # connects over TCP to `postgres:5432`. The gap is small but it is a real race, and
+      # a healthcheck that passes before the thing it gates is reachable is the kind of
+      # flake that gets retried rather than read.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U postgres -d haf_block_log"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # The HAF that isn't there. ci_setup.sql is reused verbatim -- it is already proven to
+  # let every db/ and endpoints/ file load -- and the shim adds the context API the
+  # installer needs that it does not provide, plus the HAF-provided roles it grants into.
+  #
+  # THE TWO CLEANUP STATEMENTS ARE LOAD-BEARING, and for the same reason: ci_setup.sql is
+  # written for the endpoint-tests lane, where it SUBSTITUTES for an install. Here the
+  # install must do that work itself, or the lane verifies ci_setup's output instead.
+  #
+  # Dropping the three schemas is what de-vacuates most of ci_install_verify.sql. With
+  # them present, ci_setup.sql had already created all three, seeded app_status and
+  # app_config, and set ALTER DEFAULT PRIVILEGES granting haf_stats_user SELECT and
+  # USAGE -- so "3 schemas exist", "app_config has one row", "the anon role can read it"
+  # and the USAGE check all passed with an installer that did nothing at all.
+  #
+  # Dropping the two APP ROLES is the same de-vacuation applied to db/builtin_roles.sql.
+  # ci_setup.sql creates haf_stats_owner and haf_stats_user, then ALTERs the owner to
+  # INHERIT and GRANTs it hive_applications_owner_group -- so builtin_roles' CREATE ROLE
+  # arms never ran, and its hard install-time assertion that haf_stats_owner holds
+  # hive_applications_group was satisfied by the FIXTURE regardless of what the installer
+  # did. (Cited by statement rather than by line number on purpose: the line numbers an
+  # earlier revision gave here were wrong by 11, shifted by a comment block the very same
+  # commit inserted above them.) Concretely: the group grant could be deleted from db/builtin_roles.sql
+  # and this lane stayed green, while /sync-status answers 503 on a healthy node.
+  # DROP OWNED BY first, because the roles hold grants and ALTER DEFAULT PRIVILEGES
+  # entries that DROP ROLE alone refuses to step over. In a file rather than inline
+  # because DROP OWNED BY raises 42704 on a role that does not exist, so it needs a guard
+  # -- and because a two-statement `psql -c` reports only the last command tag, which
+  # made the drop invisible in the job log. Safe here and only here: roles are
+  # CLUSTER-wide, and this is a throwaway postgres container with nothing else in it.
+  #
+  # THE BYSTANDER CONTEXT is planted for the opposite reason: to prove the teardown is
+  # SCOPED. With only haf_stats in hafd.contexts, "the haf_stats context is gone" and
+  # "hafd.contexts was emptied" are the same observation. ci_bystander_app is owned by a
+  # different role, so uninstall_app.sh's own guard cannot claim it, and
+  # tests/ci_uninstall_verify.sql asserts it is still there afterwards.
+  #
+  # ci_setup.sql pre-seeds a haf_stats context at block 6000
+  # for the /sync-status tavern stages. Leaving it there means
+  # create_context_if_not_exists() takes its "already exists" branch, so the installer
+  # never calls hive.app_create_context at all -- the lane would run green having
+  # exercised none of context CREATION, which is the step it exists to cover. Removing the
+  # row makes install #1 take the create path and install #2 take the repair path, so the
+  # pair covers both.
+  db-setup:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_setup.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_haf_stub.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "DELETE FROM hafd.contexts WHERE name = 'haf_stats'" &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS haf_stats_app, haf_stats_backend, haf_stats_endpoints CASCADE" &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_reset_roles.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "INSERT INTO hafd.contexts (name, owner, current_block_num, irreversible_block, is_attached, is_forking, app_schema) VALUES ('ci_bystander_app', 'hive_applications_group', 0, 0, FALSE, FALSE, 'ci_bystander_app')" 
+    volumes:
+      - ../tests/ci_setup.sql:/ci_setup.sql:ro
+      - ../tests/ci_haf_stub.sql:/ci_haf_stub.sql:ro
+      - ../tests/ci_reset_roles.sql:/ci_reset_roles.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Install #1 -- the real script, the real image, nothing stubbed but the server.
+  #
+  # HAF_STATS_SKIP_OP_TYPE_ASSERT: the assertion compares hafd.operation_types against
+  # db/op_type_registry.sql, and ci_setup.sql seeds 5 rows (ids 1, 2, 18, 64, 86) with
+  # deliberately NON-mainnet ids so the shipped registry cannot pass against it by
+  # construction. CORRECTED, from a peer review that read the function instead of the
+  # flag's name: _bypass_fatal DOWNGRADES the three fatal arms to a WARNING, it does not
+  # skip the function. assert_op_types runs FOUR times in this lane (install_app.sh:251
+  # and :596, twice over). What is never exercised is its ABORT, not the function. Its
+  # failure arms
+  # are covered by tests/ci_op_types.sql in the endpoint-tests lane; running it here would
+  # only assert that a stub disagrees with mainnet.
+  install:
+    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    command: ["install_app"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+
+  # Between the installs: prove #1 seeded the pointer, then move app_status ahead of the
+  # context so #2 has something to repair.
+  #
+  # Without this, install #2 took the `_ctx_block >= _seed` early return and was worth
+  # almost nothing -- it never called app_context_is_attached or app_set_current_block_num,
+  # and deleting the whole service left every assertion passing. hive_state.consistent_block
+  # is 6000, so a 5000 app_status clamps to 5000 rather than being rejected, and the final
+  # pointer becomes a number only hive.app_set_current_block_num can have produced.
+  seed-repair:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_seed_repair.sql
+    volumes:
+      - ../tests/ci_seed_repair.sql:/ci_seed_repair.sql:ro
+    depends_on:
+      install:
+        condition: service_completed_successfully
+
+  # Install #2. A shim that quietly does nothing looks identical to a working one after a
+  # single run; the second run is where that shows up, because create_context_if_not_exists
+  # has to READ the state the first run wrote.
+  #
+  # It takes the REPAIR branch, because seed-repair above arranged for it to: the context
+  # is at 0 and app_status is at 5000, so `_ctx_block >= _seed` is false. (An earlier
+  # revision of this comment said the opposite -- that install #2 takes the early return
+  # and the repair branch is unreachable. That was true before seed-repair existed, and
+  # seed-repair exists precisely because it made this service worth almost nothing.)
+  # The job trace confirms it: `install-again-1 | WARNING: HAF context haf_stats repaired:
+  # block 0 -> 5000`.
+  # It is also the only place the installer's own idempotency is exercised against a real
+  # server outside the replayed-HAF lanes (sync carries an explicit timeout: 2h; reinstall-test inherits the project's 3600s).
+  install-again:
+    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    command: ["install_app"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    depends_on:
+      seed-repair:
+        condition: service_completed_successfully
+
+  # Teardown, which no lane covered at all: NOTHING IN CI HAD EVER RUN uninstall_app.sh
+  # AGAINST A DATABASE. (An earlier version of this comment said the only references were
+  # three --help assertions in docker-build. False -- tests/unit/test_uninstall_app.py has
+  # 51 tests. They stub psql, so the stronger and simpler claim is the true one.)
+  # It costs ~2s here, and it
+  # is also what makes hive.app_remove_context in the shim live code rather than a
+  # function whose only caller is the shim's own self-test.
+  #
+  # --force because there is no TTY; uninstall_app.sh refuses the interactive confirmation
+  # without it.
+  uninstall:
+    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    command: ["uninstall_app", "--force"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+    depends_on:
+      verify:
+        condition: service_completed_successfully
+
+  # uninstall_app.sh runs scripts/uninstall_verify.sql itself and reports survivors, but it
+  # is permissive by design -- it pushes past errors the way upstream teardowns do. So
+  # assert independently that nothing survived, including the HAF context, which
+  # uninstall_verify.sql deliberately cannot name in a FROM clause.
+  verify-gone:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_uninstall_verify.sql
+    volumes:
+      - ../tests/ci_uninstall_verify.sql:/ci_uninstall_verify.sql:ro
+    depends_on:
+      uninstall:
+        condition: service_completed_successfully
+
+  verify:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_install_verify.sql
+    volumes:
+      - ../tests/ci_install_verify.sql:/ci_install_verify.sql:ro
+    depends_on:
+      install-again:
+        condition: service_completed_successfully
