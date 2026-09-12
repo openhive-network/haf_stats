@@ -159,6 +159,46 @@ def test_no_inverted_pipeline_assertions_in_ci():
     ]
     assert not offenders, f"inverted-pipeline assertions cannot fail a job: {offenders}"
 
+def test_no_long_output_producer_piped_into_an_early_exiting_reader():
+    """`docker run ... | grep -q X` cannot be trusted: grep -q exits the instant it
+    matches, the producer takes EPIPE, and gitlab-runner's `set -eo pipefail` makes the
+    producer's status the pipeline's. It passes almost always and fails on a
+    pipe-buffer timing race -- job 3271974 lost a pipeline to it on a commit whose
+    Docker build context was byte-identical to the previous green one.
+
+    PINNED HERE RATHER THAN LEFT TO shellcheck. #90 adds shellcheck over the embedded CI
+    shell, and that is worth doing, but it provably cannot substitute for this test:
+    shellcheck 0.11.0 is clean at every severity on the PRE-FIX block. SIGPIPE races are
+    not in its repertoire. Without this pin the five sites can be reintroduced by the
+    next edit with nothing to stop them -- the same reasoning as
+    test_no_inverted_pipeline_assertions_in_ci above.
+
+    The fix is to capture and then grep the file, which is what expect_ok and
+    expect_fail both do. (#86)
+    """
+    producers = r"docker\s+run|docker\s+compose\s+run|expect_ok|expect_fail"
+    # -q and -m exit early on a match; `head` exits after N lines. `read` consumes one
+    # line and leaves the producer writing into a closed pipe.
+    early_exit = r"grep[^|]*\s-[A-Za-z]*[qm]\b|head\b|\bread\b"
+    offenders = [
+        (n, line.strip())
+        for n, line in enumerate(CI.read_text(encoding="utf-8").splitlines(), 1)
+        # Both alternations MUST be grouped: without the (?:...) the trailing
+        # `[^|#]*\|...` binds only to the LAST branch, so a bare `expect_ok` matched and
+        # the test flagged every line in the block. It failed loudly, which is the only
+        # reason that was cheap to find.
+        if re.search(r"(?:" + producers + r")[^|#]*\|[^|#]*(?:" + early_exit + r")", line)
+        # `|| true` neutralises it: the pipeline's status is discarded either way.
+        and "|| true" not in line
+        # A comment describing the hazard is not the hazard.
+        and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, (
+        "a long-output producer feeds a reader that can exit early; capture to a file "
+        "and grep the file instead (#86): %s" % offenders
+    )
+
+
 # --- the published surface (#61) ---------------------------------------------------
 #
 # Each assertion below names the failure it catches. They were chosen by mutation --

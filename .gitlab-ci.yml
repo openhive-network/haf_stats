@@ -548,12 +548,57 @@ docker-build:
     - |
       set -e
       IMG="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-      expect_ok()   { timeout 60 docker run --rm "$IMG" "$@"; }
+      # CAPTURES instead of streaming, and that is not cosmetic. Five call sites below
+      # did `expect_ok ... | grep -q X`. grep -q exits the instant it matches, so the
+      # pipe closes while the producer is still writing, and the producer takes EPIPE.
+      # It is a race against pipe-buffer timing: it passed almost always and failed
+      # occasionally, costing pipeline 179123 a spurious red on a commit whose build
+      # context was byte-identical to the previous green one. (#86)
+      #
+      # WHY A RED, when the pipeline's LAST element (grep -q) had succeeded: because
+      # gitlab-runner emits `set -eo pipefail`, which this file already records at the
+      # openapi-drift job above -- see the comment beginning "gitlab-runner emits". With
+      # pipefail, the EPIPE'd producer's status is the pipeline's status.
+      #
+      # TWO producers could supply it, and the trace showed the first:
+      #   * the docker CLI -- `write /dev/stdout: broken pipe`, exit 1 (what job 3271974 hit)
+      #   * the container itself -- docker/docker_entrypoint.sh and scripts/common.sh both
+      #     run `set -euo pipefail`, and every print_help is itself a `sed ... | sed ...`,
+      #     so a SIGPIPE on the inner sed exits 141 and docker propagates it.
+      # Removing the pipe closes both, and makes the assertions independent of pipefail.
+      #
+      # expect_fail already captured rather than piped -- that half was never the bug.
+      # It did NOT split its streams, so this change gives both helpers the same shape.
+      #
+      # STDOUT AND STDERR STAY SEPARATE. The old pipe fed grep STDOUT ONLY, so folding
+      # stderr in would quietly widen every assertion -- and one of them, the entrypoint
+      # usage check below, exists precisely to assert that usage goes to stdout
+      # (docker_entrypoint.sh says so, and exits 1 on the stderr path). Merging the
+      # streams would have let `usage >&2` pass it.
+      #
+      # `cat` afterwards on purpose, matching expect_fail: an assertion that fails under
+      # `grep -q` otherwise tells you only that it failed, never what the image said.
+      # `|| true` on the cats so a redirect failure still reports docker's real rc rather
+      # than cat's.
+      #
+      # COUPLED PAIR: `expect_ok ...` and the `grep ... "$OUT"` after it are one
+      # assertion split across two statements. Do not insert another expect_ok between
+      # them -- the grep would silently read the wrong output and still pass.
+      OUT=/tmp/expect_ok_out
+      ERR=/tmp/expect_ok_err
+      expect_ok()   { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; return "$rc"; }
       # 124 is timeout's own kill, 125/126 are docker/exec failures, 127 is
       # "not found" -- none of them is the script rejecting its input. Excluding
       # them is the rule round two arrived at the hard way: an assertion whose
       # expected outcome is a non-zero exit must name a SPECIFIC reachable exit.
-      expect_fail() { rc=0; timeout 60 docker run --rm "$IMG" "$@" >/tmp/o 2>&1 || rc=$?; cat /tmp/o; case "$rc" in 0|124|125|126|127) return 1 ;; *) return 0 ;; esac; }
+      # Streams split for the SAME reason as expect_ok above, and the assertions below
+      # now name which one they expect. Merging them let an error message move between
+      # stdout and stderr unnoticed: `unknown verb` is written to stderr
+      # (docker_entrypoint.sh), while `is not a valid option` and `not supported yet`
+      # come from common.sh's log(), which echoes to stdout. A merged capture cannot
+      # tell those apart, and the comment above would have been half true -- expect_ok
+      # split, expect_fail merged.
+      expect_fail() { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; case "$rc" in 0|124|125|126|127) return 1 ;; *) return 0 ;; esac; }
 
       echo "--- the image's userland is what the scripts assume ---"
       # Asserted in three places in this repo and verified nowhere until now: that the
@@ -561,15 +606,15 @@ docker-build:
       # for the #!/bin/bash scripts. One line settles both.
       docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
       echo "--- entrypoint dispatches its own usage on stdout ---"
-      expect_ok --help | grep -q "install_app"
+      expect_ok --help; grep -q "install_app" "$OUT"
       echo "--- unknown verb fails with the right message, not merely non-zero ---"
-      expect_fail install-app; grep -q "unknown verb: install-app" /tmp/o
+      expect_fail install-app; grep -q "unknown verb: install-app" "$ERR"
       echo "--- the scripts parse and render help under the image's BusyBox userland ---"
-      expect_ok install_app    --help | grep -q -- "--swagger-url"
-      expect_ok uninstall_app  --help | grep -q -- "--force"
-      expect_ok process_blocks --help | grep -q -- "--host"
+      expect_ok install_app    --help; grep -q -- "--swagger-url" "$OUT"
+      expect_ok uninstall_app  --help; grep -q -- "--force" "$OUT"
+      expect_ok process_blocks --help; grep -q -- "--host" "$OUT"
       echo "--- an invalid option is rejected, not ignored ---"
-      expect_fail install_app --nope; grep -q "is not a valid option" /tmp/o
+      expect_fail install_app --nope; grep -q "is not a valid option" "$OUT"
       echo "--- a foreign --schema warns and does NOT exit at the option loop ---"
       # It must not hard-fail: upstream module files pass --schema= to process_blocks on
       # a service that is `restart: on-failure`, so exiting here is a permanent
@@ -588,8 +633,11 @@ docker-build:
       # Two lessons kept here on purpose: an assertion whose expected outcome is a
       # NON-zero exit must name a specific reachable exit, not "anything but 0"; and a
       # smoke test must never invoke a verb in a way that reaches the connect.
-      expect_ok install_app --schema=btracker_app --help >/tmp/o 2>&1; cat /tmp/o
-      grep -q "WARNING: --schema" /tmp/o
+      expect_ok install_app --schema=btracker_app --help
+      # scripts/common.sh's log() writes to stdout, so $OUT is the right file here.
+      # (The old form redirected into /tmp/o -- expect_fail's file -- which nothing read
+      # in between, but was a clobber waiting to matter.)
+      grep -q "WARNING: --schema" "$OUT"
       echo "--- a connection URI is REFUSED, not half-honoured ---"
       # Honouring it moved only the psql connection: the messages and the teardown's
       # confirmation prompt still read POSTGRES_HOST/POSTGRES_DB, so it could act on one
@@ -597,11 +645,11 @@ docker-build:
       # one upstream module file, on a service with no restart policy.
       for verb in install_app uninstall_app process_blocks; do
         expect_fail "$verb" --postgres-url=postgresql://haf_admin@haf/haf_block_log
-        grep -q "not supported yet" /tmp/o || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
-        grep -q -- "--host=" /tmp/o || { echo "FAIL: $verb did not name the alternative flags"; exit 1; }
+        grep -q "not supported yet" "$OUT" || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
+        grep -q -- "--host=" "$OUT" || { echo "FAIL: $verb did not name the alternative flags"; exit 1; }
       done
       echo "--- the compat path the LIVE node uses still dispatches ---"
-      expect_ok /app/scripts/install_app.sh --help | grep -q -- "--swagger-url"
+      expect_ok /app/scripts/install_app.sh --help; grep -q -- "--swagger-url" "$OUT"
       echo "--- the healthcheck ships at the path module files hardcode ---"
       expect_ok test -r /app/block-processing-healthcheck.sql
       timeout 60 docker run --rm --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h 2>&1 && exit 1
