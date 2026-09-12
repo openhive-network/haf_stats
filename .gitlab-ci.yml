@@ -362,6 +362,61 @@ openapi-drift:
   rules:
     - if: $CI_COMMIT_BRANCH
 
+# -----------------------------------------------------------------------------
+# haf-drift -- the only thing in this repo that compares our HAF transcription
+# against hive/haf. See scripts/check_haf_drift.sh for why it is greps and not a
+# schema diff, and for the subshell bug that made an earlier version report
+# "No drift" having run zero checks. (#87)
+#
+# TWO JOBS ON PURPOSE, and the split is the point.
+#
+# The first version was a single advisory job against `develop`, justified on the
+# grounds that a third-party branch moving on its own schedule would redden
+# unrelated MRs -- and a check that does that gets deleted rather than acted on.
+# That reasoning is right about `develop` and wrong as a whole, because it left the
+# version we actually RUN unchecked by anything blocking. Review made the better
+# argument: the moving input is a CHOICE.
+#
+#   haf-drift          pinned tag, from docker/.env. Deterministic -- it can only
+#                      change when WE bump the pin, which is exactly when someone
+#                      should be looking. So it BLOCKS.
+#   haf-drift-develop  develop. Early warning for something that has not reached
+#                      our pin yet. Advisory, because upstream's schedule is not
+#                      ours.
+#
+# The pinned ref is DERIVED from docker/.env by the script (HAF_DRIFT_REF=pinned),
+# not repeated here: a tag written in two places is a tag that gets updated in one.
+.haf_drift_template:
+  stage: lint
+  image: alpine:3.20
+  needs: []
+  before_script:
+    - apk add --no-cache bash curl >/dev/null
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# Blocking. Checks the HAF we pin and run.
+haf-drift:
+  extends: .haf_drift_template
+  variables:
+    HAF_DRIFT_REF: "pinned"
+  script:
+    - bash scripts/check_haf_drift.sh
+
+# Advisory. Checks where HAF is going.
+#
+# allow_failure is honest here rather than defensive: a yellow triangle is easy to
+# miss, so this job is early warning only, and haf-drift above is what actually
+# defends the branch. If this one goes yellow, upstream has changed something we
+# transcribe and the pinned job will go RED the day we bump HAF_VERSION.
+haf-drift-develop:
+  extends: .haf_drift_template
+  variables:
+    HAF_DRIFT_REF: "develop"
+  script:
+    - bash scripts/check_haf_drift.sh
+  allow_failure: true
+
 shell-lint:
   stage: lint
   # Pinned, for the reason sql-lint pins sqlfluff: an unpinned linter means a drifting

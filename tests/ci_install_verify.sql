@@ -238,7 +238,7 @@ BEGIN
     -- app_context_exists, so a permissive shim would hide a caller that lost the guard.
     BEGIN
         PERFORM hive.app_create_context('haf_stats'::hafd.context_name, 'haf_stats_app',
-            ARRAY[hive.live_stage()]::hive.application_stages);
+            ARRAY[hafd.live_stage()]::hafd.application_stages);
         RAISE EXCEPTION 'shim: app_create_context accepted a DUPLICATE context';
     EXCEPTION
         WHEN SQLSTATE 'P0001' THEN
