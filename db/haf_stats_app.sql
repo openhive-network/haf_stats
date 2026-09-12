@@ -178,7 +178,14 @@ RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    _stages    hive.application_stages;
+    -- hafd.*, not hive.*. Upstream keeps hive.application_stages and hive.live_stage()
+    -- only in types/operation/compatibility_with_old_haf_apps.sql -- a file whose first
+    -- line is "for compatibility with old HAF apps add some aliases for types moved to
+    -- hafd schema". The canonical names are hafd.application_stages and
+    -- hafd.live_stage(), and both exist in the HAF we pin (1.28.6) as well as develop,
+    -- verified against both refs. hive.stage() below is NOT a compat alias -- it is
+    -- canonical, defined in application_loop/stages_functions.sql -- so it stays. (#87)
+    _stages    hafd.application_stages;
     _app_block INT;   -- what app_status actually says (the app's own clock)
     _seed      INT;   -- _app_block clamped to what HAF can currently serve
     _ctx_block INT;
@@ -244,8 +251,8 @@ BEGIN
     IF NOT hive.app_context_exists('haf_stats') THEN
         _stages := ARRAY[
             hive.stage('MASSIVE_PROCESSING', 101, 10000, '20 seconds'),
-            hive.live_stage()
-        ]::hive.application_stages;
+            hafd.live_stage()
+        ]::hafd.application_stages;
         PERFORM hive.app_create_context(
             _name   => 'haf_stats'::hafd.context_name,
             _schema => 'haf_stats_app',

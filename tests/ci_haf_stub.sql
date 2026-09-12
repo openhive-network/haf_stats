@@ -17,14 +17,16 @@
 -- dependencies)"), and that lane never attempts db/haf_stats_app.sql or
 -- db/builtin_roles.sql at all. What is missing is the context lifecycle API, the HAF
 -- roles, and seven type objects (hafd.context_name / stage_name / blocks_distance /
--- blocks_count, hive.blocks_range / stage / application_stages) -- everything
+-- blocks_count / application_stage / application_stages, hive.blocks_range and the
+-- three hive.* compat aliases) -- 10 type objects in all, everything
 -- install_app.sh needs that no HAF-less lane provides.
 --
 -- WHAT THIS IS NOT. It is not a HAF emulator. It implements the eight calls
 -- create_context_if_not_exists() makes, plus three more -- app_context_attach,
 -- app_get_current_block_num and app_remove_context -- which the shim's own smoke test,
 -- tests/ci_install_verify.sql and the teardown step use, plus hive.can_impersonate,
--- which scripts/uninstall_app.sh calls directly. TWELVE functions, and the
+-- which scripts/uninstall_app.sh calls directly, and hafd.live_stage(). 13 functions,
+-- and the
 -- invariants they reason about. A processor cannot run against it: there is no block
 -- streaming here, only context bookkeeping.
 --
@@ -125,21 +127,37 @@ BEGIN
 END
 $$;
 
+-- Retire the shapes a PRE-#87 load of this file left behind. Same reason as the DROP
+-- FUNCTIONs below: everything here is written to survive a re-run, and #87 renamed the
+-- composite (hive.stage -> hafd.application_stage) and re-based the alias domain
+-- (hive.stage[] -> hafd.application_stage[]). The IF NOT EXISTS guards below would
+-- happily leave both stale, so a local `docker compose up` without `down -v` across a
+-- branch switch would build contexts out of the old composite. CI never sees this (fresh
+-- postgres per job); a developer would.
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+               WHERE n.nspname = 'hive' AND t.typname = 'stage' AND t.typtype = 'c') THEN
+        DROP TYPE hive.stage CASCADE;      -- takes hive.application_stages with it
+    END IF;
+    IF EXISTS (SELECT FROM pg_type d JOIN pg_namespace n ON n.oid = d.typnamespace
+               WHERE n.nspname = 'hive' AND d.typname = 'application_stages'
+                 AND format_type(d.typbasetype, NULL) <> 'hafd.application_stage[]') THEN
+        DROP DOMAIN hive.application_stages CASCADE;
+    END IF;
+END
+$$;
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-                   WHERE n.nspname = 'hive' AND t.typname = 'stage') THEN
-        -- Field names are HAF's (hive/haf application_loop/stages.sql), not invented
-        -- ones. Positional ROW(...) construction -- all this repo does -- works either
-        -- way, but `(_stages[1]).min_head_block_distance` is valid on a node and was an
-        -- error here under the old names.
-        --
-        -- Upstream this composite is hafd.application_stage and there is NO type called
-        -- hive.stage (only the function of that name); hive.application_stages is a domain
-        -- over hafd.application_stage[]. The shim keeps the hive.stage name because
-        -- db/haf_stats_app.sql declares variables of it -- renaming would be a change to
-        -- the code under test rather than to the stub.
-        CREATE TYPE hive.stage AS (
+                   WHERE n.nspname = 'hafd' AND t.typname = 'application_stage') THEN
+        -- hafd.application_stage, which is what HAF actually calls it
+        -- (application_loop/stages.sql:8). There is NO type named hive.stage upstream --
+        -- only the FUNCTION of that name. An earlier revision of this shim invented the
+        -- type because db/haf_stats_app.sql used to declare variables of it; #87 moved
+        -- that file onto the canonical names, so the invention is no longer needed.
+        CREATE TYPE hafd.application_stage AS (
             name                        hafd.stage_name,
             min_head_block_distance     hafd.blocks_distance,
             blocks_limit_in_group       hafd.blocks_count,
@@ -147,8 +165,31 @@ BEGIN
         );
     END IF;
     IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'hafd' AND t.typname = 'application_stages') THEN
+        CREATE DOMAIN hafd.application_stages AS hafd.application_stage[];
+    END IF;
+    -- THE COMPAT ALIASES, reproduced because HAF still ships them and #87 is about what
+    -- happens when it stops. types/operation/compatibility_with_old_haf_apps.sql opens
+    -- with "for compatibility with old HAF apps add some aliases for types moved to hafd
+    -- schema". Keeping them here means the shim matches a node exactly; the lint-stage
+    -- drift guard (.gitlab-ci.yml: haf-drift) is what notices if upstream drops them.
+    IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
                    WHERE n.nspname = 'hive' AND t.typname = 'application_stages') THEN
-        CREATE DOMAIN hive.application_stages AS hive.stage[];
+        CREATE DOMAIN hive.application_stages AS hafd.application_stage[];
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'hive' AND t.typname = 'context_name') THEN
+        CREATE DOMAIN hive.context_name AS hafd.context_name;
+    END IF;
+    -- The THIRD alias. compatibility_with_old_haf_apps.sql defines three domains, not
+    -- two; hive.contexts_group is the argument type of the group overloads of
+    -- app_context_attach/detach/set_non_forking that this shim's comments already cite.
+    -- Nothing here calls them, but leaving the domain out made "the shim reproduces the
+    -- compat aliases" false.
+    IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'hive' AND t.typname = 'contexts_group') THEN
+        CREATE DOMAIN hive.contexts_group AS hafd.context_name[] NOT NULL
+            CONSTRAINT non_empty_contexts_group CHECK (CARDINALITY(VALUE) > 0);
     END IF;
 END
 $$;
@@ -321,9 +362,17 @@ USING (hive.can_impersonate(current_user, owner));
 -- across a branch switch would leave the old ones behind, and
 -- hive.app_context_attach('haf_stats') would then be AMBIGUOUS against a 2-arg overload
 -- with a defaulted second parameter. Every other object in this file is written to
--- survive a re-run (IF NOT EXISTS on all seven types, DROP POLICY IF EXISTS before all
--- five policies); these two now are too.
+-- survive a re-run (IF NOT EXISTS on all 10 type objects, 6 DROP POLICY IF EXISTS before
+-- 3 CREATE POLICY); these 7 now are too.
 DROP FUNCTION IF EXISTS hive.stage(TEXT, INT, INT, INTERVAL);
+-- The DOMAIN-TYPED signature too, and this one is not optional. #87 changed this
+-- function's RETURN type from hive.stage to hafd.application_stage, and CREATE OR
+-- REPLACE cannot change a return type -- it raises 42P13. DROP FUNCTION matches argument
+-- types EXACTLY, and a domain is a distinct type from its base, so the TEXT/INT form
+-- above does not match the domain-typed one and would have left it standing.
+DROP FUNCTION IF EXISTS hive.stage(hafd.stage_name, hafd.blocks_distance, hafd.blocks_count, INTERVAL);
+DROP FUNCTION IF EXISTS hive.live_stage();
+DROP FUNCTION IF EXISTS hafd.live_stage();
 DROP FUNCTION IF EXISTS hive.app_context_attach(TEXT, INT);
 
 CREATE OR REPLACE FUNCTION hive.stage(
@@ -331,15 +380,28 @@ CREATE OR REPLACE FUNCTION hive.stage(
     , _min_head_block_distance hafd.blocks_distance
     , _blocks_limit_in_group hafd.blocks_count
     , _processing_alarm_threshold INTERVAL = '5 seconds')
-RETURNS hive.stage
+RETURNS hafd.application_stage
 LANGUAGE sql IMMUTABLE
 AS $$ SELECT ROW(_name, _min_head_block_distance, _blocks_limit_in_group,
-                 _processing_alarm_threshold)::hive.stage $$;
+                 _processing_alarm_threshold)::hafd.application_stage $$;
+
+-- hafd.live_stage() is the real one (application_loop/stages.sql:15); hive.live_stage()
+-- is the compat wrapper that just calls it. Both modelled, because db/haf_stats_app.sql
+-- now calls the canonical one and the wrapper is what #87 is watching for removal.
+-- Routed through hive.stage(), as upstream is (application_loop/stages.sql:15-24):
+-- plpgsql, IMMUTABLE, body `RETURN hive.stage('live', 0, 1, '3 seconds')`. An earlier
+-- revision built the ROW directly in LANGUAGE sql. Same value, but the dependency is the
+-- point: on a node hafd.live_stage() goes through hive.stage() and therefore through the
+-- domain CHECKs, and a shim that bypasses them accepts a stage a node would reject.
+CREATE OR REPLACE FUNCTION hafd.live_stage()
+RETURNS hafd.application_stage
+LANGUAGE plpgsql IMMUTABLE
+AS $$ BEGIN RETURN hive.stage('live', 0, 1, '3 seconds'); END $$;
 
 CREATE OR REPLACE FUNCTION hive.live_stage()
-RETURNS hive.stage
-LANGUAGE sql IMMUTABLE
-AS $$ SELECT ROW('live', 0, 1, '3 seconds'::INTERVAL)::hive.stage $$;
+RETURNS hafd.application_stage
+LANGUAGE plpgsql IMMUTABLE
+AS $$ BEGIN RETURN hafd.live_stage(); END $$;
 
 CREATE OR REPLACE FUNCTION hive.app_context_exists(_name TEXT)
 RETURNS BOOLEAN
@@ -358,8 +420,9 @@ AS $$ SELECT EXISTS (SELECT 1 FROM hafd.contexts AS c WHERE c.name = _name) $$;
 -- that exact call shape against the node. But a caller passing _is_forking => FALSE would
 -- work on a node and fail here with "function does not exist".
 DROP FUNCTION IF EXISTS hive.app_create_context(hafd.context_name, TEXT, hive.application_stages);
+DROP FUNCTION IF EXISTS hive.app_create_context(hafd.context_name, TEXT, hive.application_stages, BOOLEAN);
 CREATE OR REPLACE FUNCTION hive.app_create_context(
-    _name hafd.context_name, _schema TEXT, _stages hive.application_stages,
+    _name hafd.context_name, _schema TEXT, _stages hafd.application_stages,
     _is_forking BOOLEAN DEFAULT TRUE)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -589,7 +652,7 @@ DECLARE
 BEGIN
     PERFORM hive.app_create_context(_probe::hafd.context_name, 'ci_probe_schema',
         ARRAY[hive.stage('MASSIVE_PROCESSING', 101, 10000, '20 seconds'),
-              hive.live_stage()]::hive.application_stages);
+              hafd.live_stage()]::hafd.application_stages);
 
     IF NOT hive.app_context_exists(_probe) THEN
         RAISE EXCEPTION 'shim: app_create_context did not create a context';
@@ -663,6 +726,23 @@ BEGIN
     BEGIN
         PERFORM hive.stage('MASSIVE_PROCESSING', 101, 0, '20 seconds');
         RAISE EXCEPTION 'shim: hafd.blocks_count accepted a zero batch size';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+    END;
+
+    -- THE COMPAT ALIASES, which nothing else here touches any more. #87 moved
+    -- db/haf_stats_app.sql onto the canonical hafd.* names, so hive.application_stages /
+    -- hive.live_stage() / hive.context_name / hive.contexts_group became pure
+    -- transcription -- present, and asserted by nothing. These four arms mean a wrong
+    -- alias is caught here rather than on a node, and they are cheap.
+    IF (SELECT hafd.live_stage()) IS DISTINCT FROM (SELECT hive.live_stage()) THEN
+        RAISE EXCEPTION 'shim: hive.live_stage() and hafd.live_stage() disagree; upstream defines the former as a wrapper round the latter';
+    END IF;
+    PERFORM ARRAY[hive.live_stage()]::hive.application_stages;
+    PERFORM 'ci_probe'::hive.context_name;
+    BEGIN
+        PERFORM ARRAY[]::hive.contexts_group;
+        RAISE EXCEPTION 'shim: hive.contexts_group accepted an EMPTY array';
     EXCEPTION
         WHEN check_violation THEN NULL;
     END;
