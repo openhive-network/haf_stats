@@ -180,7 +180,10 @@ def test_help_prints_the_dispatchers_own_usage(bash, app_dir):
     r = run_entrypoint(bash, app_dir, "--help")
     assert r.returncode == 0
     # stdout, not stderr: --help is a successful request for the text, and a caller
-    # that pipes it (the CI image smoke test does) gets nothing if it goes to stderr.
+    # that reads only stdout gets nothing if it goes there. The CI image smoke test is
+    # one such caller -- it used to PIPE this into grep; since #86 it captures stdout
+    # and stderr to separate files and greps the stdout one, which preserves the
+    # distinction this assertion is about.
     assert "install_app" in r.stdout
     assert "GNU bash" not in r.stdout
 
