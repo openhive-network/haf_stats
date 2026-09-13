@@ -1514,6 +1514,47 @@ publish_images:
   # create a pipeline at all. Having no list cannot make either mistake.
   variables:
     PUBLISH_IMAGES: "haf_stats rewriter"
+  # GATED ON THE CREDENTIALS EXISTING (hive/haf_stats#66).
+  #
+  # registry-upload.hive.blog needs BLOG_REGISTRY_USER / BLOG_REGISTRY_PASSWORD, and
+  # neither is set on this project or inherited from the group -- only RENOVATE_TOKEN
+  # and GITHUB_COM_TOKEN are. Without this gate the job is still CREATED on a protected
+  # tag and goes RED, because the template's credential check closes BEFORE the push:
+  #
+  #     if [[ -n "${BLOG_REGISTRY_USER:-}" && -n "${BLOG_REGISTRY_PASSWORD:-}" ]]; then
+  #       ... docker login ...
+  #     else
+  #       echo "WARNING: ... skipping hive.blog login"
+  #     fi
+  #     # ... and then pushes anyway, unauthenticated
+  #
+  # So the failure would land on the first `1.*` release tag -- the worst moment to
+  # discover it. With the gate the job is not created at all until the variables exist,
+  # and it starts working the day they are added, with no further change here.
+  #
+  # WHY THE TEMPLATE'S RULES ARE RESTATED RATHER THAN EXTENDED: GitLab REPLACES `rules:`
+  # on override, it does not merge them. The first three and the last are copied verbatim
+  # from .docker_publish_job_template (common-ci-configuration,
+  # templates/docker_image_jobs.gitlab-ci.yml) so that dropping them here does not
+  # silently re-enable publishing in a QUICK_TEST or SKIP_* pipeline. If that template
+  # changes its rules, this copy must follow -- that is the cost of the gate, and it is
+  # why the credential condition is folded into the existing positive rule rather than
+  # added as a fourth `never`.
+  #
+  # ALTERNATIVE CONSIDERED: setting SKIP_DOCKER_PUBLISH=true as a project CI variable
+  # uses the template's own switch and needs no code at all -- but it lives in project
+  # settings where nothing in the repo records it, and it has to be remembered and
+  # removed when the credentials land. Preferred the version that is visible in the diff.
+  rules:
+    - if: $QUICK_TEST == "true"
+      when: never
+    - if: $SKIP_PRODUCTION_DEPLOY == "true"
+      when: never
+    - if: $SKIP_DOCKER_PUBLISH == "true"
+      when: never
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $BLOG_REGISTRY_USER && $BLOG_REGISTRY_PASSWORD
+      when: on_success
+    - when: never
 
 # `latest` tracks develop, published HERE rather than from docker-build so that it only
 # ever names a commit whose test lanes went green.
