@@ -1556,6 +1556,40 @@ publish_images:
       when: on_success
     - when: never
 
+# The visible half of the gate above. Without this, a release tag pushed before the
+# credentials exist produces SILENCE -- publish_images is simply not created, and the
+# pipeline looks complete. That is the one real cost of gating rather than letting the
+# job go red, so pay it back with a job that says so out loud.
+#
+# Green on purpose: the mirror being unavailable is a known, tracked state
+# (hive/haf_stats#66), not a build failure. It should be legible, not alarming.
+#
+# The condition is the exact complement of publish_images' positive rule. GitLab treats
+# a bare `$VAR` as "defined and non-empty", so the complement has to name BOTH the unset
+# and the empty cases for BOTH variables -- `== null` alone would miss a variable that
+# exists with an empty value, which is what someone leaves behind when they blank a
+# line out rather than deleting it. Exactly one of these two jobs can ever run.
+publish_images_skipped:
+  stage: publish
+  image: alpine:3.20
+  script:
+    # Quoted: an unquoted scalar containing ": " is a MAPPING to YAML, which is what
+    # ci/lint rejected on the first attempt here.
+    - >-
+      echo "MIRROR SKIPPED - BLOG_REGISTRY_USER/BLOG_REGISTRY_PASSWORD are not set,
+      so ${CI_COMMIT_TAG} was NOT mirrored to registry-upload.hive.blog.
+      The GitLab registry images were published normally. See hive/haf_stats#66."
+  rules:
+    - if: $QUICK_TEST == "true"
+      when: never
+    - if: $SKIP_PRODUCTION_DEPLOY == "true"
+      when: never
+    - if: $SKIP_DOCKER_PUBLISH == "true"
+      when: never
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && ($BLOG_REGISTRY_USER == null || $BLOG_REGISTRY_USER == "" || $BLOG_REGISTRY_PASSWORD == null || $BLOG_REGISTRY_PASSWORD == "")
+      when: on_success
+    - when: never
+
 # `latest` tracks develop, published HERE rather than from docker-build so that it only
 # ever names a commit whose test lanes went green.
 #
