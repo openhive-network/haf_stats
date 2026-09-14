@@ -150,11 +150,18 @@ cd docker
 docker compose up -d
 ```
 
-> ⚠️ **Neither lane works from a clean clone yet, and this is not specific to
-> Production.** `.env` ships `HAF_STATS_VERSION=latest`, but CI publishes **only** SHA
-> tags — there is no `latest` for the app image or the rewriter. In the Production stack
-> `haf-stats-rewriter` survives it, being the one service with a `build:` stanza that
-> Compose falls back to; `haf-stats-setup` and `haf-stats-process` have no fallback. The
+> ⚠️ **`latest` tracks develop HEAD, and it is the shipped default.** `.env` ships
+> `HAF_STATS_VERSION=latest`, and since #66 CI republishes `latest` for both the app
+> image and the rewriter on every green develop pipeline. So both lanes now work from a
+> clean clone — and both follow develop unless you pin. Pin a version or a SHA for
+> anything you need to reproduce.
+>
+> This block previously said no `latest` existed and told you to pin a published SHA;
+> that was true until #66 and is why these lanes used to fail loudly instead of moving
+> underneath you. One behaviour change worth knowing: `haf-stats-rewriter` is the one
+> service with a `build:` stanza, so it used to fall back to building your working
+> tree when the pull failed. It now pulls instead — edit the rewriter and run the
+> documented command and your change is silently absent unless you pass `--build`. The
 > **development** stack above is worse: `docker-compose-test.yml` references
 > `${HAF_STATS_VERSION}` with no default and no `build:` at all, so it fails the same way
 > with nothing to fall back on.

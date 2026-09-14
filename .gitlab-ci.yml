@@ -755,7 +755,13 @@ docker-build:
     # Rebuilding on a tag is acceptable here, but be precise about why -- an earlier
     # revision of this comment overstated it twice and both are corrected:
     #
-    #   * TEN jobs are branch-gated, not one and not seven: sql-lint, openapi-drift,
+    #   * ELEVEN jobs are absent from a tag pipeline -- not one, not seven, and not
+    #     the ten an earlier revision counted. The ten below, plus detect_changes,
+    #     which upstream's .haf_app_detect_changes excludes on tags rather than this
+    #     file. Counted as a SET DIFFERENCE this time: the earlier "ten" came from
+    #     subtracting job totals (21 branch vs 11 tag), which silently nets off the
+    #     tag-only jobs against the branch-only ones and is how this sentence has now
+    #     been wrong three times. The ten this file gates: sql-lint, openapi-drift,
     #     shell-lint, shell-tests, hadolint, compose-validate, endpoint-tests,
     #     haf-drift, haf-drift-develop and install-test. Measured by differencing the
     #     ci/lint job lists for a branch ref (21) against a simulated tag ref (11),
@@ -821,8 +827,12 @@ docker-build-rewriter:
         docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
       fi
   rules:
-    # Branches and tags, same as docker-build -- the publish job pulls this image
-    # by tag, so the tag has to be built here.
+    # Branches and tags, same as docker-build, and for the SAME surviving reason:
+    # reinstall-test's non-optional `needs`. An earlier revision said "the publish job
+    # pulls this image by tag, so the tag has to be built here" -- that stopped being
+    # true when the SHA push became branch-only and publish_tag took over creating
+    # ${CI_COMMIT_TAG}. Same correction as on docker-build; this copy was missed the
+    # first time.
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
@@ -914,7 +924,10 @@ sync:
     DOCKER_TLS_VERIFY: "1"
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
     # Pin the SHA tag docker-build-rewriter just pushed. Left unset, the service falls
-    # back to :latest -- a tag CI never publishes, for this image or the app image. `up`
+    # back to :latest -- which, since #66, IS published, on every green develop
+    # pipeline. This variable is still set explicitly so the lane pins the commit under
+    # test rather than following develop; before #66 an unset value failed loudly, and
+    # now it would succeed against the wrong image, which is the worse failure. `up`
     # logged `manifest unknown` and silently BUILT it instead (job 3270294), in a job
     # whose before_script states no builder setup is needed here. It worked, but it
     # exercised a local build rather than the artifact the pipeline produced.
@@ -1503,7 +1516,8 @@ install-test:
 # =============================================================================
 # PUBLISH
 # =============================================================================
-# Mirror the release images to registry.hive.blog (hive/haf_stats#66).
+# Mirror the release images to registry-upload.hive.blog (hive/haf_stats#66).
+# (The PULL host is registry.hive.blog; the push host is the upload alias.)
 #
 # This is the step that actually unblocks haf_api_node. Its modules resolve
 # ${HIVE_API_NODE_REGISTRY:-registry.hive.blog}/haf_stats, and haf_stats has never been
