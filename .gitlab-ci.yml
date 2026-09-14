@@ -15,7 +15,9 @@
 #   test   : pattern-test      -> tavern .pat.json exact-value suite (cached stack)
 #            regression-test    -> parity + external hived regression guards
 #   publish: publish_latest    -> :latest on develop, AFTER the test lanes
-#            publish_images     -> mirror :<tag> to registry.hive.blog (protected tags)
+#            publish_tag        -> retag the tested SHA image as :<tag> (protected tags)
+#            publish_images     -> mirror :<tag> to registry-upload.hive.blog (gated)
+#            publish_images_skipped -> says so when that gate is closed
 #   cleanup: cache_cleanup     -> manual NFS cache pruning
 #
 # The fast stub gate (endpoint-tests, docker-compose-ci.yml) still runs on every
@@ -549,8 +551,7 @@ docker-build:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
     - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA"
-        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-        ${CI_COMMIT_TAG:+-t "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"} .
+        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
     # Smoke-run the image (#57). Be precise about the gap this closes, because an
     # earlier revision of this comment overstated it: the `sync` job DOES start
     # containers from this image and exercises install_app/process_blocks for real. What
@@ -690,22 +691,28 @@ docker-build:
         echo "the healthcheck could not find its .sql -- COPY missing?" >&2; exit 1
       fi
       echo "image smoke tests passed"
-    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-    # Version tags (hive/haf_stats#66). Until this existed every tag on both
-    # repositories was an 8-hex SHA, so haf_api_node's module -- which resolves
-    # ${HAF_STATS_VERSION:-${HIVE_API_NODE_VERSION}} -- could not name a haf_stats
-    # image that exists, and an operator had to hand-pin a SHA for the app while the
-    # rest of the node moved by version.
+    # BRANCH PIPELINES ONLY, and that guard is load-bearing (hive/haf_stats#66).
     #
-    # `latest` is NOT pushed here -- see publish_latest in the publish stage. This job
-    # is in `build`, so anything it pushed would precede every test lane, and this
-    # repo's own docker/.env sets HAF_STATS_VERSION=latest with docker-compose.yml
-    # defaulting to it. Publishing `latest` from here would mean `cd docker && docker
-    # compose up -d`, which README calls the production path, could silently pull a
-    # develop-HEAD image whose tests went red.
+    # This job also runs on a tag, because sync and reinstall-test carry a NON-OPTIONAL
+    # `needs: docker-build` and GitLab refuses to create a pipeline whose needs cannot
+    # resolve. But the SHA tag it would push there is the SAME name an earlier develop
+    # pipeline already published -- and a rebuild is not the same bytes. The rewriter
+    # proves it: Dockerfile.rewriter bakes org.opencontainers.image.created from
+    # BUILD_TIME, so every rebuild has a different digest.
+    #
+    # Re-pushing would therefore REPLACE an image that other things pin by SHA and
+    # expect to be immutable: testapi runs .../haf_stats/rewriter:<sha>, and
+    # haf_api_node!244's .env.example documents HAF_STATS_VERSION=<sha>. Tagging a
+    # commit would silently change what they run -- the one thing a SHA pin exists to
+    # prevent. An earlier revision of this MR did exactly that.
+    #
+    # So on a tag the image is still BUILT (the smoke test above is worth running) and
+    # simply not published. publish_tag in the publish stage then pulls the SHA image
+    # the develop pipeline tested and retags it, so the released bytes ARE the tested
+    # bytes. `latest` gets the same treatment in publish_latest, for the same reason.
     - |
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+      if [ -z "${CI_COMMIT_TAG:-}" ]; then
+        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
       fi
   rules:
     # Branches AND tags. Workflows/Branch-Pipelines.gitlab-ci.yml creates pipelines
@@ -726,9 +733,15 @@ docker-build:
     # Rebuilding on a tag is acceptable here, but be precise about why -- an earlier
     # revision of this comment overstated it twice and both are corrected:
     #
-    #   * SEVEN jobs are branch-gated, not one: sql-lint, openapi-drift, shell-lint,
-    #     shell-tests, hadolint, compose-validate and endpoint-tests. So a tag pipeline
-    #     runs FEWER checks than a branch pipeline -- no linting, no fast stub gate.
+    #   * TEN jobs are branch-gated, not one and not seven: sql-lint, openapi-drift,
+    #     shell-lint, shell-tests, hadolint, compose-validate, endpoint-tests,
+    #     haf-drift, haf-drift-develop and install-test. Measured by differencing the
+    #     ci/lint job lists for a branch ref (21) against a simulated tag ref (11),
+    #     which is the only way to get this right -- this sentence has now been wrong
+    #     twice from reading alone ("only endpoint-tests", then "SEVEN"). Two of the
+    #     three additions matter for a release: haf-drift is the BLOCKING check that
+    #     the pinned HAF version has not drifted, and install-test is the only fast
+    #     lane that runs the real install_app.sh against a real PostgreSQL.
     #   * Of the four lanes that do run on tags, only reinstall-test reliably exercises
     #     the built image. It pulls ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
     #     explicitly. sync sets HAF_STATS_IMAGE too but short-circuits on an app-cache
@@ -773,13 +786,13 @@ docker-build-rewriter:
         --build-arg GIT_CURRENT_BRANCH="${CI_COMMIT_BRANCH:-}"
         --build-arg GIT_LAST_LOG_MESSAGE="$CI_COMMIT_TITLE"
         --build-arg BUILD_TIME="$CI_JOB_STARTED_AT"
-        -t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
-        ${CI_COMMIT_TAG:+-t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_TAG"} .
-    - docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
-    # Tag only; `latest` is published by publish_latest after the tests.
+        -t "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA" .
+    # Branch pipelines only -- see the long note in docker-build. This image is the one
+    # that makes the rebuild-is-not-the-same-bytes problem provable rather than
+    # theoretical, because BUILD_TIME above lands in an OCI label.
     - |
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_TAG"
+      if [ -z "${CI_COMMIT_TAG:-}" ]; then
+        docker push "$CI_REGISTRY_IMAGE/rewriter:$CI_COMMIT_SHORT_SHA"
       fi
   rules:
     # Branches and tags, same as docker-build -- the publish job pulls this image
@@ -1489,16 +1502,17 @@ install-test:
 #
 # The template pulls BY TAG, not by SHA, so it depends on docker-build and
 # docker-build-rewriter having created ${CI_COMMIT_TAG} in the GitLab registry -- hence
-# the tag arm on their rules. `needs` also names the test lanes, so a release cannot be
-# mirrored until the pipeline that builds it has actually passed. Without that this job
-# would start in the first scheduling wave and publish alongside a still-running sync.
+# the tag arm on their rules -- and on publish_tag, which is what actually creates
+# ${CI_COMMIT_TAG} now. This job has NO `needs:`; see the note on the job itself. An
+# earlier revision of this comment claimed `needs` named the test lanes, twelve lines
+# above a job whose own comment says "NO `needs:`, deliberately" -- corrected here.
 #
-# PREREQUISITE, NOT SATISFIED BY THIS FILE: the project currently has ZERO protected-tag
-# rules (Settings -> Repository -> Protected tags) and zero git tags, so
-# CI_COMMIT_REF_PROTECTED is "false" for any tag pushed today and this job would simply
-# never be created -- silently, with no error. A maintainer has to add a protected-tag
-# rule before the first release. The tag must also be the bare version haf_api_node
-# resolves (`1.28.6`), not `v1.28.6`.
+# PREREQUISITE, NOW SATISFIED: the protected-tag rule `1.*` (create: Maintainers) was
+# added on 2026-09-10, so CI_COMMIT_REF_PROTECTED is "true" for a release tag and this
+# job can be created. It was absent when this MR was opened, and an earlier revision of
+# this comment still said so. Zero git tags exist yet, which is tracked separately --
+# the machinery here has never been executed. The tag must be the bare version
+# haf_api_node resolves (`1.28.6`), not `v1.28.6`.
 publish_images:
   extends: .docker_publish_job_template
   # NO `needs:`, deliberately. `stage: publish` sits after detect/lint/build/sync/test,
@@ -1552,7 +1566,31 @@ publish_images:
       when: never
     - if: $SKIP_DOCKER_PUBLISH == "true"
       when: never
-    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $BLOG_REGISTRY_USER && $BLOG_REGISTRY_PASSWORD
+    # EVERY OPERAND IS AN EXPLICIT COMPARISON, and that is not verbosity.
+    #
+    # An earlier revision wrote `&& $BLOG_REGISTRY_USER && $BLOG_REGISTRY_PASSWORD` and
+    # a comment asserting GitLab treats a bare $VAR as "defined and non-empty". That is
+    # wrong twice over, and a review measured it through ci/lint across all sixteen
+    # credential states:
+    #
+    #   * in an && CHAIN the blank test is applied only to the LAST operand; every
+    #     earlier one is tested merely for DEFINED. So USER="" with PASSWORD set passed
+    #     the chain -- this job was created, skipped the login, pushed unauthenticated
+    #     and went RED, while publish_images_skipped ran alongside it announcing that
+    #     the mirror had been skipped. Both jobs, one tag.
+    #   * the blank test is present?, so a whitespace-only value is falsy -- with both
+    #     variables set to " ", NEITHER job was created.
+    #
+    # Comparing explicitly makes every operand a boolean, which removes the chaining
+    # trap entirely. A review measured this form across all sixteen states; the two that
+    # were broken were then re-measured against THIS file through ci/lint, along with
+    # three controls, and each yields exactly one of the two jobs.
+    #
+    # Whitespace-only credentials now route to publish_images rather than to the skip
+    # notice. That is deliberate: it matches the template's own `[[ -n ... ]]` test, so
+    # the rule and the script it guards agree. Such a value still fails at the login --
+    # which is the honest outcome for a credential that exists and is garbage.
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $BLOG_REGISTRY_USER != null && $BLOG_REGISTRY_USER != "" && $BLOG_REGISTRY_PASSWORD != null && $BLOG_REGISTRY_PASSWORD != ""
       when: on_success
     - when: never
 
@@ -1564,11 +1602,12 @@ publish_images:
 # Green on purpose: the mirror being unavailable is a known, tracked state
 # (hive/haf_stats#66), not a build failure. It should be legible, not alarming.
 #
-# The condition is the exact complement of publish_images' positive rule. GitLab treats
-# a bare `$VAR` as "defined and non-empty", so the complement has to name BOTH the unset
-# and the empty cases for BOTH variables -- `== null` alone would miss a variable that
-# exists with an empty value, which is what someone leaves behind when they blank a
-# line out rather than deleting it. Exactly one of these two jobs can ever run.
+# The condition is the complement of publish_images' positive rule, and both sides now
+# spell every operand out. This job was already written defensively (naming both the
+# unset and the empty case for both variables); publish_images was not, and a review
+# measuring all sixteen states through ci/lint found the pair was NOT complementary --
+# both ran in one state, neither in two. See the long note on publish_images' rule.
+# With both sides explicit, exactly one of these two jobs runs on a protected tag.
 publish_images_skipped:
   stage: publish
   image: alpine:3.20
@@ -1587,6 +1626,62 @@ publish_images_skipped:
     - if: $SKIP_DOCKER_PUBLISH == "true"
       when: never
     - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && ($BLOG_REGISTRY_USER == null || $BLOG_REGISTRY_USER == "" || $BLOG_REGISTRY_PASSWORD == null || $BLOG_REGISTRY_PASSWORD == "")
+      when: on_success
+    - when: never
+
+# THE RELEASE TAG, created from the image the pipeline actually tested.
+#
+# docker-build no longer pushes ${CI_COMMIT_TAG} itself. It cannot: on a tag pipeline it
+# would rebuild, and a rebuild is not the same bytes (Dockerfile.rewriter bakes
+# BUILD_TIME into an OCI label, so the digest changes every time). Pushing from there
+# also re-pushed the SHA tag, replacing an already-tested image that testapi and
+# haf_api_node!244 pin by SHA.
+#
+# So the release is made the way publish_latest makes `latest`: pull the SHA image the
+# develop pipeline built and tested, retag, push. The released bytes are the tested
+# bytes, by construction rather than by hope. This is also what this MR's own first
+# revision argued for before the tag arms were added to the build jobs.
+#
+# It pulls ${CI_COMMIT_SHORT_SHA}, which the DEVELOP pipeline published -- so tagging a
+# commit that was never built on a branch fails here, loudly, instead of silently
+# releasing something no lane ever ran.
+#
+# Both repositories are tagged before either is pushed. An earlier shape pushed each in
+# turn, which could leave the release half-published -- app at the new tag, rewriter
+# absent -- and docker/.env states the invariant that breaks: "one registry and one
+# version for the pair".
+publish_tag:
+  stage: publish
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    GIT_STRATEGY: none
+  dependencies: []
+  retry:
+    max: 2
+    when: runner_system_failure
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      set -e
+      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/rewriter"; do
+        docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
+        docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:${CI_COMMIT_TAG}"
+      done
+      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/rewriter"; do
+        docker push "${repo}:${CI_COMMIT_TAG}"
+      done
+  rules:
+    - if: $QUICK_TEST == "true"
+      when: never
+    - if: $SKIP_PRODUCTION_DEPLOY == "true"
+      when: never
+    - if: $SKIP_DOCKER_PUBLISH == "true"
+      when: never
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
       when: on_success
     - when: never
 
@@ -1634,7 +1729,18 @@ publish_latest:
         docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:latest"
         docker push "${repo}:latest"
       done
+  # The same three switches the sibling publish jobs honour, via the template. An
+  # earlier revision had only the develop condition, which meant SKIP_DOCKER_PUBLISH=true
+  # -- presented a few lines above as "the template's own switch" for turning publishing
+  # off -- did not turn THIS publishing off, and a QUICK_TEST develop run (which reuses a
+  # cache and skips the replay entirely) still republished `latest`.
   rules:
+    - if: $QUICK_TEST == "true"
+      when: never
+    - if: $SKIP_PRODUCTION_DEPLOY == "true"
+      when: never
+    - if: $SKIP_DOCKER_PUBLISH == "true"
+      when: never
     - if: $CI_COMMIT_BRANCH == "develop"
 
 # =============================================================================
