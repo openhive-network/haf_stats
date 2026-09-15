@@ -16,17 +16,34 @@
 -- loads a file.
 
 DO $seed$
+DECLARE
+    _resets INT;
 BEGIN
+    -- DID reset-app RUN? Nothing else here can tell: without it `install` takes the
+    -- "already exists" branch and every later check still sees the right owner, schemas
+    -- and pointer, so the MERGE TARGET would be satisfying assertions meant for the
+    -- commit under test.
+    --
+    -- ci_reset_app.sql inserts one row per run and runs exactly twice -- db-setup, then
+    -- reset-app. Two rows is therefore positive evidence that the second call happened;
+    -- one row means the reset-app service is gone.
+    SELECT count(*) INTO _resets FROM public.ci_reset_marker;
+    IF _resets <> 2 THEN
+        RAISE EXCEPTION 'tests/ci_reset_app.sql ran % time(s), expected 2 (db-setup, then '
+                        'reset-app). With only db-setup''s call, install-baseline creates '
+                        'the schemas and `install` takes the "already exists" branch -- so '
+                        'the merge target, not this commit, satisfies every assertion about '
+                        'what an install CREATES.', _resets;
+    END IF;
+
     -- install #1 must have created the context AND seeded it from app_status (0 here).
     -- Asserted at this point rather than at the end, because the whole purpose of the
     -- UPDATE below is to move it -- so the final verify can no longer see this state.
-    -- IS DISTINCT FROM, not <>. The scalar subquery returns NULL when install #1 left no
-    -- context row at all, `NULL <> 0` is NULL, and plpgsql treats NULL as false -- so the
-    -- old form silently ACCEPTED "there is no context". That is not academic: with no row
-    -- here, install #2 takes the CREATE branch with _seed = 5000 and produces a context at
-    -- 5000 owned by haf_stats_owner, detached and non-forking, which satisfies every
-    -- assertion in ci_install_verify.sql. The lane could not tell "#1 created, #2
-    -- repaired" from "#1 did nothing, #2 created".
+    -- IS DISTINCT FROM, not <>. With no context row the scalar subquery is NULL, `NULL
+    -- <> 0` is NULL, and plpgsql treats that as false -- so `<>` silently ACCEPTS "there
+    -- is no context". Then install #2 takes the CREATE branch with _seed = 5000 and
+    -- produces a context that satisfies every assertion in ci_install_verify.sql, and the
+    -- lane cannot tell "#1 created, #2 repaired" from "#1 did nothing, #2 created".
     IF (SELECT c.current_block_num FROM hafd.contexts AS c WHERE c.name = 'haf_stats')
        IS DISTINCT FROM 0 THEN
         RAISE EXCEPTION 'install #1 left the context at % (NULL = no context row at all). '
@@ -34,13 +51,11 @@ BEGIN
             (SELECT c.current_block_num FROM hafd.contexts AS c WHERE c.name = 'haf_stats');
     END IF;
 
-    -- WHAT THIS DOES NOT PROVE, stated because the reverse was claimed once. app_status is
-    -- 0 on a fresh install, so install #1's own seed call is app_set_current_block_num(0)
-    -- -- the same value hive.app_create_context INSERTs. Deleting that seed from the
-    -- CREATE branch of create_context_if_not_exists() is therefore invisible to this lane.
-    -- Covering it would need app_status to be non-zero before install #1, which cannot
-    -- happen: install #1 is what creates the table. The REPAIR branch's seed is covered,
-    -- by the 5000 below.
+    -- WHAT THIS DOES NOT PROVE. app_status is 0 on a fresh install, so install #1's seed
+    -- call is app_set_current_block_num(0) -- the same value hive.app_create_context
+    -- INSERTs. Deleting that seed from the CREATE branch is therefore invisible here, and
+    -- cannot be covered without a non-zero app_status before install #1, which the install
+    -- itself creates. The REPAIR branch's seed is covered, by the 5000 below.
 
     UPDATE haf_stats_app.app_status SET last_processed_block = 5000;
 

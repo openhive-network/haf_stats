@@ -1033,9 +1033,12 @@ regression-test:
 #     data defects that RAISE are caught, via the exit code.
 #   NOT COVERED -- a return-type change under CREATE OR REPLACE, which is the
 #     class #73's nine DROPs defend against. That failure only exists BETWEEN
-#     releases, and installing one commit over itself cannot produce it. Closing
-#     it needs the first install to come from the merge target's image; tracked as
-#     #78. Do not read a green run here as evidence that #73's DROPs work.
+#     releases, and installing one commit over itself cannot produce it.
+#     CLOSED BY #78 -- but in install-test, not here, and not the way that issue
+#     proposed: install-test installs the merge target's SQL (a git checkout, not
+#     an image) before this commit's, so the collision surfaces there. This lane
+#     stays structurally blind to the class and always will, because it installs
+#     the same image twice. Do not read a green run HERE as evidence about #73.
 #
 # Placement is the test stage, not the end of `sync`, because `sync` returns early
 # on a cache hit,
@@ -1229,10 +1232,15 @@ install-test:
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    # The branch this MR will merge into. Declared here so it can actually be overridden
+    # -- reading it only from the environment made the "a branch targeting something else
+    # must say so" instruction unreachable, since nothing in the repo sets it and a
+    # project-level variable would apply to every pipeline.
+    BASELINE_REF: "develop"
   before_script:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
-    # #84: the REAL install_app.sh against a REAL PostgreSQL, in ~18s. Before this, the
+    # #84: the REAL install_app.sh against a REAL PostgreSQL, in ~23s. Before this, the
     # only lanes that ran the installer needed a replayed HAF -- `sync` (374.5-566.2s
     # across the six successful runs in the project's last 100 jobs) and `reinstall-test`,
     # which is gated behind it. Nothing cheap ran it: the unit suite stubs psql (so it
@@ -1250,14 +1258,116 @@ install-test:
     # BOTH commands are wrapped. An earlier revision timed out only the `up`, which left
     # the `wait` below unbounded -- and `wait` is the one that actually blocks for the
     # length of the lane, so the hole was in the half that mattered.
+    # Extract the MERGE TARGET's app SQL and scripts, which the baseline install runs
+    # from. (#78) See docker-compose-ci-install.yml's install-baseline for why this is a
+    # git checkout rather than a registry image.
+    - |
+      set -e
+      # CI clones shallow and fetches only the ref under test, so origin/develop is not
+      # present; and this repo runs BRANCH pipelines, so CI_MERGE_REQUEST_TARGET_BRANCH_SHA
+      # does not exist either. depth=2 because when the pipeline IS develop the baseline
+      # has to be the commit before it, or install #1 and #2 are the same SQL again --
+      # which is precisely the defect #78 is about.
+      # BASELINE_REF is declared in this job's variables: the job cannot read the MR's
+      # real target (branch pipelines), so a branch aimed elsewhere must set it or it
+      # gets a baseline that is not its merge target, silently.
+      git fetch --depth=2 origin "$BASELINE_REF"
+      BASE_SHA=$(git rev-parse FETCH_HEAD)
+      if [ "$BASE_SHA" = "$CI_COMMIT_SHA" ]; then
+        BASE_SHA=$(git rev-parse FETCH_HEAD~1)
+        echo "install-test: pipeline IS $BASELINE_REF, so the baseline is the previous commit"
+      fi
+      # THE ONLY CASE THAT NEEDS GUARDING is "the target already contains this commit".
+      #
+      # An earlier revision of this block asked the opposite question -- is the target tip
+      # an ANCESTOR of HEAD -- and fell back to `git merge-base`. That was wrong twice
+      # over, and the review that caught it is worth recording because neither failure
+      # could show up in this MR's own pipeline (this branch sits exactly on the tip):
+      #
+      #   * `--is-ancestor` is FALSE for every branch that is not exactly on the target
+      #     tip -- i.e. the normal state of an MR mid-review, not a pathological one. So
+      #     the fallback fired constantly rather than rarely.
+      #   * `git merge-base` cannot answer across two shallow windows (the branch at
+      #     GitLab's default depth 20, the target fetched at depth 2). It exits 1 printing
+      #     NOTHING, and under `set -e` a failing command substitution kills the job. A
+      #     branch lagging by two commits died with no error text attributable to git.
+      #
+      # And the premise was wrong anyway: installing the target's TIP is the point. On
+      # merge, the node being upgraded is at that tip, whether or not it is an ancestor of
+      # this branch. A lagging branch is the normal case and wants the tip.
+      #
+      # The genuine downgrade is the reverse relation -- HEAD already merged, so the tip
+      # is NEWER than the code under test (a retried old pipeline, or a develop pipeline
+      # that queued behind another merge). Then the tip must not be installed first.
+      #
+      # `2>/dev/null` and a CONDITION, so a shallow clone that cannot answer reads as
+      # false and we keep the tip -- correct for the normal case.
+      #
+      # BE HONEST ABOUT THE LIMIT: the target is fetched at --depth=2, so --is-ancestor
+      # can only resolve when HEAD is the tip or its parent. A pipeline retried after the
+      # commit merged more than two commits ago therefore does NOT trigger the guard and
+      # installs the newer tip as its baseline. That is a spurious red on a retry, never a
+      # false green, so it is left rather than deepening the fetch on every run.
+      if git merge-base --is-ancestor "$CI_COMMIT_SHA" "$BASE_SHA" 2>/dev/null; then
+        echo "install-test: $BASELINE_REF already CONTAINS $CI_COMMIT_SHA -- this is a retry"
+        echo "              of an already-merged pipeline, so its tip is NEWER than the code"
+        echo "              under test and installing it first would be a downgrade."
+        BASE_SHA=$(git rev-parse "${CI_COMMIT_SHA}^" 2>/dev/null || echo "")
+        if [ -z "$BASE_SHA" ]; then
+          echo "FAIL: cannot resolve ${CI_COMMIT_SHA}^ to use as the baseline instead."
+          exit 1
+        fi
+        echo "              Using $BASE_SHA (this commit's parent)."
+      fi
+      echo "install-test: baseline = $BASE_SHA (upgrading to $CI_COMMIT_SHA)"
+      rm -rf .baseline && mkdir -p .baseline
+      git archive "$BASE_SHA" db endpoints scripts | tar -x -C .baseline
+      # A bind mount of a missing directory silently creates an EMPTY one, and an empty
+      # db/ would make the baseline install fail with a confusing "no such file" rather
+      # than saying the extraction is what broke. Refuse here instead.
+      for d in db endpoints scripts; do
+        if [ ! -d ".baseline/$d" ] || [ -z "$(ls -A ".baseline/$d")" ]; then
+          echo "FAIL: .baseline/$d is missing or empty after extracting $BASE_SHA."
+          echo "      The baseline install would have run against an empty directory and"
+          echo "      reported a missing file instead of the real cause."
+          exit 1
+        fi
+      done
+      # The scripts are tracked 100644 -- the Dockerfile supplies the executable bit with
+      # `COPY --chmod=755 scripts/`, so a git checkout of them is NOT executable and the
+      # bind mount overrides the image's chmod'd copies. Without this the baseline
+      # install dies with exit 126, "found but not executable", which is how this was
+      # found: the lane failed loudly on its first run rather than skipping the install.
+      # find, not scripts/*.sh: the glob is top-level only, and a helper under
+      # scripts/ci-helpers/ would silently regress to the same exit 126 while looking
+      # like a new bug.
+      find .baseline/scripts -name '*.sh' -exec chmod +x {} +
+      echo "install-test: baseline SQL extracted ($(find .baseline -name '*.sql' | wc -l) .sql files, scripts made executable)"
+      # SAY SO when there is nothing to upgrade. A CI-only or docs-only commit has SQL
+      # identical to the baseline, so the upgrade phase is a no-op -- which is fine, but
+      # it must not read as "an upgrade was tested". This is the same quiet-degradation
+      # failure this lane rejected a baseline IMAGE to avoid.
+      # scripts/ is in the comparison because install-baseline MOUNTS it -- a commit that
+      # only changes install_app.sh is a live upgrade, and an earlier version of this
+      # check called that a no-op.
+      if diff -rq .baseline/db db >/dev/null 2>&1 \
+         && diff -rq .baseline/endpoints endpoints >/dev/null 2>&1 \
+         && diff -rq .baseline/scripts scripts >/dev/null 2>&1; then
+        echo "install-test: NOTE -- baseline db/, endpoints/ and scripts/ are IDENTICAL to"
+        echo "              this commit's. The upgrade phase is a no-op this run; it proves"
+        echo "              nothing beyond the plumbing. Expected for a CI-only change."
+      else
+        echo "install-test: baseline differs from this commit -- the upgrade phase is live"
+      fi
     - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
-    # verify-gone is LAST in the chain (db-setup -> install -> seed-repair -> install-again
+    # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> install-again
     # -> verify -> uninstall -> verify-gone), so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
     - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
   after_script:
-    # Both installs, because the second is where a non-idempotent step or a shim that
-    # quietly does nothing shows up -- the first run alone looks identical either way.
+    # All FOUR installs (baseline, upgrade, install, install-again): the repeats are
+    # where a non-idempotent step or a shim that quietly does nothing shows up, and
+    # the first run alone looks identical either way.
     #
     # postgres FIRST, and it is not optional. Every one-shot service below gates
     # transitively on `postgres: service_healthy`, so if postgres fails to start or fails
@@ -1268,6 +1378,9 @@ install-test:
     - docker compose -f docker/docker-compose-ci-install.yml ps -a || true
     - docker compose -f docker/docker-compose-ci-install.yml logs postgres || true
     - docker compose -f docker/docker-compose-ci-install.yml logs db-setup || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs install-baseline || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs install-upgrade || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs reset-app || true
     - docker compose -f docker/docker-compose-ci-install.yml logs install || true
     - docker compose -f docker/docker-compose-ci-install.yml logs seed-repair || true
     - docker compose -f docker/docker-compose-ci-install.yml logs install-again || true
