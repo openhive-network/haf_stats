@@ -165,7 +165,7 @@ services:
   # hides it. install_app.sh already guards on its existence and skips; the app_version
   # row simply stays whatever the current install writes later.
   install-baseline:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres
@@ -185,7 +185,7 @@ services:
   # assertion -- `ERROR: cannot change return type of existing function` surfaces here and
   # nowhere else in this repo's CI.
   install-upgrade:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres

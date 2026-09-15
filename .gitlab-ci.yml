@@ -14,10 +14,11 @@
 #   sync   : sync             -> install + process to head, cache `haf_haf_stats_sync`
 #   test   : pattern-test      -> tavern .pat.json exact-value suite (cached stack)
 #            regression-test    -> parity + external hived regression guards
-#   publish: publish_latest    -> :latest on develop, AFTER the test lanes
+#   release: publish_latest    -> :latest on develop, AFTER the test lanes
 #            publish_tag        -> retag the tested SHA image as :<tag> (protected tags)
-#            publish_images     -> mirror :<tag> to registry-upload.hive.blog (gated)
+#   publish: publish_images     -> mirror :<tag> to registry-upload.hive.blog (gated)
 #            publish_images_skipped -> says so when that gate is closed
+#            (release precedes publish so the mirror cannot race the tag it pulls)
 #   cleanup: cache_cleanup     -> manual NFS cache pruning
 #
 # The fast stub gate (endpoint-tests, docker-compose-ci.yml) still runs on every
@@ -755,13 +756,19 @@ docker-build:
     # Rebuilding on a tag is acceptable here, but be precise about why -- an earlier
     # revision of this comment overstated it twice and both are corrected:
     #
-    #   * ELEVEN jobs are absent from a tag pipeline -- not one, not seven, and not
-    #     the ten an earlier revision counted. The ten below, plus detect_changes,
-    #     which upstream's .haf_app_detect_changes excludes on tags rather than this
-    #     file. Counted as a SET DIFFERENCE this time: the earlier "ten" came from
-    #     subtracting job totals (21 branch vs 11 tag), which silently nets off the
-    #     tag-only jobs against the branch-only ones and is how this sentence has now
-    #     been wrong three times. The ten this file gates: sql-lint, openapi-drift,
+    #   * TWELVE jobs run on a develop pipeline and not on a tag pipeline. This
+    #     sentence has been wrong four times -- "only endpoint-tests", then SEVEN,
+    #     then ten, then eleven -- so here is the arithmetic rather than the answer
+    #     alone. develop creates 21 jobs; a tag creates 11; the tag-only jobs are
+    #     publish_images and publish_tag, so the overlap is 9 and the difference is
+    #     21 - 9 = TWELVE. Subtracting the totals (21 - 11) is what produced "ten":
+    #     it nets the tag-only jobs off against the branch-only ones.
+    #
+    #     The twelve are the ten this file gates, plus detect_changes (excluded on
+    #     tags by upstream's .haf_app_detect_changes, not by this file), plus
+    #     publish_latest -- which is develop-only and which THIS MR adds, so it was
+    #     missing from a count taken while it was being written. The ten:
+    #     sql-lint, openapi-drift,
     #     shell-lint, shell-tests, hadolint, compose-validate, endpoint-tests,
     #     haf-drift, haf-drift-develop and install-test. Measured by differencing the
     #     ci/lint job lists for a branch ref (21) against a simulated tag ref (11),
@@ -1540,10 +1547,12 @@ install-test:
 #
 # which is exactly the flat path haf_api_node expects.
 #
-# The template pulls BY TAG, not by SHA, so it depends on docker-build and
-# docker-build-rewriter having created ${CI_COMMIT_TAG} in the GitLab registry -- hence
-# the tag arm on their rules -- and on publish_tag, which is what actually creates
-# ${CI_COMMIT_TAG} now. This job has NO `needs:`; see the note on the job itself. An
+# The template pulls BY TAG, not by SHA, so it depends on ${CI_COMMIT_TAG} existing in
+# the GitLab registry -- which publish_tag creates, in the release stage. (An earlier
+# revision of this sentence said the BUILD jobs create it "hence the tag arm on their
+# rules", then bolted the publish_tag correction onto the end without deleting the dead
+# half, so the file asserted both. The tag arm exists for reinstall-test's non-optional
+# needs, and for nothing else; both build jobs say so.) This job has NO `needs:`; see the note on the job itself. An
 # earlier revision of this comment claimed `needs` named the test lanes, twelve lines
 # above a job whose own comment says "NO `needs:`, deliberately" -- corrected here.
 #
@@ -1657,7 +1666,7 @@ publish_images_skipped:
     - >-
       echo "MIRROR SKIPPED - BLOG_REGISTRY_USER/BLOG_REGISTRY_PASSWORD are not set,
       so ${CI_COMMIT_TAG} was NOT mirrored to registry-upload.hive.blog.
-      The GitLab registry images were published normally. See hive/haf_stats#66."
+      The GitLab registry images were published normally. See hive/haf_stats#93."
   rules:
     - if: $QUICK_TEST == "true"
       when: never
@@ -1686,9 +1695,14 @@ publish_images_skipped:
 # commit that was never built on a branch fails here, loudly, instead of silently
 # releasing something no lane ever ran.
 #
-# Both repositories are tagged before either is pushed. An earlier shape pushed each in
-# turn, which could leave the release half-published -- app at the new tag, rewriter
-# absent -- and docker/.env states the invariant that breaks: "one registry and one
+# Both repositories are tagged before either is pushed, which NARROWS the window rather
+# than closing it -- be precise, because an earlier revision of this comment claimed the
+# invariant was preserved. A missing rewriter SHA image now fails in the pull loop before
+# anything is published, which is the big hole. But the second loop still pushes
+# sequentially, so a push failure or a runner death between the two leaves the pair
+# skewed: app at the new tag, rewriter still at the old one. Closing that needs a
+# manifest list; `retry: runner_system_failure` re-runs an idempotent script, so the
+# exposure is narrow. docker/.env states the invariant at stake: "one registry and one
 # version for the pair".
 publish_tag:
   stage: release
@@ -1731,7 +1745,8 @@ publish_tag:
 # That distinction matters more in this repo than in the siblings, because this repo
 # CONSUMES its own `latest`: docker/.env sets HAF_STATS_VERSION=latest and
 # docker/docker-compose.yml defaults three services to it, and README calls
-# `cd docker && docker compose up -d` the production path. Today that chain fails loudly
+# `cd docker && docker compose up -d` the production path. Until this MR that chain
+# failed loudly
 # with `manifest unknown` because no `latest` exists. The moment one does, a red develop
 # build published from the `build` stage would resolve silently instead -- turning a loud
 # failure into a wrong image. docker/docker-compose-ci-test.yml and the comment above
@@ -1756,7 +1771,9 @@ publish_latest:
     max: 2
     when: runner_system_failure
   # NO `needs:` -- see publish_images above. It matters more here, because this job
-  # runs ONLY on develop, where the seven branch-gated jobs DO exist. An earlier
+  # runs ONLY on develop, where the twelve develop-only jobs DO exist -- including
+  # this one. (Said "seven" until round five: the fourth copy of a number this file
+  # corrects at length 888 lines above.) An earlier
   # revision copied publish_images' six-job list verbatim, along with a comment
   # explaining why branch-gated jobs were excluded -- reasoning that is correct for a
   # tag pipeline and simply does not transfer to a develop-only job. The effect was that

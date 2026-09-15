@@ -413,10 +413,15 @@ def test_the_rewriter_serves_the_public_paths(services):
     # container on the front-door port.
     assert "/rewriter:" in svc["image"], svc["image"]
 
-    # build: matters on its own -- CI publishes SHA tags only, never :latest, so the
-    # default image reference does not resolve and compose falls back to building. The
-    # context must be the REPO ROOT: Dockerfile.rewriter COPYs from endpoints/ and docker/.
-    assert "build" in svc, "no build: -- the default :latest tag has never been published"
+    # build: matters on its own, though NOT for the reason this comment used to give.
+    # It said "CI publishes SHA tags only, never :latest, so the default image reference
+    # does not resolve and compose falls back to building". That was true until #66,
+    # which publishes :latest on every green develop pipeline -- so the default now
+    # RESOLVES and compose pulls instead of building. The stanza still matters: without
+    # it there is no way to test a local change to the rewriter at all, and `--build`
+    # is now required to do so. The context must be the REPO ROOT: Dockerfile.rewriter
+    # COPYs from endpoints/ and docker/.
+    assert "build" in svc, "no build: -- a local rewriter change could not be tested"
     assert svc["build"]["dockerfile"] == "Dockerfile.rewriter"
     assert svc["build"]["context"] == "..", svc["build"]["context"]
 
