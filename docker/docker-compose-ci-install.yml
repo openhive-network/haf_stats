@@ -31,6 +31,16 @@
 # volumes belonging to a running endpoint-tests stack.
 name: haf_stats_ci_install
 
+# THE DEFAULT BELOW IS DELIBERATELY UNRESOLVABLE, and it changed with #66.
+#
+# It used to be haf_stats:latest, which was safe only because no `latest` existed:
+# an unset HAF_STATS_IMAGE failed loudly on `manifest unknown`. #66 publishes
+# `latest` on every green develop pipeline, so that same mistake would now install
+# DEVELOP HEAD and go green -- a lane passing against a different commit than the
+# one under test, which is the one outcome that makes it worthless.
+#
+# docker-compose-ci-test.yml already reasons this way and uses the same shape; see
+# its comment on haf-stats-image-not-set-by-reinstall-test-job:invalid.
 services:
   postgres:
     image: postgres:14-alpine
@@ -155,7 +165,7 @@ services:
   # hides it. install_app.sh already guards on its existence and skips; the app_version
   # row simply stays whatever the current install writes later.
   install-baseline:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres
@@ -175,7 +185,7 @@ services:
   # assertion -- `ERROR: cannot change return type of existing function` surfaces here and
   # nowhere else in this repo's CI.
   install-upgrade:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres
@@ -213,7 +223,7 @@ services:
   # Install #1 of the ORIGINAL chain: this commit's SQL, from nothing. Everything
   # ci_install_verify.sql asserts about what an install CREATES is defended here.
   install:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres
@@ -259,7 +269,7 @@ services:
   # It is also the only place the installer's own idempotency is exercised against a real
   # server outside the replayed-HAF lanes (sync carries an explicit timeout: 2h; reinstall-test inherits the project's 3600s).
   install-again:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
     environment:
       POSTGRES_HOST: postgres
@@ -280,7 +290,7 @@ services:
   # --force because there is no TTY; uninstall_app.sh refuses the interactive confirmation
   # without it.
   uninstall:
-    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["uninstall_app", "--force"]
     environment:
       POSTGRES_HOST: postgres
