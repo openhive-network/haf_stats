@@ -47,8 +47,11 @@ stages:
   # BUILD stage, two stages ahead of its mirror. This file had copied the no-needs
   # property without the precondition that makes it safe.
   #
-  # A stage rather than `needs: [publish_tag]` because it keeps the property that no
-  # job in this file declares needs, and it avoids a silent invariant -- a non-optional
+  # A stage rather than `needs: [publish_tag]` because it keeps the PUBLISH jobs free of
+  # needs (several other jobs here do declare them -- sync, reinstall-test and
+  # install-test all carry non-optional ones; an earlier revision of this sentence
+  # claimed no job in the file did, which is simply wrong), and it avoids a silent
+  # invariant -- a non-optional
   # need would require publish_tag to exist in every pipeline where publish_images
   # does, which is true today only because their rules happen to be a superset.
   - release
@@ -796,10 +799,12 @@ docker-build:
     # revision of this comment claimed. Neither Dockerfile installs a package or fetches
     # anything from the network -- that part is true and is what matters most. But
     # neither is "COPY-only" (Dockerfile:26 RUN echo, Dockerfile.rewriter:11 RUN chmod),
-    # and only the rewriter base is pinned by DIGEST
-    # (nginx:9f5e12cd984bf12746ce9af081868e09ced8068f). The app base is psql:14-2, a
-    # MUTABLE tag: if it is re-pushed between the develop pipeline and the tag pipeline,
-    # the rebuild is not byte-identical to what was tested. Small and upstream-owned,
+    # and NEITHER base is digest-pinned. An earlier revision said the rewriter's was:
+    # nginx:9f5e12cd984bf12746ce9af081868e09ced8068f LOOKS like a digest and is a TAG --
+    # a 40-hex git SHA-1 used as a tag name. A digest pin is `@sha256:<64 hex>`; this is
+    # 40 hex after a colon. So both bases are mutable tags (the app's is psql:14-2): if
+    # either is re-pushed between the develop pipeline and the tag pipeline, the rebuild
+    # is not byte-identical to what was tested. The hole is twice as wide as stated. Small and upstream-owned,
     # but it is precisely the hole this sentence was written to close, so it is stated
     # rather than papered over.
     - if: $CI_COMMIT_BRANCH
@@ -1564,8 +1569,14 @@ install-test:
 # haf_api_node resolves (`1.28.6`), not `v1.28.6`.
 publish_images:
   extends: .docker_publish_job_template
+  # Mirrors to an external registry; same no-cancel-mid-push reasoning as its siblings.
+  interruptible: false
   # NO `needs:`, deliberately. `stage: publish` sits after detect/lint/build/sync/test,
-  # so with no needs GitLab requires EVERY job in every earlier stage to succeed first.
+  # so with no needs GitLab requires every job in every earlier stage to FINISH first --
+  # and to have succeeded, with one documented exception: a job marked
+  # `allow_failure: true` does not block, and haf-drift-develop is one. So "everything
+  # green" is very nearly true rather than exactly true, and an earlier revision of this
+  # sentence said EVERY without the caveat.
   # That is the strongest available gate and it is what balance_tracker's publish_images
   # relies on.
   #
@@ -1706,6 +1717,10 @@ publish_images_skipped:
 # version for the pair".
 publish_tag:
   stage: release
+  # Same reasoning as publish_latest: a release must not be cancellable mid-push. No
+  # resource_group -- two pipelines cannot publish the same tag, and a tag is created
+  # once.
+  interruptible: false
   image: docker:24
   services:
     - docker:24-dind
@@ -1744,7 +1759,9 @@ publish_tag:
 #
 # That distinction matters more in this repo than in the siblings, because this repo
 # CONSUMES its own `latest`: docker/.env sets HAF_STATS_VERSION=latest and
-# docker/docker-compose.yml defaults three services to it, and README calls
+# docker/docker-compose.yml defaults FOUR services to it (setup, process, uninstall
+# and the rewriter -- an earlier revision said three and dropped the rewriter, which
+# is the one whose behaviour this change alters), and README calls
 # `cd docker && docker compose up -d` the production path. Until this MR that chain
 # failed loudly
 # with `manifest unknown` because no `latest` exists. The moment one does, a red develop
@@ -1757,6 +1774,25 @@ publish_tag:
 # sets HAF_STATS_VERSION=latest deliberately.
 publish_latest:
   stage: release
+  # NOT INTERRUPTIBLE, and serialised. This is the only job in the file that mutates a
+  # SHARED, non-per-commit registry tag, and both properties matter.
+  #
+  # common-ci's base template sets `default: interruptible: true`, and this project has
+  # auto_cancel_pending_pipelines ENABLED. So before these two lines, a second merge to
+  # develop could cancel this job MID-PUSH: the app image pushed to :latest, the rewriter
+  # not yet, leaving the pair skewed until the next green pipeline -- or indefinitely if
+  # that one goes red. docker/.env states the invariant that breaks ("one registry and
+  # one version for the pair"), and a mismatched pair means rewrite_rules.conf need not
+  # match the installed SQL surface.
+  #
+  # Cancelling docker-build mid-push is harmless because its tags are per-commit. This
+  # job is the first cancellable mutation of a tag other things resolve, which is why
+  # the default is wrong here specifically rather than wrong in general.
+  #
+  # resource_group serialises develop pipelines through it, so two overlapping runs
+  # cannot finish out of order and leave `latest` pointing at the OLDER commit.
+  interruptible: false
+  resource_group: registry_latest
   image: docker:24
   services:
     - docker:24-dind
