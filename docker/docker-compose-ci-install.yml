@@ -98,30 +98,120 @@ services:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_setup.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_haf_stub.sql &&
-        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "DELETE FROM hafd.contexts WHERE name = 'haf_stats'" &&
-        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS haf_stats_app, haf_stats_backend, haf_stats_endpoints CASCADE" &&
-        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_reset_roles.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_reset_app.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "INSERT INTO hafd.contexts (name, owner, current_block_num, irreversible_block, is_attached, is_forking, app_schema) VALUES ('ci_bystander_app', 'hive_applications_group', 0, 0, FALSE, FALSE, 'ci_bystander_app')" 
     volumes:
       - ../tests/ci_setup.sql:/ci_setup.sql:ro
       - ../tests/ci_haf_stub.sql:/ci_haf_stub.sql:ro
-      - ../tests/ci_reset_roles.sql:/ci_reset_roles.sql:ro
+      - ../tests/ci_reset_app.sql:/ci_reset_app.sql:ro
     depends_on:
       postgres:
         condition: service_healthy
 
-  # Install #1 -- the real script, the real image, nothing stubbed but the server.
+  # Shared by every install service below. (The "Install #1" this paragraph used to
+  # label is now further down, after reset-app -- there are four installs.)
   #
   # HAF_STATS_SKIP_OP_TYPE_ASSERT: the assertion compares hafd.operation_types against
   # db/op_type_registry.sql, and ci_setup.sql seeds 5 rows (ids 1, 2, 18, 64, 86) with
   # deliberately NON-mainnet ids so the shipped registry cannot pass against it by
-  # construction. CORRECTED, from a peer review that read the function instead of the
-  # flag's name: _bypass_fatal DOWNGRADES the three fatal arms to a WARNING, it does not
-  # skip the function. assert_op_types runs FOUR times in this lane (install_app.sh:251
-  # and :596, twice over). What is never exercised is its ABORT, not the function. Its
-  # failure arms
-  # are covered by tests/ci_op_types.sql in the endpoint-tests lane; running it here would
-  # only assert that a stub disagrees with mainnet.
+  # construction. Note the flag DOWNGRADES the assertion's three fatal arms to a WARNING
+  # rather than skipping the function: assert_op_types still runs eight times here
+  # (install_app.sh:251 and :596, once per each of the four installs). What is never
+  # exercised is its ABORT. The failure arms are covered by tests/ci_op_types.sql in the
+  # endpoint-tests lane; running it here would only assert that a stub disagrees with
+  # mainnet.
+  # THE BASELINE INSTALL -- what a real node is upgrading FROM. (#78)
+  #
+  # WHY THIS EXISTS. reinstall-test installs the SAME image twice, so it is an
+  # idempotency guard, not an upgrade guard, and the one class it cannot reach is the
+  # one #73 exists to prevent: `ERROR: cannot change return type of existing function`.
+  # CREATE OR REPLACE of an UNCHANGED signature is already idempotent, so a second
+  # install of the same commit exits 0 whether or not #73's nine DROPs are present --
+  # delete all nine and that lane still goes green. They shipped with no regression
+  # coverage at all.
+  #
+  # BASELINE SQL FROM GIT, NOT A BASELINE IMAGE. #78 proposed pulling
+  # ${CI_REGISTRY_IMAGE}:<develop-sha>. A git checkout is strictly better here: no
+  # dependency on that tag surviving registry cleanup, no dependency on #66 landing to
+  # make it robust, and no "skip loudly when the image cannot be pulled" path that could
+  # itself go quiet. .gitlab-ci.yml extracts the merge target's db/, endpoints/ and
+  # scripts/ into .baseline/ before the stack starts.
+  #
+  # scripts/ IS MOUNTED TOO, and that is not optional. install_app.sh loads 23 SQL files
+  # BY NAME; mounting only the baseline's db/ under the CURRENT script breaks the moment
+  # a commit adds a file -- which is exactly the kind of commit this lane exists to test.
+  # With scripts/ mounted this is the baseline application, running in the current
+  # image's userland.
+  #
+  # NOT DONE IN reinstall-test, where #78 was filed. That lane's datadir comes from sync
+  # with the CURRENT schema already installed (docker-compose-ci-test.yml says so), so a
+  # baseline install there is a DOWNGRADE -- and if this commit legitimately changed a
+  # return type, the downgrade hits the very error under test, in reverse, turning the
+  # lane red for a backward-incompatibility nobody asked for. Here db-setup has already
+  # wiped the schemas, the context row and the app roles, so the baseline install starts
+  # from nothing and the upgrade is genuine.
+  #
+  # version.sql is generated into /app/db at BUILD time, so mounting over that directory
+  # hides it. install_app.sh already guards on its existence and skips; the app_version
+  # row simply stays whatever the current install writes later.
+  install-baseline:
+    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    command: ["install_app"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    volumes:
+      - ../.baseline/db:/app/db:ro
+      - ../.baseline/endpoints:/app/endpoints:ro
+      - ../.baseline/scripts:/app/scripts:ro
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+
+  # THE UPGRADE UNDER TEST: this commit's SQL, over the baseline's. Its SUCCESS is the
+  # assertion -- `ERROR: cannot change return type of existing function` surfaces here and
+  # nowhere else in this repo's CI.
+  install-upgrade:
+    image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
+    command: ["install_app"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    depends_on:
+      install-baseline:
+        condition: service_completed_successfully
+
+  # BACK TO A CLEAN SLATE, and this service is the reason the rest of the lane still
+  # means anything.
+  #
+  # Without it, install-baseline takes the create path and `install` takes the "already
+  # exists" early return -- so every assertion about what an install CREATES (the context
+  # owner, is_forking/is_attached, the three schemas, swagger_base_url, and
+  # db/builtin_roles.sql's CREATE ROLE arms) is satisfied by the MERGE TARGET rather than
+  # by the commit under test, and passes either way.
+  #
+  # With it, the upgrade check above is a self-contained PHASE and everything below runs
+  # from scratch. Coverage is added, not traded.
+  reset-app:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_reset_app.sql
+    volumes:
+      - ../tests/ci_reset_app.sql:/ci_reset_app.sql:ro
+    depends_on:
+      install-upgrade:
+        condition: service_completed_successfully
+
+  # Install #1 of the ORIGINAL chain: this commit's SQL, from nothing. Everything
+  # ci_install_verify.sql asserts about what an install CREATES is defended here.
   install:
     image: ${HAF_STATS_IMAGE:-registry.gitlab.syncad.com/hive/haf_stats:latest}
     command: ["install_app"]
@@ -132,7 +222,7 @@ services:
       PGPASSWORD: postgres
       HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
     depends_on:
-      db-setup:
+      reset-app:
         condition: service_completed_successfully
 
   # Between the installs: prove #1 seeded the pointer, then move app_status ahead of the
@@ -182,10 +272,8 @@ services:
         condition: service_completed_successfully
 
   # Teardown, which no lane covered at all: NOTHING IN CI HAD EVER RUN uninstall_app.sh
-  # AGAINST A DATABASE. (An earlier version of this comment said the only references were
-  # three --help assertions in docker-build. False -- tests/unit/test_uninstall_app.py has
-  # 51 tests. They stub psql, so the stronger and simpler claim is the true one.)
-  # It costs ~2s here, and it
+  # AGAINST A DATABASE. (tests/unit/test_uninstall_app.py has 51 tests, but they stub psql,
+  # so none of them reaches a server.) It costs ~2s here, and it
   # is also what makes hive.app_remove_context in the shim live code rather than a
   # function whose only caller is the shim's own self-test.
   #

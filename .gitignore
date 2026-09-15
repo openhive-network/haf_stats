@@ -34,3 +34,6 @@ scripts/openapi_out/
 # and teardown, for the same reason.
 /docker/ci.env
 /docker/container-logs.tar.gz
+
+# Extracted by install-test to run the baseline (merge-target) install. (#78)
+.baseline/
