@@ -4,8 +4,8 @@ haf_stats published its rewriter as `haf_stats/rewriter`; every sibling app publ
 `postgrest-rewriter`. By the time that was noticed the old name had consumers -- testapi
 pinned it by SHA and haf_api_node's haf_stats.yaml defaulted to it (both moved on
 2026-09-16; older checkouts and pins still use it) -- so the rename runs
-through a transition: every publish site emits both names, from one image, until those
-consumers move, and then the old name is dropped everywhere at once.
+through a transition: every publish site emits both names, from one image, until nothing
+still in use resolves the old name (#83 step 3), and then it is dropped everywhere at once.
 
 The failure this module exists for is a PARTIAL edit. Four jobs publish the rewriter
 (docker-build-rewriter, publish_latest, publish_tag, publish_images). Miss one and
@@ -361,3 +361,11 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     # ORDER too, which the set comparison above cannot see. See MIRROR_ORDER.
     assert tuple(publish_images) == MIRROR_ORDER, publish_images
     assert len(publish_images) == len(set(publish_images)), publish_images
+    # Everything this test reasons from -- pull-by-tag, the root-vs-subpath mapping,
+    # push order and stop-at-first-failure -- is .docker_publish_job_template's
+    # behaviour. A job that stopped extending it, or overrode the target project name,
+    # would leave both checks above passing against a mirror that no longer works
+    # this way.
+    job = jobs["publish_images"]
+    assert job.get("extends") == ".docker_publish_job_template", job.get("extends")
+    assert "PUBLISH_PROJECT_NAME" not in (job.get("variables") or {}), job.get("variables")
