@@ -159,12 +159,12 @@ services:
       # Auto-configured by the common-ci templates from HAF_APP_ROLE_PREFIX=haf_stats
       # (owner role connects for schema introspection, anon role serves requests);
       # the defaults keep a plain `docker compose up` working outside CI.
-      # statement_timeout rides on PostgREST's CONNECTION, not on a role and not on the
-      # function. A `SET statement_timeout` function attribute never arms (the timer is set
-      # before the statement begins), and role config is ignored under SET ROLE - PostgREST
-      # logs in as haf_stats_owner and switches to haf_stats_user per request, so an
-      # ALTER ROLE haf_stats_user would be dead config here. This bounds API queries only;
-      # the block processor uses its own connection and is deliberately unaffected. (#48)
+      # The API's 30 s statement budget is haf_stats_user's ROLE setting
+      # (db/builtin_roles.sql, #94). PostgREST logs in here as haf_stats_owner and applies
+      # the settings of every role that login is a member of to each request, so that role
+      # setting wins over the options= below in BOTH directions -- measured on v12.2.3. The
+      # options= stays as a fallback in case that membership ever changes. This bounds API
+      # queries only; the block processor uses its own connection and is unaffected. (#48)
       PGRST_DB_URI:                      ${PGRST_DB_URI:-postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s}
       PGRST_DB_SCHEMA:                   ${PGRST_DB_SCHEMA:-haf_stats_endpoints}
       # Without this, GET / serves PostgREST's own auto-generated introspection

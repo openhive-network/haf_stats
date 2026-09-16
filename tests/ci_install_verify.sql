@@ -221,6 +221,54 @@ END
 $verify$;
 
 -- ---------------------------------------------------------------------------
+-- The API statement budget is set cluster-wide on haf_stats_user. (#94)
+--
+-- The VALUES are proven by tests/ci_login_timeout.sql, which LOGS IN as haf_stats_user
+-- (must get 30s) and as haf_stats_owner (must get 0) -- a superuser session cannot prove
+-- either, because role settings are not applied on SET ROLE. This block covers the one
+-- thing a login cannot see: that the setting is on the role for EVERY database
+-- (setdatabase = 0), not scoped to whichever database this lane happens to use.
+--
+-- It asserts only that such an entry EXISTS, deliberately not its spelling: 30000,
+-- '30000ms' and '30s' are the same setting but are stored as written, and comparing the
+-- stored text made an equivalent value fail here while the login probe passed -- measured.
+DO $timeout$
+DECLARE
+    _cluster_wide INT;
+    _all_rows     TEXT;
+BEGIN
+    SELECT count(*) INTO _cluster_wide
+      FROM pg_db_role_setting AS s
+      JOIN pg_roles AS r ON r.oid = s.setrole
+     CROSS JOIN LATERAL unnest(s.setconfig) AS c
+     WHERE r.rolname = 'haf_stats_user' AND s.setdatabase = 0
+       AND c LIKE 'statement_timeout=%';
+
+    IF _cluster_wide = 0 THEN
+        SELECT string_agg(coalesce(d.datname, '<all databases>') || ': '
+                          || array_to_string(s.setconfig, ', '), '; ')
+          INTO _all_rows
+          FROM pg_db_role_setting AS s
+          JOIN pg_roles AS r ON r.oid = s.setrole
+          LEFT JOIN pg_database AS d ON d.oid = s.setdatabase
+         WHERE r.rolname = 'haf_stats_user';
+        RAISE EXCEPTION 'install: haf_stats_user has no statement_timeout for all databases '
+                        '(its settings: %). db/builtin_roles.sql sets one; without it the API '
+                        'runs uncapped wherever PostgREST logs in as haf_stats_user.',
+                        coalesce(_all_rows, 'none');
+    END IF;
+
+    -- CI-ONLY: passwords, so the verify service can LOG IN as each role for
+    -- tests/ci_login_timeout.sql. This lane's postgres uses scram for TCP and neither role
+    -- has one. It is a throwaway database, and both roles are dropped at uninstall.
+    ALTER ROLE haf_stats_user PASSWORD 'ci-login-probe';
+    ALTER ROLE haf_stats_owner PASSWORD 'ci-login-probe';
+
+    RAISE NOTICE 'install verified: haf_stats_user has a statement_timeout for all databases';
+END
+$timeout$;
+
+-- ---------------------------------------------------------------------------
 -- The shim is not a rubber stamp.
 --
 -- Everything above would also pass against a shim whose functions did nothing at all,
