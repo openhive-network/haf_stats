@@ -375,10 +375,11 @@ def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
     reference -- so an untagged push (implicitly `:latest`) is caught too.
 
     SCAN every job in the file -- script, before_script, after_script, variables and
-    rules[].variables -- for ANY executable reference to the retired repository, or an
-    old-name PUBLISH_IMAGES entry. The run only sees the `script:` of known jobs on the
-    pipeline types it simulates; an after_script, a new job, a branch-guarded push or a
-    rules:variables override of PUBLISH_IMAGES would get past it.
+    rules[].variables -- for ANY reference to the retired repository in a script line or
+    a variable value, or an old-name PUBLISH_IMAGES entry. The run only sees the
+    `script:` of known jobs on the pipeline types it simulates; an after_script, a new
+    job, a branch-guarded push or a rules:variables override of PUBLISH_IMAGES would get
+    past it.
     """
     old_repo = f"{IMG}/{OLD}"
     runs = [("docker-build-rewriter", {"CI_COMMIT_BRANCH": "develop"}),
@@ -410,6 +411,11 @@ def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
             entries = str(variables.get("PUBLISH_IMAGES", "")).split()
             if OLD in entries:
                 offenders.append(f"{job_name}: PUBLISH_IMAGES={entries}")
+            # A variable holding the retired path, pushed later as "$VAR:tag".
+            for name, value in variables.items():
+                text = str(value.get("value", "") if isinstance(value, dict) else value)
+                if _RETIRED_REF.search(text):
+                    offenders.append(f"{job_name}: variable {name}={text!r}")
     assert not offenders, (
         "the retired rewriter name is published again:\n" + "\n".join(offenders))
 
