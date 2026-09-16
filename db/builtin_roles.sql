@@ -128,3 +128,37 @@ BEGIN
     END IF;
 END
 $$;
+
+-- The API's 30 s statement budget. (#94)
+--
+-- This role setting caps API queries in every deployment -- measured on PostgREST v12.2.3:
+--
+--   PostgREST logs in AS haf_stats_user    applied at login. That is the haf_api_node stack,
+--                                          whose PgBouncer rejects options=statement_timeout
+--                                          (hive/haf_api_node!244), and testapi, whose URI
+--                                          carries none.
+--   PostgREST logs in as haf_stats_owner   this repo's docker-compose.yml. PostgREST applies
+--   and switches roles                     the settings of every role its login role is a
+--                                          member of to each request, so this OVERRIDES the
+--                                          options= on PGRST_DB_URI there, in both directions.
+--
+-- The sibling apps do the same (on testapi: btracker_user and hafbe_user 10s, hafah_user
+-- 15s, hivemind_user 5000 ms); haf_stats' endpoints are heavier, hence 30 s.
+--
+-- NOT on haf_stats_owner: the block processor logs in as the owner and its batches
+-- legitimately run long. install-test asserts the owner LOGS IN with 0.
+--
+-- Headroom, from testapi's PostgreSQL log (2026-07-14 .. 09-16, every call of >= 1 s):
+-- the slowest PostgREST calls into haf_stats_endpoints took 21.9 s, 21.7 s and 21.5 s.
+-- The one call of 30 s or more was a 48.8 s wait for the lock that the 03:30 UTC
+-- refresh_top_accounts_alltime() TRUNCATE holds -- readers arriving early in that refresh
+-- are now cancelled instead of waiting (#95).
+--
+-- Set unconditionally, so a reinstall restores the shipped budget. Where PostgREST logs in
+-- as haf_stats_user, ALTER ROLE haf_stats_user IN DATABASE <db> SET statement_timeout = ...
+-- takes precedence over this and survives reinstall.
+--
+-- Kept at the END of the file on purpose: tests/ci_install_verify.sql,
+-- tests/ci_haf_stub.sql and scripts/check_haf_drift.sh cite lines of this file by NUMBER,
+-- and inserting this beside the CREATE ROLE would re-point most of them.
+ALTER ROLE haf_stats_user SET statement_timeout = '30s';

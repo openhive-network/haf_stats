@@ -320,11 +320,18 @@ services:
   verify:
     image: postgres:14-alpine
     entrypoint: ["/bin/sh", "-c"]
+    # Three connections. The last two must be LOGINS as haf_stats_user and as
+    # haf_stats_owner: role settings are applied at login, not on SET ROLE, so a superuser
+    # session cannot prove what PostgREST or the block processor gets.
+    # ci_install_verify.sql gives both roles the CI-only password those use. (#94)
     command:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_install_verify.sql
+        && PGPASSWORD=ci-login-probe psql -h postgres -U haf_stats_user -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_login_timeout.sql
+        && PGPASSWORD=ci-login-probe psql -h postgres -U haf_stats_owner -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_login_timeout.sql
     volumes:
       - ../tests/ci_install_verify.sql:/ci_install_verify.sql:ro
+      - ../tests/ci_login_timeout.sql:/ci_login_timeout.sql:ro
     depends_on:
       install-again:
         condition: service_completed_successfully

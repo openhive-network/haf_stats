@@ -945,23 +945,49 @@ inside a single block, "oldest kept" equalled "oldest available" and a truncated
 full coverage. And because the boundary block's own day is only partly scanned, `covered_from`
 starts the day *after* it rather than presenting a partial day as complete.
 
-PostgREST's own connection carries a `statement_timeout` (`options=-c statement_timeout=30s` in
-`PGRST_DB_URI`), so a pathological request fails cleanly instead of holding one of its 20 pool
-slots for minutes while the client has already given up — PostgreSQL never notices a disconnect,
-since `client_connection_check_interval` defaults to 0.
+API queries run under a **30 s `statement_timeout`**, so a pathological request fails cleanly
+instead of holding a PostgREST pool slot for minutes while the client has already given up —
+PostgreSQL never notices a disconnect, since `client_connection_check_interval` defaults to 0.
 
-It has to be on the **connection**, and the two obvious alternatives both silently do nothing:
+**It is a role setting on `haf_stats_user`** (`db/builtin_roles.sql`), and it caps the API in
+every deployment — measured on PostgREST v12.2.3:
 
-* A `SET statement_timeout` **function attribute never arms** — the timer is set when the
-  top-level statement begins, and changing the GUC from inside that statement does not re-arm it.
-  Verified: a 2 s `pg_sleep` runs to completion under a 200 ms in-statement timeout.
-* **`ALTER ROLE haf_stats_user SET statement_timeout` is dead config** in the production stack.
-  Role settings apply at login, and PostgreSQL explicitly does not process them for `SET ROLE`;
-  PostgREST logs in as `haf_stats_owner` and switches roles per request.
+| deployment | PostgREST logs in as | how the role setting applies |
+|---|---|---|
+| this repo's `docker/docker-compose.yml` | `haf_stats_owner`, and switches to `haf_stats_user` per request | PostgREST applies the settings of every role its login role is a member of **to each request**. That overrides the `options=-c statement_timeout=30s` on `PGRST_DB_URI` in both directions; the option stays only as a fallback in case the membership changes. |
+| the haf_api_node stack (`haf_stats.yaml`) | `haf_stats_user`, **through PgBouncer** | at login. The URI option is not available here: the stack's PgBouncer rejects it with `FATAL: unsupported startup parameter in options: statement_timeout` (hive/haf_api_node!244). |
+| a node that side-loads the app, e.g. testapi | `haf_stats_user`, direct | at login. testapi's URI carries no option, so its API was uncapped before #94. |
 
-The connection form is verified to arm (a 2 s sleep cancelled at 200 ms), and it bounds API
-queries only — the block processor uses its own connection, and its batches legitimately run
-long.
+The sibling apps use the same mechanism (on testapi: `btracker_user` and `hafbe_user` 10 s,
+`hafah_user` 15 s, `hivemind_user` 5000 ms); haf_stats' endpoints are heavier, hence 30 s.
+Headroom, from testapi's PostgreSQL log (2026-07-14 → 09-16, every call of ≥ 1 s): the slowest
+PostgREST calls took 21.9 s, 21.7 s and 21.5 s. The one call of 30 s or more was a 48.8 s wait
+for the lock the 03:30 UTC `refresh_top_accounts_alltime()` `TRUNCATE` holds, so a top-accounts
+request that lands early in that refresh is now cancelled (HTTP 500) rather than served late —
+tracked as #95.
+
+A `SET statement_timeout` **attribute on a function** is not used. It does not arm when the
+function is called directly in SQL — verified: a 2 s `pg_sleep` runs to completion under a
+200 ms attribute — though PostgREST v12 does hoist it for RPC calls (measured: a 500 ms attribute
+cancelled a 2 s sleep). One budget on the role is simpler to reason about than one per function.
+
+The block processor logs in as `haf_stats_owner`, which deliberately carries **no** timeout —
+its batches legitimately run long.
+
+**Tested:** `install-test` logs in as `haf_stats_user` and asserts it gets 30 s, and as
+`haf_stats_owner` and asserts it gets 0 — a superuser session cannot check either, since
+`SET ROLE` does not apply role settings. That is a direct login to PostgreSQL 14; CI goes through
+neither PostgREST nor PgBouncer. The PgBouncer path was measured separately in review of !97,
+with haf_api_node's own PgBouncer image: the setting arms, and a 35 s sleep is cancelled.
+
+**Deploying onto a running node.** A role setting is read when a connection is opened, so
+connections already pooled keep their old value:
+
+* this repo's compose, or a direct login like testapi: restart the PostgREST container.
+* the haf_api_node stack: restarting PostgREST is **not** enough — PgBouncer hands the new client
+  the same server connection. Run `RECONNECT haf_block_log` on PgBouncer's admin console (it
+  cycles every app's server connections to that database), restart PgBouncer, or wait for its
+  `server_lifetime` (3600 s in the stack's `pgbouncer.yaml`).
 
 Every op type carries its **own** budget. A shared budget made the answer depend on the query:
 votes sharing a page with replies and transfers reported a lower count than the same account
