@@ -732,7 +732,7 @@ docker-build:
     # prevent. An earlier revision of this MR did exactly that.
     #
     # So on a tag the image is still BUILT (the smoke test above is worth running) and
-    # simply not published. publish_tag in the publish stage then pulls the SHA image
+    # simply not published. publish_tag in the release stage then pulls the SHA image
     # the develop pipeline tested and retags it, so the released bytes ARE the tested
     # bytes. `latest` gets the same treatment in publish_latest, for the same reason.
     - |
@@ -769,7 +769,7 @@ docker-build:
     #
     #     The twelve are the ten this file gates, plus detect_changes (excluded on
     #     tags by upstream's .haf_app_detect_changes, not by this file), plus
-    #     publish_latest -- which is develop-only and which THIS MR adds, so it was
+    #     publish_latest -- which is develop-only and which #66 added, so it was
     #     missing from a count taken while it was being written. The ten:
     #     sql-lint, openapi-drift,
     #     shell-lint, shell-tests, hadolint, compose-validate, endpoint-tests,
@@ -780,8 +780,9 @@ docker-build:
     #     three additions matter for a release: haf-drift is the BLOCKING check that
     #     the pinned HAF version has not drifted, and install-test is the only fast
     #     lane that runs the real install_app.sh against a real PostgreSQL.
-    #   * Of the lanes that do run on tags, only reinstall-test exercises an image from
-    #     the registry at all -- and since this job no longer PUSHES on a tag, what it
+    #   * Of the lanes that do run on tags, only reinstall-test RELIABLY exercises an
+    #     image from the registry (sync can; see below) -- and since this job no longer
+    #     PUSHES on a tag, what it
     #     pulls is the image the DEVELOP pipeline published for that commit, not this
     #     pipeline's build. That is the better behaviour (it is the tested artifact),
     #     but it is not what an earlier revision of this sentence described.
@@ -791,9 +792,11 @@ docker-build:
     #     an already-built develop commit it USUALLY exits in seconds. Not always:
     #     find_haf_image resolves HAF_COMMIT dynamically off hive/haf develop, so if
     #     upstream HAF moved in between, the key differs, the cache misses and sync does
-    #     run in full against the built image. pattern-test and regression-test run with
-    #     HAF_STATS_IMAGE unset and never touch it. NOTHING exercises the pushed
-    #     REWRITER image, which publish_images mirrors regardless.
+    #     run in full -- against the REGISTRY images the develop pipeline published for
+    #     that commit, app and rewriter both, not "the built image" an earlier revision
+    #     said. pattern-test and regression-test run with HAF_STATS_IMAGE unset and never
+    #     touch it. So on a tag the REWRITER image is exercised only on that sync cache
+    #     miss; on the usual hit nothing starts it, and publish_tag releases it regardless.
     #
     # What makes the rebuild acceptable is narrower, and narrower than an earlier
     # revision of this comment claimed. Neither Dockerfile installs a package or fetches
@@ -935,14 +938,16 @@ sync:
     DOCKER_CERT_PATH: /certs/client
     DOCKER_TLS_VERIFY: "1"
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
-    # Pin the SHA tag docker-build-rewriter just pushed. Left unset, the service falls
-    # back to :latest -- which, since #66, IS published, on every green develop
-    # pipeline. This variable is still set explicitly so the lane pins the commit under
-    # test rather than following develop; before #66 an unset value failed loudly, and
-    # now it would succeed against the wrong image, which is the worse failure. `up`
-    # logged `manifest unknown` and silently BUILT it instead (job 3270294), in a job
-    # whose before_script states no builder setup is needed here. It worked, but it
-    # exercised a local build rather than the artifact the pipeline produced.
+    # Pin THIS COMMIT's rewriter. docker-build-rewriter pushes it on a branch pipeline;
+    # on a tag pipeline it is the image the develop pipeline published for the same
+    # commit, because the build jobs no longer push on a tag. An earlier revision said
+    # "the SHA tag docker-build-rewriter just pushed", which the tag case made untrue.
+    #
+    # Left unset, the service falls back to :latest -- which since #66 IS published, so
+    # the lane would pass against develop HEAD's rewriter instead of the commit under
+    # test. Before #66 the same omission made `up` log `manifest unknown` and quietly
+    # BUILD the image (job 3270294), in a job whose before_script says no builder setup
+    # is needed here: it worked, but it exercised a local build, not the artifact.
     HAF_STATS_REWRITER_IMAGE: "${CI_REGISTRY_IMAGE}/rewriter:${CI_COMMIT_SHORT_SHA}"
     POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
     POSTGRES_ACCESS: "postgresql://haf_admin@docker:5432/haf_block_log"
@@ -1762,9 +1767,8 @@ publish_tag:
 # docker/docker-compose.yml defaults FOUR services to it (setup, process, uninstall
 # and the rewriter -- an earlier revision said three and dropped the rewriter, which
 # is the one whose behaviour this change alters), and README calls
-# `cd docker && docker compose up -d` the production path. Until this MR that chain
-# failed loudly
-# with `manifest unknown` because no `latest` exists. The moment one does, a red develop
+# `cd docker && docker compose up -d` the production path. Before #66 that chain failed
+# loudly with `manifest unknown`, because no `latest` existed. Once one exists, a red develop
 # build published from the `build` stage would resolve silently instead -- turning a loud
 # failure into a wrong image. docker/docker-compose-ci-test.yml and the comment above
 # reinstall-test both already name that as the hazard they defend against.

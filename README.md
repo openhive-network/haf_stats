@@ -162,12 +162,11 @@ docker compose up -d
 > service with a `build:` stanza, so it used to fall back to building your working
 > tree when the pull failed. It now pulls instead — edit the rewriter and run the
 > documented command and your change is silently absent unless you pass `--build`. The
-> **development** stack above is worse: `docker-compose-test.yml` references
-> `${HAF_STATS_VERSION}` with no default and no `build:` at all, so it fails the same way
-> with nothing to fall back on.
+> **development** stack above has no rewriter and no `build:`; it reads
+> `${HAF_STATS_VERSION}` from `.env` with no default of its own, so it follows `latest`
+> the same way, and a pin that does not resolve has nothing to fall back on.
 >
-> Until [#66](https://gitlab.syncad.com/hive/haf_stats/-/issues/66) adds release tagging,
-> pin a published SHA — one variable now covers the app image and the rewriter:
+> To pin, one variable covers the app image and the rewriter:
 >
 > ```bash
 > HAF_STATS_VERSION=<8-hex-sha> docker compose up -d
