@@ -149,7 +149,9 @@ def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
                 if args[i] in ("-t", "--tag"):
                     refs.append(args[i + 1])
                     i += 2
-                elif args[i] in ("-f", "--file", "--build-arg", "--label", "--target"):
+                elif args[i] in ("-f", "--file", "--build-arg", "--label", "--target",
+                                 "--platform", "--cache-from", "--cache-to", "--output",
+                                 "--secret", "--ssh", "--network"):
                     i += 2
                 elif args[i].startswith("-"):
                     i += 1
@@ -157,13 +159,17 @@ def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
                     context.append(args[i])
                     i += 1
             assert refs, f"docker build with no -t: {call}"
-            # Exactly one build context. Re-wrapping the command (as a formatter might)
-            # can leave ` .` on the same line as a -t that gets deleted with it; docker
+            # Exactly one build context. ` .` shares a line with the last -t, so deleting
+            # that line -- e.g. while resolving a conflict -- drops the context too; docker
             # then fails, but nothing here would notice without this.
             assert len(context) == 1, (
                 f"docker build needs one build context, got {context}: {call}")
             for ref in refs:
                 local[ref] = f"built#{builds}"
+            # `docker build --push` publishes every -t directly, without a docker push.
+            if "--push" in args or any("push=true" in a for a in args):
+                for ref in refs:
+                    pushed[ref] = local[ref]
         elif verb == "pull":
             local[args[-1]] = f"pulled:{args[-1]}"
         elif verb == "tag":
@@ -351,9 +357,14 @@ def _repository(ref: str) -> str:
     return head + slash + tail.split(":", 1)[0]
 
 
-# A docker push or tag naming the retired repository, tagged or not, however quoted.
-_RETIRED_PUSH = re.compile(
-    r"\bdocker\s+(?:push|tag)\b.*/" + re.escape(OLD) + r"(?::|[\s\"'}]|$)")
+# Any reference to the retired repository -- $CI_REGISTRY_IMAGE/rewriter,
+# ${CI_REGISTRY_IMAGE}/rewriter or .../haf_stats/rewriter, tagged or not. Deliberately
+# broad: a loop, a variable holding the path, `docker image push` or `buildx imagetools
+# create` all publish without a `docker push .../rewriter` line. The price is flagging a
+# harmless mention in an echo too; that failure names the line, so adjust this test if a
+# reference is ever legitimate.
+_RETIRED_REF = re.compile(
+    r"(?:\$\{?CI_REGISTRY_IMAGE\}?|/haf_stats)/" + re.escape(OLD) + r"(?![\w-])")
 
 
 def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
@@ -364,9 +375,9 @@ def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
     reference -- so an untagged push (implicitly `:latest`) is caught too.
 
     SCAN every job in the file -- script, before_script, after_script, variables and
-    rules[].variables -- for a docker push/tag of the retired repository, or an old-name
-    PUBLISH_IMAGES entry. The run only sees the `script:` of known jobs on the pipeline
-    types it simulates; an after_script, a new job, a branch-guarded push or a
+    rules[].variables -- for ANY executable reference to the retired repository, or an
+    old-name PUBLISH_IMAGES entry. The run only sees the `script:` of known jobs on the
+    pipeline types it simulates; an after_script, a new job, a branch-guarded push or a
     rules:variables override of PUBLISH_IMAGES would get past it.
     """
     old_repo = f"{IMG}/{OLD}"
@@ -389,7 +400,7 @@ def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
                 if isinstance(item, str):
                     offenders += [f"{job_name}.{key}: {line}"
                                   for line in _shell_lines(item)
-                                  if _RETIRED_PUSH.search(line)]
+                                  if _RETIRED_REF.search(line)]
         variable_sets = [job] if job_name == "variables" else [job.get("variables") or {}]
         variable_sets += [rule.get("variables") or {} for rule in job.get("rules") or []
                           if isinstance(rule, dict)]
