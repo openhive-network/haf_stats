@@ -20,12 +20,15 @@ pushed reference actually holds, and assert on the result.
 
 RETIRING THE OLD NAME is an edit to REWRITER_NAMES below, made together with the four
 sites. That is deliberate: it turns the last step of #83 into a visible change here
-rather than something that can happen by accident.
+rather than something that can happen by accident. The same step must DELETE
+`rewriter:latest` from the registry, which no test here can check: left behind, it
+freezes while haf_stats:latest moves on, and pre-rename checkouts pair the two.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -70,15 +73,18 @@ def jobs() -> dict:
         pass
 
     # GitLab's !reference is not YAML; keep it as the list it contains.
-    Loader.add_constructor("!reference", lambda loader, node: loader.construct_sequence(node))
+    Loader.add_constructor("!reference",
+                           lambda loader, node: loader.construct_sequence(node))
     return y.load(CI.read_text(encoding="utf-8"), Loader=Loader)
 
 
-def _run_job(job: dict, tmp_path: Path, **ci_vars: str) -> list[list[str]]:
+def _run_job(job: dict, tmp_path: Path, fail: str | None = None,
+             **ci_vars: str) -> list[list[str]]:
     """Run a job's `script:` under bash with a recording docker; return the calls.
 
     Items are joined into one script under `set -eo pipefail`, which is how the GitLab
-    runner executes them: in one shell, stopping at the first failing command.
+    runner executes them: in one shell, stopping at the first failing command. With
+    `fail`, that docker call exits 1 and the JOB must then fail too.
     """
     bash = require_bash()
     bindir = tmp_path / "bin"
@@ -86,10 +92,17 @@ def _run_job(job: dict, tmp_path: Path, **ci_vars: str) -> list[list[str]]:
     log = tmp_path / "docker.log"
     # One line per call, arguments separated by \037, so an argument containing a space
     # (CI_COMMIT_TITLE does) is recorded as the single argument it was.
+    # DOCKER_FAIL="<verb> <last argument>" makes that one call exit 1 after recording it,
+    # so the tests can check a job STOPS at a failed pull or push rather than carrying on.
     write_exec(bindir / "docker",
                "#!/bin/sh\n"
                "for a in \"$@\"; do printf '%s\\037' \"$a\"; done >> \"$DOCKER_LOG\"\n"
-               "printf '\\n' >> \"$DOCKER_LOG\"\n")
+               "printf '\\n' >> \"$DOCKER_LOG\"\n"
+               "for last in \"$@\"; do :; done\n"
+               "if [ -n \"$DOCKER_FAIL\" ] && [ \"$1 $last\" = \"$DOCKER_FAIL\" ]; then\n"
+               "  exit 1\n"
+               "fi\n"
+               "exit 0\n")
     script = tmp_path / "job.sh"
     body = "\n".join(item for item in job["script"] if isinstance(item, str))
     with open(script, "w", encoding="utf-8", newline="\n") as handle:
@@ -105,14 +118,21 @@ def _run_job(job: dict, tmp_path: Path, **ci_vars: str) -> list[list[str]]:
         "CI_COMMIT_SHA": SHA + "f" * 32,
         "CI_COMMIT_TITLE": "a title with spaces",
         "CI_JOB_STARTED_AT": "2026-09-16T00:00:00Z",
+        "DOCKER_FAIL": fail or "",
         **ci_vars,
     })
     result = subprocess.run([bash, script.as_posix()], env=env, capture_output=True,
                             text=True, timeout=TIMEOUT)
-    assert result.returncode == 0, f"job script failed:\n{result.stdout}\n{result.stderr}"
+    if fail is None:
+        assert result.returncode == 0, (
+            f"job script failed:\n{result.stdout}\n{result.stderr}")
+    else:
+        assert result.returncode != 0, (
+            f"`docker {fail}` failed and the job carried on to succeed")
     if not log.exists():
         return []
-    return [line.split("\x1f")[:-1] for line in log.read_text(encoding="utf-8").splitlines()]
+    lines = log.read_text(encoding="utf-8").splitlines()
+    return [line.split("\x1f")[:-1] for line in lines]
 
 
 def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
@@ -166,24 +186,55 @@ def test_docker_build_rewriter_pushes_every_name_from_one_build(jobs, tmp_path):
 def test_docker_build_rewriter_pushes_nothing_on_a_tag(jobs, tmp_path):
     """#66's property, which the extra push must not have broken: a tag pipeline rebuilds
     and must not overwrite the SHA tags a develop pipeline already published."""
-    pushed, _ = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path, CI_COMMIT_TAG=TAG))
+    pushed, _ = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
+                                 CI_COMMIT_TAG=TAG, CI_COMMIT_REF_PROTECTED="true"))
     assert pushed == {}, sorted(pushed)
 
 
 def test_sync_pins_the_new_name(jobs):
-    """The only pre-release lane that pulls the rewriter, so the only one that proves the
-    new name was published. Left on the old name, it would prove nothing about it."""
+    """The only pre-release lane that pulls the rewriter. Left on the old name, it would
+    say nothing about whether the new one was published."""
     assert (jobs["sync"]["variables"]["HAF_STATS_REWRITER_IMAGE"]
             == "${CI_REGISTRY_IMAGE}/" + NEW + ":${CI_COMMIT_SHORT_SHA}")
+    # ...and that variable is what reaches compose: sync writes it into ci.env, which is
+    # the --env-file compose reads. A literal there would bypass the pin entirely.
+    lines = [line.strip() for item in jobs["sync"]["script"] if isinstance(item, str)
+             for line in item.splitlines()]
+    assert "HAF_STATS_REWRITER_IMAGE=${HAF_STATS_REWRITER_IMAGE}" in lines, (
+        "sync's ci.env no longer passes HAF_STATS_REWRITER_IMAGE through to compose")
+
+
+def test_sync_cannot_silently_build_the_rewriter(jobs):
+    """Without --no-build, a rewriter image that was never published does not fail sync.
+
+    haf-stats-rewriter has a build: stanza, so a failed pull makes `docker compose up`
+    build the working tree and carry on -- job 3270294 went green that way. Pinning the
+    new name above would then prove nothing, because a missing image is indistinguishable
+    from a present one. Checked on the command lines themselves, not the comments.
+    """
+    lines = [line.strip() for item in jobs["sync"]["script"] if isinstance(item, str)
+             for line in item.splitlines() if not line.strip().startswith("#")]
+    # Shell-tokenised, so `--no-build; then` yields `--no-build` and `;` separately. Only
+    # candidate lines are tokenised: others in this script (heredoc bodies, trailing
+    # backslashes) are not complete shell words on their own.
+    candidates = [line for line in lines if "compose" in line and " up " in f" {line} "]
+    commands = [list(shlex.shlex(line, posix=True, punctuation_chars=True))
+                for line in candidates]
+    ups = [words for words in commands if "compose" in words and "up" in words]
+    assert ups, "sync no longer runs `docker compose ... up`; update this test"
+    for words in ups:
+        assert "--no-build" in words, (
+            f"sync's `up` can fall back to building: {' '.join(words)}")
 
 
 # --- the retag jobs ----------------------------------------------------------------
 
 @pytest.mark.parametrize("job_name, target, ci_vars", [
     ("publish_latest", "latest", {"CI_COMMIT_BRANCH": "develop"}),
-    ("publish_tag", TAG, {"CI_COMMIT_TAG": TAG}),
+    ("publish_tag", TAG, {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"}),
 ])
-def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job_name, target, ci_vars):
+def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job_name, target,
+                                                             ci_vars):
     pushed, verbs = _replay(_run_job(jobs[job_name], tmp_path, **ci_vars))
 
     assert set(pushed) == {f"{IMG}:{target}"} | _rewriter_refs(target), sorted(pushed)
@@ -202,6 +253,34 @@ def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job
     assert first_push > last_prep, f"a push precedes the last pull/tag: {verbs}"
 
 
+@pytest.mark.parametrize("job_name, target, ci_vars", [
+    ("publish_latest", "latest", {"CI_COMMIT_BRANCH": "develop"}),
+    ("publish_tag", TAG, {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"}),
+])
+@pytest.mark.parametrize("failing", ["pull app", "pull rewriter", "push rewriter"])
+def test_retag_jobs_stop_at_a_failed_docker_call(jobs, tmp_path, job_name, target, ci_vars,
+                                                 failing):
+    """A failed pull publishes NOTHING, and a failed push fails the job.
+
+    The stub never fails unless told to, so without this a `|| continue` on the pull or a
+    `|| true` on a push -- both plausible edits, e.g. to tolerate a SHA that predates #83
+    -- passes every other test here. For real, the first releases the app under the new
+    tag with no rewriter beside it; the second reports a release that did not happen.
+    """
+    verb, what = failing.split()
+    tag = SHA if verb == "pull" else target
+    ref = {"app": f"{IMG}:{tag}", "rewriter": f"{IMG}/{NEW}:{tag}"}[what]
+    calls = _run_job(jobs[job_name], tmp_path, fail=f"{verb} {ref}", **ci_vars)
+    if verb == "pull":
+        pushes = [c for c in calls if c[0] == "push"]
+        assert not pushes, f"pushed after a failed pull: {pushes}"
+
+
+def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path):
+    _run_job(jobs["docker-build-rewriter"], tmp_path, fail=f"push {IMG}/{NEW}:{SHA}",
+             CI_COMMIT_BRANCH="develop")
+
+
 # --- the mirror --------------------------------------------------------------------
 
 def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
@@ -211,9 +290,12 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     is where haf_api_node's default resolves the old name."""
     publish_images = jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
     project = "haf_stats"
-    mirrored = {f"{IMG}:{TAG}" if e == project else f"{IMG}/{e}:{TAG}" for e in publish_images}
+    mirrored = {f"{IMG}:{TAG}" if entry == project else f"{IMG}/{entry}:{TAG}"
+                for entry in publish_images}
 
-    pushed, _ = _replay(_run_job(jobs["publish_tag"], tmp_path, CI_COMMIT_TAG=TAG))
+    pushed, _ = _replay(_run_job(jobs["publish_tag"], tmp_path,
+                                 CI_COMMIT_TAG=TAG, CI_COMMIT_REF_PROTECTED="true"))
     assert mirrored == set(pushed), (
-        f"PUBLISH_IMAGES {publish_images} does not match publish_tag's pushes {sorted(pushed)}")
+        f"PUBLISH_IMAGES {publish_images} does not match what publish_tag pushes: "
+        f"{sorted(pushed)}")
     assert len(publish_images) == len(set(publish_images)), publish_images

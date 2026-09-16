@@ -186,6 +186,11 @@ docker compose up -d
 > ```
 >
 > Without it the rewriter pull fails and Compose quietly builds your working tree instead.
+>
+> This is **this repo's** Compose file, where `HAF_STATS_REWRITER_IMAGE` is the whole
+> image reference. haf_api_node's variable of the same name takes **no tag** — its
+> `haf_stats.yaml` appends `:${HAF_STATS_VERSION}` — so there the value is
+> `registry.gitlab.syncad.com/hive/haf_stats/rewriter`, without `:<old-sha>`.
 
 ### Rebuilding account cohorts
 
