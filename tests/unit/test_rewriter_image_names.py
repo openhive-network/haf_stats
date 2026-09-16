@@ -20,9 +20,10 @@ pushed reference actually holds, and assert on the result.
 
 RETIRING THE OLD NAME is an edit to REWRITER_NAMES below, made together with the four
 sites. That is deliberate: it turns the last step of #83 into a visible change here
-rather than something that can happen by accident. The same step must DELETE
-`rewriter:latest` from the registry, which no test here can check: left behind, it
-freezes while haf_stats:latest moves on, and pre-rename checkouts pair the two.
+rather than something that can happen by accident. That step freezes `rewriter:latest`,
+and pre-rename checkouts following `latest` then pair an old rewriter with a moving
+haf_stats:latest. Deleting the tag would not avoid it -- their compose file falls back
+to building the checkout's rewriter -- so #83 records it as a decision, not a test.
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ OLD = "rewriter"
 # The first entry is the name; the rest are aliases published from the same image.
 # #83's last step removes OLD from this tuple and from the four publish sites together.
 REWRITER_NAMES = (NEW, OLD)
+# PUBLISH_IMAGES order. The template pushes entries in order and stops at the first
+# refusal, so the rewriter name stock haf_api_node nodes pull goes first. #83 step 2
+# (haf_api_node defaulting to NEW) flips the two.
+MIRROR_ORDER = ("haf_stats", OLD, NEW)
 
 IMG = "registry.example.com/hive/haf_stats"
 SHA = "0badc0de"
@@ -167,6 +172,28 @@ def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
     return pushed, verbs
 
 
+def _shell_lines(script: str) -> list[str]:
+    """Command lines of a script item: comments dropped, backslash continuations joined.
+
+    Joined the way the shell does, so a command split across lines is tokenised whole --
+    and a comment line is dropped BEFORE joining, because a trailing backslash does not
+    continue a comment.
+    """
+    out, pending = [], ""
+    for raw in script.splitlines():
+        line = raw.strip()
+        if not pending and line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        out.append(pending + line)
+        pending = ""
+    if pending:
+        out.append(pending)
+    return out
+
+
 def _rewriter_refs(tag: str) -> set[str]:
     return {f"{IMG}/{name}:{tag}" for name in REWRITER_NAMES}
 
@@ -196,12 +223,21 @@ def test_sync_pins_the_new_name(jobs):
     say nothing about whether the new one was published."""
     assert (jobs["sync"]["variables"]["HAF_STATS_REWRITER_IMAGE"]
             == "${CI_REGISTRY_IMAGE}/" + NEW + ":${CI_COMMIT_SHORT_SHA}")
-    # ...and that variable is what reaches compose: sync writes it into ci.env, which is
-    # the --env-file compose reads. A literal there would bypass the pin entirely.
-    lines = [line.strip() for item in jobs["sync"]["script"] if isinstance(item, str)
-             for line in item.splitlines()]
-    assert "HAF_STATS_REWRITER_IMAGE=${HAF_STATS_REWRITER_IMAGE}" in lines, (
-        "sync's ci.env no longer passes HAF_STATS_REWRITER_IMAGE through to compose")
+    # ...and no other compose file sync merges replaces it. An image: or build: on the
+    # rewriter in an override wins over the interpolated default outright. (An earlier
+    # revision pinned the `HAF_STATS_REWRITER_IMAGE=...` line sync writes into ci.env
+    # instead. That checked nothing: the variable is also in the job's environment, and
+    # compose lets the shell environment win over --env-file, so a literal in ci.env is
+    # ignored.)
+    y = _require_yaml()
+    words = jobs["sync"]["variables"]["COMPOSE_OPTIONS_STRING"].split()
+    compose_files = [words[i + 1] for i, word in enumerate(words) if word == "--file"]
+    assert compose_files[:1] == ["docker-compose.yml"], compose_files
+    for name in compose_files[1:]:
+        doc = y.safe_load((ROOT / "docker" / name).read_text(encoding="utf-8")) or {}
+        svc = (doc.get("services") or {}).get("haf-stats-rewriter") or {}
+        assert not {"image", "build"} & set(svc), (
+            f"docker/{name} sets haf-stats-rewriter's image or build, bypassing the pin")
 
 
 def test_sync_cannot_silently_build_the_rewriter(jobs):
@@ -212,19 +248,36 @@ def test_sync_cannot_silently_build_the_rewriter(jobs):
     new name above would then prove nothing, because a missing image is indistinguishable
     from a present one. Checked on the command lines themselves, not the comments.
     """
-    lines = [line.strip() for item in jobs["sync"]["script"] if isinstance(item, str)
-             for line in item.splitlines() if not line.strip().startswith("#")]
-    # Shell-tokenised, so `--no-build; then` yields `--no-build` and `;` separately. Only
-    # candidate lines are tokenised: others in this script (heredoc bodies, trailing
+    lines = [line for item in jobs["sync"]["script"] if isinstance(item, str)
+             for line in _shell_lines(item)]
+    # Shell-tokenised, so `--no-build; then` yields `--no-build` and `;` separately, then
+    # split into simple commands at the separators, so a `--no-build` in a DIFFERENT
+    # command on the same line (`up ...; then : --no-build`) does not count. Only lines
+    # mentioning compose are tokenised: others in this script (heredoc bodies, trailing
     # backslashes) are not complete shell words on their own.
-    candidates = [line for line in lines if "compose" in line and " up " in f" {line} "]
-    commands = [list(shlex.shlex(line, posix=True, punctuation_chars=True))
-                for line in candidates]
-    ups = [words for words in commands if "compose" in words and "up" in words]
+    separators = {";", "&&", "||", "|", "&", "!", "(", ")", "if", "then", "do", "else", "elif"}
+    commands = []
+    for line in lines:
+        if "compose" not in line:
+            continue
+        current = []
+        for word in shlex.shlex(line, posix=True, punctuation_chars=True):
+            if word in separators:
+                commands.append(current)
+                current = []
+            else:
+                current.append(word)
+        commands.append(current)
+    composes = [words for words in commands if words[:2] == ["docker", "compose"]]
+    ups = [words for words in composes if "up" in words]
     assert ups, "sync no longer runs `docker compose ... up`; update this test"
     for words in ups:
         assert "--no-build" in words, (
             f"sync's `up` can fall back to building: {' '.join(words)}")
+    # A `compose build` first, or `up --build`, satisfies --no-build with a LOCAL image:
+    # nothing is pulled, and the pin proves nothing again.
+    builds = [words for words in composes if "build" in words or "--build" in words]
+    assert not builds, f"sync builds the stack's images itself: {builds}"
 
 
 # --- the retag jobs ----------------------------------------------------------------
@@ -257,27 +310,30 @@ def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job
     ("publish_latest", "latest", {"CI_COMMIT_BRANCH": "develop"}),
     ("publish_tag", TAG, {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"}),
 ])
-@pytest.mark.parametrize("failing", ["pull app", "pull rewriter", "push rewriter"])
+@pytest.mark.parametrize("verb, name", [("pull", None), ("pull", NEW), ("push", None)]
+                         + [("push", rewriter) for rewriter in REWRITER_NAMES])
 def test_retag_jobs_stop_at_a_failed_docker_call(jobs, tmp_path, job_name, target, ci_vars,
-                                                 failing):
+                                                 verb, name):
     """A failed pull publishes NOTHING, and a failed push fails the job.
 
     The stub never fails unless told to, so without this a `|| continue` on the pull or a
     `|| true` on a push -- both plausible edits, e.g. to tolerate a SHA that predates #83
     -- passes every other test here. For real, the first releases the app under the new
     tag with no rewriter beside it; the second reports a release that did not happen.
+    Every push is failed in turn, the OLD name's included: that one silently not moving
+    is exactly the failure this module exists for. (`name` None is the app image.)
     """
-    verb, what = failing.split()
     tag = SHA if verb == "pull" else target
-    ref = {"app": f"{IMG}:{tag}", "rewriter": f"{IMG}/{NEW}:{tag}"}[what]
+    ref = f"{IMG}:{tag}" if name is None else f"{IMG}/{name}:{tag}"
     calls = _run_job(jobs[job_name], tmp_path, fail=f"{verb} {ref}", **ci_vars)
     if verb == "pull":
         pushes = [c for c in calls if c[0] == "push"]
         assert not pushes, f"pushed after a failed pull: {pushes}"
 
 
-def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path):
-    _run_job(jobs["docker-build-rewriter"], tmp_path, fail=f"push {IMG}/{NEW}:{SHA}",
+@pytest.mark.parametrize("name", REWRITER_NAMES)
+def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path, name):
+    _run_job(jobs["docker-build-rewriter"], tmp_path, fail=f"push {IMG}/{name}:{SHA}",
              CI_COMMIT_BRANCH="develop")
 
 
@@ -298,4 +354,6 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     assert mirrored == set(pushed), (
         f"PUBLISH_IMAGES {publish_images} does not match what publish_tag pushes: "
         f"{sorted(pushed)}")
+    # ORDER too, which the set comparison above cannot see. See MIRROR_ORDER.
+    assert tuple(publish_images) == MIRROR_ORDER, publish_images
     assert len(publish_images) == len(set(publish_images)), publish_images

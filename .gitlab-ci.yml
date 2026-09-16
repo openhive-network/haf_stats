@@ -96,9 +96,10 @@ variables:
   REPLAY_STOP_AT_BLOCK: "5000000"
 
   # Paths detect_changes treats as not needing a re-sync. In THIS file that only sets
-  # AUTO_SKIP_SYNC, which nothing acts on: sync has no rules, the template's cache lookup
-  # just prints a banner for it, and the cache key includes the commit SHA -- so a
-  # docs-only commit still runs sync in full. This line used to say it skipped sync.
+  # AUTO_SKIP_SYNC and AUTO_SKIP_BUILD, which nothing acts on: sync has no rules, the
+  # template's cache lookup just prints a banner for them, and the cache key includes
+  # the commit SHA -- so a docs-only commit still runs sync in full. This line used to
+  # say it skipped sync.
   HAF_APP_SKIP_PATTERNS: '^tests/|^docs/|\.md$|^README|^CHANGELOG|^LICENSE|^CLAUDE|^\.gitlab-ci\.yml$'
 
   # QUICK_TEST=true + QUICK_TEST_HAF_COMMIT=<sha> reuses an existing cache and
@@ -834,10 +835,13 @@ docker-build:
 # registry.hive.blog/haf_stats/rewriter. Renaming outright would break both on their
 # next bump. So all four publish sites -- this job, publish_latest, publish_tag and
 # publish_images -- emit both names from ONE image until those consumers have moved,
-# and then the old name leaves all four together. Retiring it also means DELETING
-# `rewriter:latest` from the registry in the same step: left in place it freezes while
-# haf_stats:latest keeps moving, and every checkout from before the rename -- whose
-# compose default is rewriter:latest -- silently pairs an old rewriter with a new app.
+# and then the old name leaves all four together. That freezes `rewriter:latest`, and
+# checkouts from before the rename -- whose compose default it is -- then pair an old
+# rewriter with a moving haf_stats:latest. Deleting the tag does NOT prevent that (an
+# earlier revision said it should be deleted for this reason): their compose file has
+# had a build: stanza on the rewriter since #61, so a missing image is quietly built
+# from the checkout instead. Whether to keep moving `rewriter:latest` for longer is a
+# decision for that step; #83 records it.
 #
 # tests/unit/test_rewriter_image_names.py RUNS this job's, publish_latest's and
 # publish_tag's scripts against a stub docker, checks PUBLISH_IMAGES against what
@@ -1617,9 +1621,11 @@ install-test:
 # registry.hive.blog/haf_stats/rewriter, so mirroring only postgrest-rewriter would ship
 # the first mirrored release with a rewriter a stock node cannot pull. The old name is
 # listed BEFORE the new one for the same reason: the template pushes the entries in
-# order and stops at the first failure, and postgrest-rewriter is a path that has never
-# been pushed to registry-upload.hive.blog (see #93) -- so if it is refused, the name
-# stock nodes actually pull is already there. Each entry is pulled from the GitLab
+# order and stops at the first failure, and NEITHER rewriter path exists on
+# registry.hive.blog yet (#93) -- so if only the old-name repository gets provisioned,
+# the name stock nodes actually pull still lands. Once haf_api_node defaults to the new
+# name (#83 step 2) that reasoning reverses and the order should flip. Each entry is
+# pulled from the GitLab
 # registry by tag, so each must be a name publish_tag pushes;
 # tests/unit/test_rewriter_image_names.py checks that the two lists agree.
 #
@@ -1783,8 +1789,9 @@ publish_images_skipped:
 #
 # THE FIRST RELEASE TAG MUST BE ON THE COMMIT THAT INTRODUCED THIS, OR LATER. A tag
 # pipeline runs the TAGGED commit's own .gitlab-ci.yml (this project sets no
-# ci_config_path), so tagging an older commit runs THAT commit's publish_tag -- which
-# publishes `rewriter` only, and goes green. An earlier revision of this comment said
+# ci_config_path), so tagging an older commit runs THAT commit's CI: one carrying #66's
+# publish_tag (added in dfddd87) publishes `rewriter` only and goes green; anything older
+# has no publish_tag, so nothing is published. An earlier revision of this comment said
 # such a tag would fail loudly in the pull below; it cannot, because this script never
 # runs for it. Nothing in this file can enforce the rule, which is why #83 records it.
 #
