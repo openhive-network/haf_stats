@@ -364,8 +364,10 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     # Everything this test reasons from -- pull-by-tag, the root-vs-subpath mapping,
     # push order and stop-at-first-failure -- is .docker_publish_job_template's
     # behaviour. A job that stopped extending it, or overrode the target project name,
-    # would leave both checks above passing against a mirror that no longer works
+    # would leave the checks above passing against a mirror that no longer works
     # this way.
     job = jobs["publish_images"]
     assert job.get("extends") == ".docker_publish_job_template", job.get("extends")
     assert "PUBLISH_PROJECT_NAME" not in (job.get("variables") or {}), job.get("variables")
+    # ...nor replaced the template's script while still extending it.
+    assert "script" not in job, job.get("script")
