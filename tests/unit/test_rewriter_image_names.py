@@ -19,6 +19,7 @@ changes the set.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -143,8 +144,24 @@ def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
         verbs.append(verb)
         if verb == "build":
             builds += 1
-            refs = [args[i + 1] for i, a in enumerate(args) if a == "-t"]
+            refs, context, i = [], [], 0
+            while i < len(args):
+                if args[i] in ("-t", "--tag"):
+                    refs.append(args[i + 1])
+                    i += 2
+                elif args[i] in ("-f", "--file", "--build-arg", "--label", "--target"):
+                    i += 2
+                elif args[i].startswith("-"):
+                    i += 1
+                else:
+                    context.append(args[i])
+                    i += 1
             assert refs, f"docker build with no -t: {call}"
+            # Exactly one build context. Re-wrapping the command (as a formatter might)
+            # can leave ` .` on the same line as a -t that gets deleted with it; docker
+            # then fails, but nothing here would notice without this.
+            assert len(context) == 1, (
+                f"docker build needs one build context, got {context}: {call}")
             for ref in refs:
                 local[ref] = f"built#{builds}"
         elif verb == "pull":
@@ -189,19 +206,21 @@ def _rewriter_refs(tag: str) -> set[str]:
 
 # --- the build ---------------------------------------------------------------------
 
-def test_docker_build_rewriter_pushes_every_name_from_one_build(jobs, tmp_path):
-    """One build, and exactly the rewriter references expected -- no more. BUILD_TIME is
-    baked into an OCI label, so a second build is a second digest."""
+def test_docker_build_rewriter_pushes_what_it_built(jobs, tmp_path):
+    """One build, exactly the rewriter references expected -- no more -- and each holds
+    that build. BUILD_TIME is baked into an OCI label, so a second build is a second
+    digest."""
     pushed, verbs = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
                                      CI_COMMIT_BRANCH="develop"))
     assert verbs.count("build") == 1, verbs
     assert set(pushed) == _rewriter_refs(SHA), sorted(pushed)
-    assert len(set(pushed.values())) == 1, f"the names hold different images: {pushed}"
+    assert set(pushed.values()) == {"built#1"}, (
+        f"pushed something it did not build: {pushed}")
 
 
 def test_docker_build_rewriter_pushes_nothing_on_a_tag(jobs, tmp_path):
-    """#66's property, which the extra push must not have broken: a tag pipeline rebuilds
-    and must not overwrite the SHA tags a develop pipeline already published."""
+    """#66's property: a tag pipeline rebuilds, and must not overwrite the SHA tags a
+    develop pipeline already published."""
     pushed, _ = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
                                  CI_COMMIT_TAG=TAG, CI_COMMIT_REF_PROTECTED="true"))
     assert pushed == {}, sorted(pushed)
@@ -325,10 +344,32 @@ def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path, name):
              CI_COMMIT_BRANCH="develop")
 
 
+def _repository(ref: str) -> str:
+    """`registry/path/name:tag` -> `registry/path/name`. A tag is a colon after the last
+    slash; a colon before it would be a registry port."""
+    head, slash, tail = ref.rpartition("/")
+    return head + slash + tail.split(":", 1)[0]
+
+
+# A docker push or tag naming the retired repository, tagged or not, however quoted.
+_RETIRED_PUSH = re.compile(
+    r"\bdocker\s+(?:push|tag)\b.*/" + re.escape(OLD) + r"(?::|[\s\"'}]|$)")
+
+
 def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
-    """#83 retired `haf_stats/rewriter`. The exact-set checks above already fail if it
-    comes back; this says so directly, at every site, so the failure names the cause."""
-    retired = f"/{OLD}:"
+    """#83 retired `haf_stats/rewriter`. Checked two ways, because each sees what the other
+    cannot.
+
+    RUN the three publishing jobs' scripts and compare the REPOSITORY of every pushed
+    reference -- so an untagged push (implicitly `:latest`) is caught too.
+
+    SCAN every job in the file -- script, before_script, after_script, variables and
+    rules[].variables -- for a docker push/tag of the retired repository, or an old-name
+    PUBLISH_IMAGES entry. The run only sees the `script:` of known jobs on the pipeline
+    types it simulates; an after_script, a new job, a branch-guarded push or a
+    rules:variables override of PUBLISH_IMAGES would get past it.
+    """
+    old_repo = f"{IMG}/{OLD}"
     runs = [("docker-build-rewriter", {"CI_COMMIT_BRANCH": "develop"}),
             ("publish_latest", {"CI_COMMIT_BRANCH": "develop"}),
             ("publish_tag", {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"})]
@@ -336,9 +377,30 @@ def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
         job_dir = tmp_path / job_name
         job_dir.mkdir()
         pushed, _ = _replay(_run_job(jobs[job_name], job_dir, **ci_vars))
-        assert not [ref for ref in pushed if retired in ref], (
-            f"{job_name} publishes the retired {OLD} name again: {sorted(pushed)}")
-    assert OLD not in jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
+        bad = sorted(ref for ref in pushed if _repository(ref) == old_repo)
+        assert not bad, f"{job_name} publishes the retired {OLD} name again: {bad}"
+
+    offenders = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for key in ("before_script", "script", "after_script"):
+            for item in job.get(key) or []:
+                if isinstance(item, str):
+                    offenders += [f"{job_name}.{key}: {line}"
+                                  for line in _shell_lines(item)
+                                  if _RETIRED_PUSH.search(line)]
+        variable_sets = [job] if job_name == "variables" else [job.get("variables") or {}]
+        variable_sets += [rule.get("variables") or {} for rule in job.get("rules") or []
+                          if isinstance(rule, dict)]
+        for variables in variable_sets:
+            if not isinstance(variables, dict):
+                continue
+            entries = str(variables.get("PUBLISH_IMAGES", "")).split()
+            if OLD in entries:
+                offenders.append(f"{job_name}: PUBLISH_IMAGES={entries}")
+    assert not offenders, (
+        "the retired rewriter name is published again:\n" + "\n".join(offenders))
 
 
 # --- the mirror --------------------------------------------------------------------
@@ -347,8 +409,7 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     """.docker_publish_job_template pulls each PUBLISH_IMAGES entry from the GitLab
     registry BY TAG. An entry publish_tag does not create fails the release; a name
     publish_tag creates but the mirror omits never reaches registry.hive.blog -- which
-    is where haf_api_node's default resolves the rewriter, under whichever name the
-    checkout carries."""
+    is where haf_api_node's default resolves the rewriter."""
     publish_images = jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
     project = "haf_stats"
     mirrored = {f"{IMG}:{TAG}" if entry == project else f"{IMG}/{entry}:{TAG}"

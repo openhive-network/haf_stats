@@ -829,6 +829,10 @@ docker-build:
 # $CI_REGISTRY_IMAGE/rewriter. The rename ran through a transition that published both
 # names from one image (!96), and the old name was retired once nothing in use still
 # resolved it: testapi and haf_api_node had moved, and no other node hosts haf_stats.
+# The one class this leaves behind is a haf_api_node checkout from before
+# haf_api_node!248, which still defaults to the old name: such a node that moves
+# HAF_STATS_VERSION past this change gets `manifest unknown` (haf_api_node's rewriter
+# has no build: fallback) and must switch to postgrest-rewriter.
 #
 # The old repository is left in the registry, frozen rather than deleted, so existing
 # references to it keep resolving. That includes `rewriter:latest`, which stays at the
@@ -1619,9 +1623,10 @@ install-test:
 # PREREQUISITE, NOW SATISFIED: the protected-tag rule `1.*` (create: Maintainers) was
 # added on 2026-09-10, so CI_COMMIT_REF_PROTECTED is "true" for a release tag and this
 # job can be created. It was absent when this MR was opened, and an earlier revision of
-# this comment still said so. Zero git tags exist yet, which is tracked separately --
-# the machinery here has never been executed. The tag must be the bare version
-# haf_api_node resolves (`1.28.6`), not `v1.28.6`.
+# this comment still said so. The first `1.*` tag, 1.29.0-rc2, was cut on 2026-09-16;
+# publish_images_skipped ran because the credentials are still missing (#93), so this
+# job itself has never executed. The tag must be the bare version haf_api_node resolves
+# (`1.29.0-rc2`), not `v1.29.0-rc2`.
 publish_images:
   extends: .docker_publish_job_template
   # Mirrors to an external registry; same no-cancel-mid-push reasoning as its siblings.
@@ -1762,11 +1767,11 @@ publish_images_skipped:
 # releasing something no lane ever ran.
 #
 # TAGGING AN OLDER COMMIT RUNS THAT COMMIT'S CI, not this file's (this project sets no
-# ci_config_path). A commit from before !96 (479815fd) publishes the retired `rewriter`
-# name only, or nothing at all, depending on which revision of this file it carries --
-# and still goes green. Nothing here can enforce "tag only recent commits"; #83 and #66
-# record the rule. The first release tag, 1.29.0-rc2, was cut on a commit after
-# 479815fd.
+# ci_config_path), and still goes green. A commit from before !96 (479815fd) publishes
+# the retired `rewriter` name only, or nothing at all; a commit from 479815fd up to the
+# change that retired it publishes BOTH names -- which includes the 1.29.0-rc2 line
+# (9126a4ae), so another rc cut from that line would publish the retired name again.
+# Nothing here can enforce "tag only commits that contain this"; #83 and #66 record it.
 #
 # Every name is tagged before any is pushed, which NARROWS the window rather
 # than closing it -- be precise, because an earlier revision of this comment claimed the
