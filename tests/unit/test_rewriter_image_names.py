@@ -1,32 +1,19 @@
-"""The rewriter image is published under BOTH names until #83 retires the old one.
+"""What every job that publishes the rewriter image actually publishes.
 
-haf_stats published its rewriter as `haf_stats/rewriter`; every sibling app publishes
-`postgrest-rewriter`. By the time that was noticed the old name had consumers -- testapi
-pinned it by SHA and haf_api_node's haf_stats.yaml defaulted to it (both moved on
-2026-09-16; older checkouts and pins still use it) -- so the rename runs
-through a transition: every publish site emits both names, from one image, until nothing
-still in use resolves the old name (#83 step 3), and then it is dropped everywhere at once.
+The rewriter is published as `haf_stats/postgrest-rewriter`, the name every sibling app
+uses. Until #83 it was `haf_stats/rewriter`; the rename ran through a transition that
+published both names from one image, and the old name is now retired -- published by
+no job at all.
 
-The failure this module exists for is a PARTIAL edit. Four jobs publish the rewriter
-(docker-build-rewriter, publish_latest, publish_tag, publish_images). Miss one and
-nothing goes red: the old name simply stops moving at that site, and whoever still
-follows it keeps running a stale rewriter without being told. The same is true of
-tagging the old name from the wrong image, which leaves two names that no longer mean
-the same thing.
-
-So these tests do not grep the YAML for names -- a name mentioned in a shell comment
-inside a block scalar would satisfy that. They RUN each job's script under bash with a
-stub `docker` that records every call, replay those calls to work out which image each
-pushed reference actually holds, and assert on the result.
-
-RETIRING THE OLD NAME is an edit to REWRITER_NAMES below, made together with the four
-sites. That is deliberate: it turns the last step of #83 into a visible change here
-rather than something that can happen by accident. That step freezes `rewriter:latest`,
-and pre-rename checkouts following `latest` then pair an old rewriter with a moving
-haf_stats:latest. Deleting the tag would not avoid it -- their compose file falls back
-to building the checkout's rewriter -- so #83 records it as a decision, not a test. If
-that decision is to keep moving `rewriter:latest`, publish_latest keeps OLD while the
-other sites drop it, and REWRITER_NAMES has to become per-job.
+Four jobs publish the rewriter (docker-build-rewriter, publish_latest, publish_tag,
+publish_images). A partial edit to any of them goes unnoticed in CI: a name that stops
+moving at one site, a reference tagged from the wrong image, a push swallowed by
+`|| true`. So these tests do not grep the YAML for names -- a name mentioned in a shell
+comment inside a block scalar would satisfy that. They RUN each job's script under bash
+with a stub `docker` that records every call, replay those calls to work out which image
+each pushed reference actually holds, and assert on the EXACT set of references pushed.
+That exactness is also what keeps the retired name retired: re-adding it anywhere
+changes the set.
 """
 
 from __future__ import annotations
@@ -49,14 +36,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".gitlab-ci.yml"
 
 NEW = "postgrest-rewriter"
+# Retired by #83 step 3. Kept only so the tests can say, explicitly, that it is gone.
 OLD = "rewriter"
-# The first entry is the name; the rest are aliases published from the same image.
-# #83's last step removes OLD from this tuple and from the four publish sites together.
-REWRITER_NAMES = (NEW, OLD)
-# PUBLISH_IMAGES order. The template pushes entries in order and stops at the first
-# refusal, so the rewriter name current haf_api_node pulls goes first: NEW, since
-# haf_api_node!248 (22e0a523). Before that it was OLD first.
-MIRROR_ORDER = ("haf_stats", NEW, OLD)
+# Every name the rewriter is published under. One, since #83 retired OLD.
+REWRITER_NAMES = (NEW,)
+# PUBLISH_IMAGES, exactly, in order: the template pushes entries in order and stops at
+# the first refusal.
+MIRROR_ORDER = ("haf_stats", NEW)
 
 IMG = "registry.example.com/hive/haf_stats"
 SHA = "0badc0de"
@@ -204,8 +190,8 @@ def _rewriter_refs(tag: str) -> set[str]:
 # --- the build ---------------------------------------------------------------------
 
 def test_docker_build_rewriter_pushes_every_name_from_one_build(jobs, tmp_path):
-    """Both names, one build. Two builds would be two digests: BUILD_TIME is baked into
-    an OCI label, so an old name built separately would stop being an alias."""
+    """One build, and exactly the rewriter references expected -- no more. BUILD_TIME is
+    baked into an OCI label, so a second build is a second digest."""
     pushed, verbs = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
                                      CI_COMMIT_BRANCH="develop"))
     assert verbs.count("build") == 1, verbs
@@ -303,7 +289,7 @@ def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job
             f"{ref} holds {pushed[ref]}, not the image published as {NEW}:{SHA}")
 
     # Tag everything, THEN push everything (#66): a failed pull must not leave a name
-    # half-moved. With a third reference it is easy to push one inside the tag loop.
+    # half-moved -- easy to break by pushing inside the tag loop.
     last_prep = max(i for i, v in enumerate(verbs) if v in ("pull", "tag"))
     first_push = min(i for i, v in enumerate(verbs) if v == "push")
     assert first_push > last_prep, f"a push precedes the last pull/tag: {verbs}"
@@ -323,8 +309,7 @@ def test_retag_jobs_stop_at_a_failed_docker_call(jobs, tmp_path, job_name, targe
     `|| true` on a push -- both plausible edits, e.g. to tolerate a SHA that predates #83
     -- passes every other test here. For real, the first releases the app under the new
     tag with no rewriter beside it; the second reports a release that did not happen.
-    Every push is failed in turn, the OLD name's included: that one silently not moving
-    is exactly the failure this module exists for. (`name` None is the app image.)
+    Every push is failed in turn. (`name` None is the app image.)
     """
     tag = SHA if verb == "pull" else target
     ref = f"{IMG}:{tag}" if name is None else f"{IMG}/{name}:{tag}"
@@ -338,6 +323,22 @@ def test_retag_jobs_stop_at_a_failed_docker_call(jobs, tmp_path, job_name, targe
 def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path, name):
     _run_job(jobs["docker-build-rewriter"], tmp_path, fail=f"push {IMG}/{name}:{SHA}",
              CI_COMMIT_BRANCH="develop")
+
+
+def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
+    """#83 retired `haf_stats/rewriter`. The exact-set checks above already fail if it
+    comes back; this says so directly, at every site, so the failure names the cause."""
+    retired = f"/{OLD}:"
+    runs = [("docker-build-rewriter", {"CI_COMMIT_BRANCH": "develop"}),
+            ("publish_latest", {"CI_COMMIT_BRANCH": "develop"}),
+            ("publish_tag", {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"})]
+    for job_name, ci_vars in runs:
+        job_dir = tmp_path / job_name
+        job_dir.mkdir()
+        pushed, _ = _replay(_run_job(jobs[job_name], job_dir, **ci_vars))
+        assert not [ref for ref in pushed if retired in ref], (
+            f"{job_name} publishes the retired {OLD} name again: {sorted(pushed)}")
+    assert OLD not in jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
 
 
 # --- the mirror --------------------------------------------------------------------
