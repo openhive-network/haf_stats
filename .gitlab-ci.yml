@@ -97,9 +97,9 @@ variables:
 
   # Paths detect_changes treats as not needing a re-sync. In THIS file that only sets
   # AUTO_SKIP_SYNC and AUTO_SKIP_BUILD, which nothing acts on: sync has no rules, the
-  # template's cache lookup just prints a banner for them, and the cache key includes
-  # the commit SHA -- so a docs-only commit still runs sync in full. This line used to
-  # say it skipped sync.
+  # template's cache lookup only prints a banner for AUTO_SKIP_SYNC (AUTO_SKIP_BUILD is
+  # never read), and the cache key includes the commit SHA -- so a docs-only commit
+  # still runs sync in full. This line used to say it skipped sync.
   HAF_APP_SKIP_PATTERNS: '^tests/|^docs/|\.md$|^README|^CHANGELOG|^LICENSE|^CLAUDE|^\.gitlab-ci\.yml$'
 
   # QUICK_TEST=true + QUICK_TEST_HAF_COMMIT=<sha> reuses an existing cache and
@@ -841,7 +841,9 @@ docker-build:
 # earlier revision said it should be deleted for this reason): their compose file has
 # had a build: stanza on the rewriter since #61, so a missing image is quietly built
 # from the checkout instead. Whether to keep moving `rewriter:latest` for longer is a
-# decision for that step; #83 records it.
+# decision for that step, and #83 records it -- choosing it means publish_latest keeps
+# the old name while the other three sites drop it, so REWRITER_NAMES in the test has to
+# become per-job at that point rather than one tuple.
 #
 # tests/unit/test_rewriter_image_names.py RUNS this job's, publish_latest's and
 # publish_tag's scripts against a stub docker, checks PUBLISH_IMAGES against what
@@ -1789,9 +1791,11 @@ publish_images_skipped:
 #
 # THE FIRST RELEASE TAG MUST BE ON THE COMMIT THAT INTRODUCED THIS, OR LATER. A tag
 # pipeline runs the TAGGED commit's own .gitlab-ci.yml (this project sets no
-# ci_config_path), so tagging an older commit runs THAT commit's CI: one carrying #66's
-# publish_tag (added in dfddd87) publishes `rewriter` only and goes green; anything older
-# has no publish_tag, so nothing is published. An earlier revision of this comment said
+# ci_config_path), so tagging an older commit runs THAT commit's CI, which publishes the
+# old name only or nothing at all, depending on which revision of this file it carries --
+# there have been three: no tag publishing, tag arms on the build jobs (#66's early
+# branch commits), then publish_tag. Either way it can go green without
+# postgrest-rewriter. An earlier revision of this comment said
 # such a tag would fail loudly in the pull below; it cannot, because this script never
 # runs for it. Nothing in this file can enforce the rule, which is why #83 records it.
 #

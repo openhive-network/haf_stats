@@ -23,7 +23,9 @@ sites. That is deliberate: it turns the last step of #83 into a visible change h
 rather than something that can happen by accident. That step freezes `rewriter:latest`,
 and pre-rename checkouts following `latest` then pair an old rewriter with a moving
 haf_stats:latest. Deleting the tag would not avoid it -- their compose file falls back
-to building the checkout's rewriter -- so #83 records it as a decision, not a test.
+to building the checkout's rewriter -- so #83 records it as a decision, not a test. If
+that decision is to keep moving `rewriter:latest`, publish_latest keeps OLD while the
+other sites drop it, and REWRITER_NAMES has to become per-job.
 """
 
 from __future__ import annotations
