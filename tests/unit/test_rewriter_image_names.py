@@ -2,9 +2,10 @@
 
 haf_stats published its rewriter as `haf_stats/rewriter`; every sibling app publishes
 `postgrest-rewriter`. By the time that was noticed the old name had consumers -- testapi
-pins it by SHA and haf_api_node's haf_stats.yaml defaults to it -- so the rename runs
-through a transition: every publish site emits both names, from one image, until those
-consumers move, and then the old name is dropped everywhere at once.
+pinned it by SHA and haf_api_node's haf_stats.yaml defaulted to it (both moved on
+2026-09-16; older checkouts and pins still use it) -- so the rename runs
+through a transition: every publish site emits both names, from one image, until nothing
+still in use resolves the old name (#83 step 3), and then it is dropped everywhere at once.
 
 The failure this module exists for is a PARTIAL edit. Four jobs publish the rewriter
 (docker-build-rewriter, publish_latest, publish_tag, publish_images). Miss one and
@@ -53,9 +54,9 @@ OLD = "rewriter"
 # #83's last step removes OLD from this tuple and from the four publish sites together.
 REWRITER_NAMES = (NEW, OLD)
 # PUBLISH_IMAGES order. The template pushes entries in order and stops at the first
-# refusal, so the rewriter name stock haf_api_node nodes pull goes first. #83 step 2
-# (haf_api_node defaulting to NEW) flips the two.
-MIRROR_ORDER = ("haf_stats", OLD, NEW)
+# refusal, so the rewriter name current haf_api_node pulls goes first: NEW, since
+# haf_api_node!248 (22e0a523). Before that it was OLD first.
+MIRROR_ORDER = ("haf_stats", NEW, OLD)
 
 IMG = "registry.example.com/hive/haf_stats"
 SHA = "0badc0de"
@@ -345,7 +346,8 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     """.docker_publish_job_template pulls each PUBLISH_IMAGES entry from the GitLab
     registry BY TAG. An entry publish_tag does not create fails the release; a name
     publish_tag creates but the mirror omits never reaches registry.hive.blog -- which
-    is where haf_api_node's default resolves the old name."""
+    is where haf_api_node's default resolves the rewriter, under whichever name the
+    checkout carries."""
     publish_images = jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
     project = "haf_stats"
     mirrored = {f"{IMG}:{TAG}" if entry == project else f"{IMG}/{entry}:{TAG}"
@@ -359,3 +361,13 @@ def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     # ORDER too, which the set comparison above cannot see. See MIRROR_ORDER.
     assert tuple(publish_images) == MIRROR_ORDER, publish_images
     assert len(publish_images) == len(set(publish_images)), publish_images
+    # Everything this test reasons from -- pull-by-tag, the root-vs-subpath mapping,
+    # push order and stop-at-first-failure -- is .docker_publish_job_template's
+    # behaviour. A job that stopped extending it, or overrode the target project name,
+    # would leave the checks above passing against a mirror that no longer works
+    # this way.
+    job = jobs["publish_images"]
+    assert job.get("extends") == ".docker_publish_job_template", job.get("extends")
+    assert "PUBLISH_PROJECT_NAME" not in (job.get("variables") or {}), job.get("variables")
+    # ...nor replaced the template's script while still extending it.
+    assert "script" not in job, job.get("script")
