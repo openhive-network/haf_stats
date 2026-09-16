@@ -831,10 +831,12 @@ docker-build:
 #     $CI_REGISTRY_IMAGE/rewriter             the old name, same image
 #
 # This repo published `rewriter`, and by the time the mismatch was noticed that name
-# had consumers: testapi pins it by SHA, and haf_api_node's haf_stats.yaml defaults to
-# registry.hive.blog/haf_stats/rewriter. Renaming outright would break both on their
-# next bump. So all four publish sites -- this job, publish_latest, publish_tag and
-# publish_images -- emit both names from ONE image until those consumers have moved,
+# had consumers: testapi pinned it by SHA, and haf_api_node's haf_stats.yaml defaulted to
+# registry.hive.blog/haf_stats/rewriter (both moved to the new name on 2026-09-16, #83
+# step 2 -- but older haf_api_node checkouts and SHA pins still use the old one).
+# Renaming outright would have broken both on their next bump. So all four publish
+# sites -- this job, publish_latest, publish_tag and publish_images -- emit both names
+# from ONE image until those consumers have moved,
 # and then the old name leaves all four together. That freezes `rewriter:latest`, and
 # checkouts from before the rename -- whose compose default it is -- then pair an old
 # rewriter with a moving haf_stats:latest. Deleting the tag does NOT prevent that (an
@@ -1611,25 +1613,25 @@ install-test:
 # QUICK_TEST / SKIP_PRODUCTION_DEPLOY / SKIP_DOCKER_PUBLISH escape hatches.
 #
 # PUBLISH_IMAGES entries that equal $CI_PROJECT_NAME are treated as the ROOT image and
-# everything else as a subpath, so "haf_stats rewriter postgrest-rewriter" publishes:
+# everything else as a subpath, so "haf_stats postgrest-rewriter rewriter" publishes:
 #
 #     registry.gitlab.syncad.com/hive/haf_stats:<tag>                    -> registry-upload.hive.blog/haf_stats:<tag>
-#     registry.gitlab.syncad.com/hive/haf_stats/rewriter:<tag>           -> registry-upload.hive.blog/haf_stats/rewriter:<tag>
 #     registry.gitlab.syncad.com/hive/haf_stats/postgrest-rewriter:<tag> -> registry-upload.hive.blog/haf_stats/postgrest-rewriter:<tag>
+#     registry.gitlab.syncad.com/hive/haf_stats/rewriter:<tag>           -> registry-upload.hive.blog/haf_stats/rewriter:<tag>
 #
-# which is the flat layout haf_api_node resolves -- today for the OLD rewriter name only;
-# moving it to postgrest-rewriter is step 2 of #83. BOTH rewriter names are mirrored,
-# not just the new one (#83): haf_api_node's haf_stats.yaml still defaults to
-# registry.hive.blog/haf_stats/rewriter, so mirroring only postgrest-rewriter would ship
-# the first mirrored release with a rewriter a stock node cannot pull. The old name is
-# listed BEFORE the new one for the same reason: the template pushes the entries in
-# order and stops at the first failure, and NEITHER rewriter path exists on
-# registry.hive.blog yet (#93) -- so if only the old-name repository gets provisioned,
-# the name stock nodes actually pull still lands. Once haf_api_node defaults to the new
-# name (#83 step 2) that reasoning reverses and the order should flip. Each entry is
-# pulled from the GitLab
-# registry by tag, so each must be a name publish_tag pushes;
-# tests/unit/test_rewriter_image_names.py checks that the two lists agree.
+# which is the flat layout haf_api_node resolves. Since haf_api_node!248 (22e0a523) its
+# haf_stats.yaml defaults to postgrest-rewriter; checkouts from before that still
+# default to the old `rewriter`. So BOTH names are mirrored during #83's transition:
+# dropping either would ship a mirrored release with a rewriter some stock nodes cannot
+# pull.
+#
+# ORDER matters because the template pushes the entries in order and stops at the first
+# failure, and NEITHER rewriter path exists on registry.hive.blog yet (#93). The name
+# current haf_api_node pulls goes first, so a registry that accepts only one of the two
+# still gets that one. Until haf_api_node!248 the old name went first, for the same
+# reason. Each entry is pulled from the GitLab registry by tag, so each must be a name
+# publish_tag pushes; tests/unit/test_rewriter_image_names.py checks that the two lists
+# agree, and pins the order.
 #
 # The template pulls BY TAG, not by SHA, so it depends on ${CI_COMMIT_TAG} existing in
 # the GitLab registry -- which publish_tag creates, in the release stage. (An earlier
@@ -1666,7 +1668,7 @@ publish_images:
   # pipeline does not create is the config error that made the first revision unable to
   # create a pipeline at all. Having no list cannot make either mistake.
   variables:
-    PUBLISH_IMAGES: "haf_stats rewriter postgrest-rewriter"
+    PUBLISH_IMAGES: "haf_stats postgrest-rewriter rewriter"
   # GATED ON THE CREDENTIALS EXISTING (hive/haf_stats#66).
   #
   # registry-upload.hive.blog needs BLOG_REGISTRY_USER / BLOG_REGISTRY_PASSWORD, and
