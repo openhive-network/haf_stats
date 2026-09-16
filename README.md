@@ -162,16 +162,35 @@ docker compose up -d
 > service with a `build:` stanza, so it used to fall back to building your working
 > tree when the pull failed. It now pulls instead — edit the rewriter and run the
 > documented command and your change is silently absent unless you pass `--build`. The
-> **development** stack above is worse: `docker-compose-test.yml` references
-> `${HAF_STATS_VERSION}` with no default and no `build:` at all, so it fails the same way
-> with nothing to fall back on.
+> **development** stack above has no rewriter and no `build:`; it reads
+> `${HAF_STATS_VERSION}` from `.env` with no default of its own, so it follows `latest`
+> the same way, and a pin that does not resolve has nothing to fall back on.
 >
-> Until [#66](https://gitlab.syncad.com/hive/haf_stats/-/issues/66) adds release tagging,
-> pin a published SHA — one variable now covers the app image and the rewriter:
+> To pin, one variable covers the app image and the rewriter:
 >
 > ```bash
 > HAF_STATS_VERSION=<8-hex-sha> docker compose up -d
 > ```
+>
+> **The rewriter image was renamed** from `haf_stats/rewriter` to
+> `haf_stats/postgrest-rewriter`, the name the sibling apps use
+> ([#83](https://gitlab.syncad.com/hive/haf_stats/-/issues/83)). CI publishes both names
+> for now and the compose default uses the new one. A SHA built **before** the rename
+> exists only under the old name, so pinning one of those needs the rewriter set
+> explicitly — the whole reference, tag included:
+>
+> ```bash
+> HAF_STATS_VERSION=<old-sha> \
+> HAF_STATS_REWRITER_IMAGE=registry.gitlab.syncad.com/hive/haf_stats/rewriter:<old-sha> \
+>   docker compose up -d
+> ```
+>
+> Without it the rewriter pull fails and Compose quietly builds your working tree instead.
+>
+> This is **this repo's** Compose file, where `HAF_STATS_REWRITER_IMAGE` is the whole
+> image reference. haf_api_node's variable of the same name takes **no tag** — its
+> `haf_stats.yaml` appends `:${HAF_STATS_VERSION}` — so there the value is
+> `registry.gitlab.syncad.com/hive/haf_stats/rewriter`, without `:<old-sha>`.
 
 ### Rebuilding account cohorts
 
