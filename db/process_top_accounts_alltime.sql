@@ -70,10 +70,63 @@ GRANT SELECT ON haf_stats_backend.account_financial_alltime TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Refresh
 --
--- Recompute both tables from the monthly rollups in one call (REPLACE semantics via
--- TRUNCATE + INSERT inside the function's single transaction, so readers never see a partial
--- state). Summing all monthly rows == genesis..(last monthly refresh), i.e. as-of the last
--- ~1200-block boundary. Runs daily via pg_cron + once at install.
+-- Recompute both tables from the monthly rollups in one call, inside the function's single
+-- transaction, so readers never see a partial state. Summing all monthly rows ==
+-- genesis..(last monthly refresh), i.e. as-of the last ~1200-block boundary. Runs daily via
+-- pg_cron + once at every install.
+--
+-- MERGE THE DIFFERENCE, NEVER TRUNCATE. (#95) This used to be TRUNCATE + INSERT, and TRUNCATE
+-- takes ACCESS EXCLUSIVE until commit. A reader arriving during the refresh waited for the
+-- commit: transaction_count from the first TRUNCATE (up to ~67-68 s nightly on testapi, and 81 s
+-- during the 2026-09-16 install, which runs the same refresh), the financial metrics from the
+-- second (on testapi one waited 48.4 s for the lock). That is every get_network_top_accounts
+-- metric except hp_balance, bounded date ranges included -- their queries name the all-time
+-- table in an arm a one-time filter skips, and a skipped arm is still locked. Since #94 gave
+-- haf_stats_user a 30 s statement_timeout, a request whose wait plus run time passes 30 s is
+-- cancelled (HTTP 500).
+--
+-- Now one statement per table computes the fresh totals and applies only what differs:
+-- UPDATE the keys whose values changed, INSERT the new keys, DELETE the keys the rollups no
+-- longer have. Row changes take ROW EXCLUSIVE, which does not conflict with a reader's
+-- ACCESS SHARE, so readers do not wait for it; they see the previous totals until commit.
+--
+-- Why not DELETE everything + INSERT, which would not block readers either: few keys change
+-- between refreshes (on 2026-09-15, 16,133 of account_txn_alltime's 2.04M accounts were active,
+-- 0.79%, and 12,832 of account_financial_alltime's 1.85M keys, 0.69%). A/B on PostgreSQL 14 at
+-- 1/4 of testapi's size with 1% of keys changed, starting from a vacuumed table, on a server with
+-- shared_buffers 512MB, work_mem 64MB and synchronous_commit off (so refresh times will not carry
+-- over to testapi as-is); "worst read" is the slowest of a top-25 account_id read of
+-- account_financial_alltime repeated every 0.25 s through the refresh, and dead tuples and size
+-- are that table's:
+--
+--                          refresh        worst read   dead tuples after   size after
+--   TRUNCATE + INSERT      13.2 s         8.3 s        0                   165 MB
+--   DELETE all + INSERT    16.6 s         2 ms         100 %               254 MB
+--   this merge             7.8-8.4 s      2-4 ms       1 %                 166 MB
+--
+-- At default autovacuum settings (a vacuum once dead rows exceed 20% of live rows + 50) that ~1%
+-- a day accumulates for weeks before a vacuum, so expect these tables to carry up to ~20% dead
+-- rows. After a rollup repair that changes most totals, the merge rewrites most rows like
+-- DELETE + INSERT does; VACUUM both tables afterwards.
+--
+-- All sub-statements of a data-modifying WITH run against one snapshot: the INSERT's
+-- NOT EXISTS sees the table as it was before the statement, and the three arms touch
+-- disjoint keys.
+--
+-- SHARE ROW EXCLUSIVE conflicts with itself and with every writer, and with VACUUM/ANALYZE
+-- (SHARE UPDATE EXCLUSIVE) and CREATE INDEX (SHARE, so a reinstall's CREATE INDEX IF NOT EXISTS
+-- above waits for a running refresh) -- but not with readers. Without it, two refreshes that
+-- overlap (pg_cron's 03:30 run and an install) can both INSERT the same new key, and one fails
+-- on the primary key. With it, the second one waits for the first -- and, for callers in READ
+-- COMMITTED (pg_cron and install_app.sh are), its WITH statements then see the first one's commit.
+--
+-- Readers only queue behind a lock that conflicts with theirs, i.e. ACCESS EXCLUSIVE. Any DDL
+-- added to this file that takes it on these tables (most ALTER TABLE forms, even with IF NOT
+-- EXISTS) would wait for a running refresh with every reader queued behind it; give such DDL a
+-- lock_timeout.
+--
+-- SUM(...)::BIGINT is the column type; the old INSERT cast the numeric sum implicitly, and an
+-- out-of-range total still raises the same error.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_top_accounts_alltime;
@@ -81,21 +134,140 @@ CREATE OR REPLACE FUNCTION haf_stats_app.refresh_top_accounts_alltime()
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    _txn_changed BIGINT;
+    _txn_added BIGINT;
+    _txn_removed BIGINT;
+    _fin_changed BIGINT;
+    _fin_added BIGINT;
+    _fin_removed BIGINT;
 BEGIN
-    TRUNCATE haf_stats_backend.account_txn_alltime;
-    INSERT INTO haf_stats_backend.account_txn_alltime (account_id, ops)
-    SELECT m.account_id, SUM(m.ops)
-    FROM haf_stats_backend.active_users_account_monthly m
-    WHERE m.op_class = -1
-    GROUP BY m.account_id;
+    LOCK TABLE haf_stats_backend.account_txn_alltime, haf_stats_backend.account_financial_alltime
+    IN SHARE ROW EXCLUSIVE MODE;
 
-    TRUNCATE haf_stats_backend.account_financial_alltime;
-    INSERT INTO haf_stats_backend.account_financial_alltime
+    WITH fresh AS MATERIALIZED (
+        SELECT
+            m.account_id,
+            SUM(m.ops)::BIGINT AS ops
+        FROM haf_stats_backend.active_users_account_monthly AS m
+        WHERE m.op_class = -1
+        GROUP BY m.account_id
+    ),
+
+    changed AS (
+        UPDATE haf_stats_backend.account_txn_alltime AS t
+        SET ops = f.ops
+        FROM fresh AS f
+        WHERE
+            t.account_id = f.account_id
+            AND t.ops IS DISTINCT FROM f.ops
+        RETURNING 1
+    ),
+
+    added AS (
+        INSERT INTO haf_stats_backend.account_txn_alltime (account_id, ops)
+        SELECT
+            f.account_id,
+            f.ops
+        FROM fresh AS f
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM haf_stats_backend.account_txn_alltime AS t
+            WHERE t.account_id = f.account_id
+        )
+        RETURNING 1
+    ),
+
+    removed AS (
+        DELETE FROM haf_stats_backend.account_txn_alltime AS t
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM fresh AS f
+            WHERE f.account_id = t.account_id
+        )
+        RETURNING 1
+    )
+
+    SELECT
+        (SELECT COUNT(*) FROM changed),
+        (SELECT COUNT(*) FROM added),
+        (SELECT COUNT(*) FROM removed)
+    INTO _txn_changed, _txn_added, _txn_removed;
+
+    WITH fresh AS MATERIALIZED (
+        SELECT
+            m.account_id,
+            m.category,
+            m.direction,
+            SUM(m.hive_nai)::BIGINT AS hive_nai,
+            SUM(m.hbd_nai)::BIGINT AS hbd_nai,
+            SUM(m.vests_nai)::BIGINT AS vests_nai,
+            SUM(m.op_count)::BIGINT AS op_count
+        FROM haf_stats_backend.account_financial_monthly AS m
+        GROUP BY m.account_id, m.category, m.direction
+    ),
+
+    changed AS (
+        UPDATE haf_stats_backend.account_financial_alltime AS t
+        SET
+            hive_nai = f.hive_nai,
+            hbd_nai = f.hbd_nai,
+            vests_nai = f.vests_nai,
+            op_count = f.op_count
+        FROM fresh AS f
+        WHERE
+            t.account_id = f.account_id
+            AND t.category = f.category
+            AND t.direction = f.direction
+            AND (t.hive_nai, t.hbd_nai, t.vests_nai, t.op_count)
+            IS DISTINCT FROM (f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count)
+        RETURNING 1
+    ),
+
+    added AS (
+        INSERT INTO haf_stats_backend.account_financial_alltime
         (account_id, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
-    SELECT m.account_id, m.category, m.direction,
-           SUM(m.hive_nai), SUM(m.hbd_nai), SUM(m.vests_nai), SUM(m.op_count)
-    FROM haf_stats_backend.account_financial_monthly m
-    GROUP BY m.account_id, m.category, m.direction;
+        SELECT
+            f.account_id,
+            f.category,
+            f.direction,
+            f.hive_nai,
+            f.hbd_nai,
+            f.vests_nai,
+            f.op_count
+        FROM fresh AS f
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM haf_stats_backend.account_financial_alltime AS t
+            WHERE
+                t.account_id = f.account_id
+                AND t.category = f.category
+                AND t.direction = f.direction
+        )
+        RETURNING 1
+    ),
+
+    removed AS (
+        DELETE FROM haf_stats_backend.account_financial_alltime AS t
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM fresh AS f
+            WHERE
+                f.account_id = t.account_id
+                AND f.category = t.category
+                AND f.direction = t.direction
+        )
+        RETURNING 1
+    )
+
+    SELECT
+        (SELECT COUNT(*) FROM changed),
+        (SELECT COUNT(*) FROM added),
+        (SELECT COUNT(*) FROM removed)
+    INTO _fin_changed, _fin_added, _fin_removed;
+
+    RAISE NOTICE 'haf_stats: all-time top accounts refreshed - account_txn_alltime % changed, % added, % removed; account_financial_alltime % changed, % added, % removed',
+        _txn_changed, _txn_added, _txn_removed, _fin_changed, _fin_added, _fin_removed;
 END;
 $$;
 
