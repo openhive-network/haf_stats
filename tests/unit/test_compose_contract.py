@@ -410,8 +410,10 @@ def test_the_rewriter_serves_the_public_paths(services):
     svc = services[REWRITER]
 
     # It must be the REWRITER image. Repointed at the app image, `up` starts the wrong
-    # container on the front-door port.
-    assert "/rewriter:" in svc["image"], svc["image"]
+    # container on the front-door port. And under its NEW name (#83): CI still publishes
+    # haf_stats/rewriter as an alias, but only until consumers move, and a default left
+    # on the old name would be the one thing still pulling it when it is retired.
+    assert "}/haf_stats/postgrest-rewriter:" in svc["image"], svc["image"]
 
     # build: matters on its own, though NOT for the reason this comment used to give.
     # It said "CI publishes SHA tags only, never :latest, so the default image reference
