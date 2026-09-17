@@ -104,8 +104,8 @@ GRANT SELECT ON haf_stats_backend.community_role TO haf_stats_user;
 --   1. Registration — set-based, from the virtual account_created_operation. That vop
 --      fires exactly once per account for EVERY creation mechanism (account_create /
 --      _with_delegation / create_claimed_account / pow mining), which is why
---      process_account_cohorts.sql:183-190 drives off it too rather than the explicit
---      *_create ops.
+--      Step 1 of haf_stats_app.process_account_cohorts() (process_account_cohorts.sql)
+--      drives off it too rather than the explicit *_create ops.
 --   2. Roles + titles — row-at-a-time in op order. A setRole granting admin must be
 --      visible to a later updateProps in the SAME batch, so this one cannot be
 --      set-based. It is affordable because the loop only ever visits custom_json ops

@@ -122,8 +122,11 @@ GRANT SELECT ON haf_stats_backend.account_financial_alltime TO haf_stats_user;
 --
 -- Readers only queue behind a lock that conflicts with theirs, i.e. ACCESS EXCLUSIVE. Any DDL
 -- added to this file that takes it on these tables (most ALTER TABLE forms, even with IF NOT
--- EXISTS) would wait for a running refresh with every reader queued behind it; give such DDL a
--- lock_timeout.
+-- EXISTS) would wait for a running refresh with every reader queued behind it. Route it through
+-- haf_stats_app.apply_schema_migration (db/schema_migration.sql), which gives it a catalog test
+-- and a lock_timeout; tests/unit/test_ddl_lock_guard.py rejects an ALTER TABLE anywhere else.
+-- (Such a call also has to run BEFORE this file: tests/ci_lock_holder.sql uses the re-creation
+-- of refresh_top_accounts_alltime() below as its "past every migration" marker.)
 --
 -- SUM(...)::BIGINT is the column type; the old INSERT cast the numeric sum implicitly, and an
 -- out-of-range total still raises the same error.

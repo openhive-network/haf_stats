@@ -190,6 +190,10 @@ if [ -f "${SCRIPT_DIR}/../db/version.sql" ]; then
     run_sql_file "${SCRIPT_DIR}/../db/version.sql"
 fi
 
+# 2c. Shared helper for the processors' one-time schema upgrades (#96). Loaded before them so
+#     every ALTER TABLE can ask the catalog first and take no lock when it has nothing to do.
+run_sql_file "${SCRIPT_DIR}/../db/schema_migration.sql"
+
 # 3. Block processors
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"

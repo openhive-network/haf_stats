@@ -94,9 +94,43 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_cohort_retention (
 -- Upgrade path for existing deployments: the eligible_at_Nd disclosure columns
 -- were added alongside rolling-to-180 retention; back-fill the schema on tables
 -- that predate them.
-ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_7d INT;
-ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT;
-ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node that already has these columns (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_7d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_7d INT',
+    'account_cohort_retention.eligible_at_7d'
+);
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_30d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT',
+    'account_cohort_retention.eligible_at_30d'
+);
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_90d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT',
+    'account_cohort_retention.eligible_at_90d'
+);
 
 GRANT SELECT ON haf_stats_backend.account_cohort_retention TO haf_stats_user;
 

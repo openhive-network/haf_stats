@@ -63,8 +63,20 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_daily (
 );
 
 -- Idempotent upgrade for installs that created the table before ops existed.
-ALTER TABLE haf_stats_backend.active_users_daily
-ADD COLUMN IF NOT EXISTS ops INT NOT NULL DEFAULT 0;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node that already has this column (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.active_users_daily'::REGCLASS
+            AND a.attname = 'ops'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.active_users_daily
+     ADD COLUMN IF NOT EXISTS ops INT NOT NULL DEFAULT 0',
+    'active_users_daily.ops'
+);
 
 GRANT SELECT ON haf_stats_backend.active_users_daily TO haf_stats_user;
 

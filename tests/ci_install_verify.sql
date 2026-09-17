@@ -1,6 +1,7 @@
 -- What a real install_app.sh run must have left behind. (#84)
 --
--- Runs after TWO installs against the stub database (docker/docker-compose-ci-install.yml).
+-- Runs after the three installs since reset-app -- install, install-again, install-under-lock --
+-- against the stub database (docker/docker-compose-ci-install.yml).
 -- psql runs it with ON_ERROR_STOP=1, so a RAISE EXCEPTION here fails the job.
 --
 -- Two kinds of assertion, and the second is the one that keeps this lane honest:
@@ -57,11 +58,11 @@ BEGIN
         RAISE EXCEPTION 'install: app_config holds % rows, expected exactly 1', _n;
     END IF;
 
-    -- app_status must also be a singleton after TWO installs -- the seed is guarded by
-    -- WHERE NOT EXISTS, and a regression there shows up only on the second run.
+    -- app_status must also be a singleton after three installs -- the seed is guarded by
+    -- WHERE NOT EXISTS, and a regression there shows up only on a repeat run.
     SELECT count(*) INTO _n FROM haf_stats_app.app_status;
     IF _n <> 1 THEN
-        RAISE EXCEPTION 'install: app_status holds % rows after two installs, expected 1', _n;
+        RAISE EXCEPTION 'install: app_status holds % rows after three installs, expected 1', _n;
     END IF;
 
     -- The #70 regression class this lane was partly built for: step 6 of install_app.sh
@@ -308,5 +309,105 @@ BEGIN
     RAISE NOTICE 'shim enforcement verified: duplicate create and attached-seed both refused';
 END
 $shim$;
+
+-- The upgrade branch of the guarded migrations actually ran. (#96)
+--
+-- tests/ci_break_schema.sql undid all 14 guarded upgrades before install-again: nine columns
+-- dropped, rc_estimated put back, the pre-canonical income/expense CHECK restored NOT VALID, and
+-- one 'income' and one 'incoming' row written. Without break-schema only one of the 14 DDL strings
+-- (comment_registry.community's ADD COLUMN) ever ran in CI, so a typo in any other, or a catalog
+-- test that is wrongly always-FALSE, shipped green. install-under-lock then proves the opposite
+-- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
+DO $upgraded$
+DECLARE
+    _wrong TEXT;
+    _def TEXT;
+BEGIN
+    SELECT string_agg(format('%s.%s', t.rel, t.col), ', ') INTO _wrong
+    FROM (
+        VALUES
+        ('haf_stats_backend.active_users_daily', 'ops', TRUE),
+        ('haf_stats_backend.comment_registry', 'community', TRUE),
+        ('haf_stats_backend.account_custom_json_daily', 'op_bytes', TRUE),
+        ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', FALSE),
+        ('haf_stats_backend.account_cohort_retention', 'eligible_at_7d', TRUE),
+        ('haf_stats_backend.account_cohort_retention', 'eligible_at_30d', TRUE),
+        ('haf_stats_backend.account_cohort_retention', 'eligible_at_90d', TRUE),
+        ('haf_stats_backend.author_cohort_retention', 'eligible_at_30d', TRUE),
+        ('haf_stats_backend.author_cohort_retention', 'eligible_at_90d', TRUE),
+        ('haf_stats_backend.author_cohort_retention', 'eligible_at_180d', TRUE)
+    ) AS t (rel, col, present)
+    WHERE EXISTS (
+        SELECT 1 FROM pg_attribute AS a
+        WHERE a.attrelid = t.rel::REGCLASS AND a.attname = t.col AND NOT a.attisdropped
+    ) <> t.present;
+    IF _wrong IS NOT NULL THEN
+        RAISE EXCEPTION 'install: the guarded upgrades did not repair what break-schema undid: %', _wrong;
+    END IF;
+
+    -- ... and break-schema really did undo them on THIS database: every table it dropped a column
+    -- from still carries the dropped attribute. Without this, a lane where break-schema never ran
+    -- would satisfy every assertion above.
+    SELECT string_agg(t.rel, ', ') INTO _wrong
+    FROM (
+        VALUES
+        ('haf_stats_backend.active_users_daily'),
+        ('haf_stats_backend.comment_registry'),
+        ('haf_stats_backend.account_custom_json_daily'),
+        ('haf_stats_backend.account_cohort_retention'),
+        ('haf_stats_backend.author_cohort_retention')
+    ) AS t (rel)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pg_attribute AS a WHERE a.attrelid = t.rel::REGCLASS AND a.attisdropped
+    );
+    IF _wrong IS NOT NULL THEN
+        RAISE EXCEPTION 'install: no dropped column on % - break-schema did not run against this database', _wrong;
+    END IF;
+
+    SELECT pg_get_constraintdef(c.oid) INTO _def
+    FROM pg_constraint AS c
+    WHERE c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+      AND c.conname = 'account_financial_daily_direction_check'
+      AND c.convalidated;
+    IF _def IS NULL THEN
+        RAISE EXCEPTION 'install: account_financial_daily has no VALIDATED direction CHECK - the guarded constraint swap did not run';
+    END IF;
+    IF _def NOT LIKE '%''incoming''%''outgoing''%' OR _def LIKE '%''income''%' THEN
+        RAISE EXCEPTION 'install: account_financial_daily still carries a pre-canonical direction CHECK: %', _def;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM haf_stats_backend.account_financial_daily
+        WHERE account_id = 900901 AND direction = 'income'
+    ) THEN
+        RAISE EXCEPTION 'install: the pre-canonical income row break-schema wrote is still there - the guarded DELETE did not run';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM haf_stats_backend.account_financial_daily
+        WHERE account_id = 900901 AND direction = 'incoming'
+    ) THEN
+        RAISE EXCEPTION 'install: the canonical incoming row break-schema wrote is gone - the guarded DELETE removed a row it must keep';
+    END IF;
+
+    RAISE NOTICE 'install verified: install-again re-applied all 14 guarded upgrades (9 columns back, rc_estimated gone, canonical CHECK validated, the income row deleted and the incoming row kept)';
+END
+$upgraded$;
+
+-- apply_schema_migration hands back the caller's lock_timeout. (#96)
+--
+-- It sets 3 s for each attempt with set_config(..., TRUE), which would otherwise last until the
+-- END of the caller's transaction: every install caller is a single autocommit statement today,
+-- but a caller inside a larger transaction would give everything after it a 3 s lock_timeout.
+DO $restore$
+BEGIN
+    PERFORM set_config('lock_timeout', '7s', TRUE);
+    PERFORM haf_stats_app.apply_schema_migration(TRUE, 'SELECT 1', 'ci probe: lock_timeout hand-back');
+    IF current_setting('lock_timeout') <> '7s' THEN
+        RAISE EXCEPTION 'install: apply_schema_migration left lock_timeout at % for the rest of its caller''s transaction (expected the caller''s 7s)',
+            current_setting('lock_timeout');
+    END IF;
+    RAISE NOTICE 'install verified: apply_schema_migration restored the caller''s lock_timeout';
+END
+$restore$;
 
 ROLLBACK;

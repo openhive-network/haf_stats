@@ -1549,19 +1549,19 @@ install-test:
         echo "install-test: baseline differs from this commit -- the upgrade phase is live"
       fi
     - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
-    # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> install-again
+    # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> break-schema -> install-again -> lock-holder + install-under-lock
     # -> verify -> uninstall -> verify-gone), so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
     - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
   after_script:
-    # All FOUR installs (baseline, upgrade, install, install-again): the repeats are
+    # All FIVE installs (baseline, upgrade, install, install-again, install-under-lock): the repeats are
     # where a non-idempotent step or a shim that quietly does nothing shows up, and
     # the first run alone looks identical either way.
     #
     # postgres FIRST, and it is not optional. Every one-shot service below gates
     # transitively on `postgres: service_healthy`, so if postgres fails to start or fails
     # its healthcheck, NONE of them ever runs and none of them has any logs -- the job
-    # would emit seven empty sections and a `down -v`, with the actual cause nowhere.
+    # would emit an empty section per service and a `down -v`, with the actual cause nowhere.
     # `ps -a` for the same reason: it shows exit codes for services that produced no
     # output at all.
     - docker compose -f docker/docker-compose-ci-install.yml ps -a || true
@@ -1572,7 +1572,12 @@ install-test:
     - docker compose -f docker/docker-compose-ci-install.yml logs reset-app || true
     - docker compose -f docker/docker-compose-ci-install.yml logs install || true
     - docker compose -f docker/docker-compose-ci-install.yml logs seed-repair || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs break-schema || true
     - docker compose -f docker/docker-compose-ci-install.yml logs install-again || true
+    # #96: the holder, and install-under-lock's no-upgrade check, write their verdicts to their
+    # own logs. Without these two lines a red lane shows an exit code and no reason anywhere.
+    - docker compose -f docker/docker-compose-ci-install.yml logs lock-holder || true
+    - docker compose -f docker/docker-compose-ci-install.yml logs install-under-lock || true
     - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
     - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
     - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true

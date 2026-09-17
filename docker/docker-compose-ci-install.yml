@@ -119,14 +119,14 @@ services:
         condition: service_healthy
 
   # Shared by every install service below. (The "Install #1" this paragraph used to
-  # label is now further down, after reset-app -- there are four installs.)
+  # label is now further down, after reset-app -- there are five installs.)
   #
   # HAF_STATS_SKIP_OP_TYPE_ASSERT: the assertion compares hafd.operation_types against
   # db/op_type_registry.sql, and ci_setup.sql seeds 5 rows (ids 1, 2, 18, 64, 86) with
   # deliberately NON-mainnet ids so the shipped registry cannot pass against it by
   # construction. Note the flag DOWNGRADES the assertion's three fatal arms to a WARNING
-  # rather than skipping the function: assert_op_types still runs eight times here
-  # (install_app.sh:251 and :596, once per each of the four installs). What is never
+  # rather than skipping the function: assert_op_types still runs ten times here
+  # (install_app.sh calls it twice, in each of the five installs). What is never
   # exercised is its ABORT. The failure arms are covered by tests/ci_op_types.sql in the
   # endpoint-tests lane; running it here would only assert that a stub disagrees with
   # mainnet.
@@ -147,7 +147,7 @@ services:
   # itself go quiet. .gitlab-ci.yml extracts the merge target's db/, endpoints/ and
   # scripts/ into .baseline/ before the stack starts.
   #
-  # scripts/ IS MOUNTED TOO, and that is not optional. install_app.sh loads 23 SQL files
+  # scripts/ IS MOUNTED TOO, and that is not optional. install_app.sh loads its SQL files
   # BY NAME; mounting only the baseline's db/ under the CURRENT script breaks the moment
   # a commit adds a file -- which is exactly the kind of commit this lane exists to test.
   # With scripts/ mounted this is the baseline application, running in the current
@@ -255,6 +255,25 @@ services:
       install:
         condition: service_completed_successfully
 
+  # UNDO all 14 guarded upgrades, so the next install runs the DDL inside every one. (#96)
+  #
+  # Without it this lane ran the DDL of one of them: comment_registry.community's ADD COLUMN,
+  # which a fresh install needs because the CREATE TABLE lacks the column. Every other guard met
+  # a table that was already upgraded, so a typo in its DDL -- or a catalog test that is wrongly
+  # always-FALSE -- would ship green. install-again redoes all 14, and ci_install_verify.sql
+  # asserts each one. See tests/ci_break_schema.sql for the list.
+  break-schema:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_break_schema.sql
+    volumes:
+      - ../tests/ci_break_schema.sql:/ci_break_schema.sql:ro
+    depends_on:
+      seed-repair:
+        condition: service_completed_successfully
+
   # Install #2. A shim that quietly does nothing looks identical to a working one after a
   # single run; the second run is where that shows up, because create_context_if_not_exists
   # has to READ the state the first run wrote.
@@ -266,8 +285,8 @@ services:
   # seed-repair exists precisely because it made this service worth almost nothing.)
   # The job trace confirms it: `install-again-1 | WARNING: HAF context haf_stats repaired:
   # block 0 -> 5000`.
-  # It is also the only place the installer's own idempotency is exercised against a real
-  # server outside the replayed-HAF lanes (sync carries an explicit timeout: 2h; reinstall-test inherits the project's 3600s).
+  # It and install-under-lock are the only places the installer's own idempotency is exercised
+  # against a real server outside the replayed-HAF lanes (sync carries an explicit timeout: 2h; reinstall-test inherits the project's 3600s).
   install-again:
     image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
@@ -278,8 +297,60 @@ services:
       PGPASSWORD: postgres
       HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
     depends_on:
-      seed-repair:
+      break-schema:
         condition: service_completed_successfully
+
+  # A READER, holding what a live API request holds. (#96)
+  #
+  # The db/ files carry one-time ALTER TABLE upgrades for deployments that predate a column or
+  # a constraint. ALTER TABLE takes ACCESS EXCLUSIVE BEFORE it evaluates IF [NOT] EXISTS, so on
+  # a node where the upgrade already happened an unguarded one still asks for a lock that
+  # conflicts with every SELECT -- and readers arriving after it queue behind that request.
+  # This session takes ACCESS SHARE on the six migrated tables and watches pg_locks until
+  # install-under-lock is past every migrating file; it fails if a request that queues readers
+  # appears, or if no install gets that far within 90 s. See tests/ci_lock_holder.sql.
+  #
+  # The healthcheck is what makes the race deterministic: install-under-lock is gated on the
+  # locks being HELD, not merely on this container having started.
+  lock-holder:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_lock_holder.sql
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -Atc \"SELECT COUNT(DISTINCT relation) = 6 FROM pg_locks WHERE mode = 'AccessShareLock' AND granted AND relation IN ('haf_stats_backend.account_financial_daily'::regclass, 'haf_stats_backend.active_users_daily'::regclass, 'haf_stats_backend.comment_registry'::regclass, 'haf_stats_backend.account_custom_json_daily'::regclass, 'haf_stats_backend.account_cohort_retention'::regclass, 'haf_stats_backend.author_cohort_retention'::regclass)\" | grep -qx t"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ../tests/ci_lock_holder.sql:/ci_lock_holder.sql:ro
+    depends_on:
+      install-again:
+        condition: service_completed_successfully
+
+  # Install #3 of the original chain, run WHILE that reader holds its locks. On a database where
+  # every upgrade has already been applied -- which is what install-again leaves -- a guarded
+  # install takes no conflicting lock and finishes normally.
+  #
+  # Through tests/ci_install_no_upgrade.sh, which runs the same install_app verb and then fails if
+  # any guarded upgrade RAN. The holder only sees the guards whose DDL takes ACCESS EXCLUSIVE; the
+  # DELETE and the VALIDATE in db/process_financial.sql queue no reader, so a guard wrongly TRUE
+  # on either is invisible to it. `bash` because the entrypoint execs anything runnable.
+  install-under-lock:
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
+    command: ["bash", "/ci_install_no_upgrade.sh"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    volumes:
+      - ../tests/ci_install_no_upgrade.sh:/ci_install_no_upgrade.sh:ro
+    depends_on:
+      lock-holder:
+        condition: service_healthy
 
   # Teardown, which no lane covered at all: NOTHING IN CI HAD EVER RUN uninstall_app.sh
   # AGAINST A DATABASE. (tests/unit/test_uninstall_app.py has 51 tests, but they stub psql,
@@ -339,5 +410,9 @@ services:
       - ../tests/ci_login_timeout.sql:/ci_login_timeout.sql:ro
       - ../tests/ci_alltime_refresh.sql:/ci_alltime_refresh.sql:ro
     depends_on:
-      install-again:
+      # Both: the install that ran under a reader's lock, and the reader itself -- its verdict
+      # (no conflicting lock request appeared) is delivered by its exit code. (#96)
+      install-under-lock:
+        condition: service_completed_successfully
+      lock-holder:
         condition: service_completed_successfully

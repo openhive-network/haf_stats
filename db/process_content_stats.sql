@@ -80,8 +80,20 @@ GRANT SELECT ON haf_stats_backend.comment_registry TO haf_stats_user;
 -- (951,749 rows / 264 MB over the first 5M blocks) is almost entirely the (author_id,
 -- permlink) key and its index; a second table keyed the same way would pay all of that
 -- again, where a column pays only the value bytes.
-ALTER TABLE haf_stats_backend.comment_registry
-ADD COLUMN IF NOT EXISTS community TEXT;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node that already has this column (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.comment_registry'::REGCLASS
+            AND a.attname = 'community'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.comment_registry
+     ADD COLUMN IF NOT EXISTS community TEXT',
+    'comment_registry.community'
+);
 
 -- Per-account, per-community created content (get_account_community_activity).
 -- Shape mirrors account_custom_json_daily (process_custom_json.sql): additive upsert,

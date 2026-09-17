@@ -34,6 +34,7 @@ services:
     command:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_setup.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /schema_migration.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_block_range.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_account_cohorts.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /cohort_fixture.sql &&
@@ -67,6 +68,9 @@ services:
       # that run last (they need the endpoints and grants to already exist).
       - ../db/sync_status.sql:/sync_status.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
+      # The processors' schema-upgrade helper (#96). This lane loads the processor files
+      # directly, without db/haf_stats_app.sql, so it needs this one explicitly.
+      - ../db/schema_migration.sql:/schema_migration.sql:ro
       - ../db/process_block_range.sql:/process_block_range.sql:ro
       - ../tests/cohort_fixture.sql:/cohort_fixture.sql:ro
       # The community path (#47) is unreachable on the real 2016 replay, so the stub gate
