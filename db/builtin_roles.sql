@@ -150,9 +150,9 @@ $$;
 --
 -- Headroom, from testapi's PostgreSQL log (2026-07-14 .. 09-16, every call of >= 1 s):
 -- the slowest PostgREST calls into haf_stats_endpoints took 21.9 s, 21.7 s and 21.5 s.
--- The one call of 30 s or more was a 48.8 s wait for the lock that the 03:30 UTC
--- refresh_top_accounts_alltime() TRUNCATE holds -- readers arriving early in that refresh
--- are now cancelled instead of waiting (#95).
+-- The one call of 30 s or more took 48.8 s, 48.4 s of it waiting for the lock the 03:30 UTC
+-- refresh_top_accounts_alltime() held while it used TRUNCATE. It no longer takes a lock
+-- a reader waits for (#95).
 --
 -- Set unconditionally, so a reinstall restores the shipped budget. Where PostgREST logs in
 -- as haf_stats_user, ALTER ROLE haf_stats_user IN DATABASE <db> SET statement_timeout = ...

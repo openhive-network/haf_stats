@@ -961,10 +961,10 @@ every deployment — measured on PostgREST v12.2.3:
 The sibling apps use the same mechanism (on testapi: `btracker_user` and `hafbe_user` 10 s,
 `hafah_user` 15 s, `hivemind_user` 5000 ms); haf_stats' endpoints are heavier, hence 30 s.
 Headroom, from testapi's PostgreSQL log (2026-07-14 → 09-16, every call of ≥ 1 s): the slowest
-PostgREST calls took 21.9 s, 21.7 s and 21.5 s. The one call of 30 s or more was a 48.8 s wait
-for the lock the 03:30 UTC `refresh_top_accounts_alltime()` `TRUNCATE` holds, so a top-accounts
-request that lands early in that refresh is now cancelled (HTTP 500) rather than served late —
-tracked as #95.
+PostgREST calls took 21.9 s, 21.7 s and 21.5 s. The one call of 30 s or more took 48.8 s, 48.4 s
+of it waiting for the lock the 03:30 UTC `refresh_top_accounts_alltime()` held while it rebuilt
+the all-time tables with `TRUNCATE`. Since #95 it merges only the rows that changed and takes no lock a reader
+waits for, so a top-accounts request no longer queues behind it.
 
 A `SET statement_timeout` **attribute on a function** is not used. It does not arm when the
 function is called directly in SQL — verified: a 2 s `pg_sleep` runs to completion under a
