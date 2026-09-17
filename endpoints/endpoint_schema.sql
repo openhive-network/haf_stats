@@ -7008,7 +7008,7 @@ DECLARE
     -- Ordering (issue #39). order_by/order_direction let the UI rank the FULL population
     -- by any displayed column before truncating, instead of only the metric's default
     -- sort. _natural is the metric's default primary column; when the request resolves to
-    -- (natural column, desc) we keep the existing covering-index fast paths byte-for-byte.
+    -- (natural column, desc) we keep the existing index-ordered fast paths byte-for-byte.
     _natural TEXT;         -- metric's default primary order_by token
     _ob TEXT;              -- resolved order_by = COALESCE(order_by, _natural)
     _asc BOOLEAN;          -- order_direction = 'asc'
@@ -7085,7 +7085,7 @@ BEGIN
     END IF;
 
     -- Metric's default primary sort column. When the request resolves to (natural, desc)
-    -- we fall through to the existing covering-index fast paths below (byte-identical to
+    -- we fall through to the existing index-ordered fast paths below (byte-identical to
     -- the pre-#39 response); any other column or asc uses the ordered path after them.
     _natural := CASE
         WHEN "metric" IN ('author_rewards', 'curation_rewards')       THEN 'value_vests'
@@ -7114,9 +7114,15 @@ BEGIN
         -- unused pieces match nothing via their inverted bounds (issue #37).
         WITH top AS (
             -- all-time fast path (no-filter default): a DIRECT index-ordered read of the
-            -- pre-summed per-account rollup — no re-aggregation, so top-N is an Index-Only Scan
-            -- on idx_afa_reward_rank (~0.1ms) rather than a GroupAggregate over ~2M rows. _alltime
-            -- is Var-free ⇒ a one-time filter, so exactly one of these two arms scans (#38).
+            -- pre-summed per-account rollup — no re-aggregation, so top-N is an Index Scan on
+            -- idx_afa_reward_rank (this arm alone, LIMIT 25, warm: 0.35 ms on testapi, 2026-09-17)
+            -- rather than the pre-#38 GroupAggregate over ~2M rows. Not index-only: op_count is not
+            -- in that index, so the heap is read for every index entry visited (each returned row,
+            -- plus any dead versions a refresh left behind). _alltime has no Vars, so only one of
+            -- these two arms scans (#38) -- but the tables of BOTH are ACCESS SHARE-locked for the
+            -- whole request, so an ACCESS EXCLUSIVE lock on any of them (the pre-#95 TRUNCATE
+            -- refresh, an ALTER TABLE) blocks this metric for every date range. Same for the
+            -- transfer and transaction_count branches below.
             (
                 SELECT a.account_id,
                        a.hive_nai AS hive, a.hbd_nai AS hbd, a.vests_nai AS vests, a.op_count AS ops
@@ -7179,8 +7185,10 @@ BEGIN
         -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
         -- leads the sort key. Same daily/monthly hybrid as the reward branch (#37).
         WITH top AS (
-            -- all-time fast path: DIRECT index-ordered read (Index-Only Scan on
-            -- idx_afa_transfer_rank), no re-aggregation (#38). One-time filter picks one arm.
+            -- all-time fast path: DIRECT index-ordered read (Index Scan on idx_afa_transfer_rank,
+            -- this arm alone, LIMIT 25, warm: 0.44 ms on testapi; not index-only, op_count is not in
+            -- the index, so rows are read from the heap), no re-aggregation (#38). Only one arm
+            -- scans, but both arms' tables are locked (see the reward branch).
             (
                 SELECT a.account_id, a.hive_nai AS hive, a.hbd_nai AS hbd, a.op_count AS ops
                 FROM haf_stats_backend.account_financial_alltime a
