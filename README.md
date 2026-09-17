@@ -174,10 +174,10 @@ docker compose up -d
 >
 > **The rewriter image was renamed** from `haf_stats/rewriter` to
 > `haf_stats/postgrest-rewriter`, the name the sibling apps use
-> ([#83](https://gitlab.syncad.com/hive/haf_stats/-/issues/83)). CI publishes both names
-> for now and the compose default uses the new one. A SHA built **before** the rename
-> exists only under the old name, so pinning one of those needs the rewriter set
-> explicitly — the whole reference, tag included:
+> ([#83](https://gitlab.syncad.com/hive/haf_stats/-/issues/83)). CI publishes only the new
+> name; the old one is no longer updated. A SHA built **before** the rename exists only
+> under the old name, so pinning one of those needs the rewriter set explicitly — the
+> whole reference, tag included:
 >
 > ```bash
 > HAF_STATS_VERSION=<old-sha> \

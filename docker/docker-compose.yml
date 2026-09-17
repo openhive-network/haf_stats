@@ -228,10 +228,10 @@ services:
     # image at ${HAF_STATS_VERSION}. A second knob that must always be moved with the
     # first is not a knob -- it is a skew waiting to happen.
     #
-    # postgrest-rewriter, not rewriter (#83) -- the name the sibling apps use. CI still
-    # publishes the old name too, but only SHAs built after the rename exist under this
-    # one, so pinning an older SHA needs HAF_STATS_REWRITER_IMAGE set to the old name
-    # (the whole reference, tag included). Otherwise the pull fails and `up` quietly
+    # postgrest-rewriter, not rewriter (#83) -- the name the sibling apps use. The old
+    # name is no longer published, and SHAs built before the rename exist only under it,
+    # so pinning such a SHA needs HAF_STATS_REWRITER_IMAGE set to the old name (the whole
+    # reference, tag included). Otherwise the pull fails and `up` quietly
     # builds your working tree instead, because of the build: stanza below.
     image: ${HAF_STATS_REWRITER_IMAGE:-${HAF_STATS_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_stats/postgrest-rewriter:${HAF_STATS_VERSION:-latest}}
     build:

@@ -1,37 +1,25 @@
-"""The rewriter image is published under BOTH names until #83 retires the old one.
+"""What every job that publishes the rewriter image actually publishes.
 
-haf_stats published its rewriter as `haf_stats/rewriter`; every sibling app publishes
-`postgrest-rewriter`. By the time that was noticed the old name had consumers -- testapi
-pinned it by SHA and haf_api_node's haf_stats.yaml defaulted to it (both moved on
-2026-09-16; older checkouts and pins still use it) -- so the rename runs
-through a transition: every publish site emits both names, from one image, until nothing
-still in use resolves the old name (#83 step 3), and then it is dropped everywhere at once.
+The rewriter is published as `haf_stats/postgrest-rewriter`, the name every sibling app
+uses. Until #83 it was `haf_stats/rewriter`; the rename ran through a transition that
+published both names from one image, and the old name is now retired -- published by
+no job at all.
 
-The failure this module exists for is a PARTIAL edit. Four jobs publish the rewriter
-(docker-build-rewriter, publish_latest, publish_tag, publish_images). Miss one and
-nothing goes red: the old name simply stops moving at that site, and whoever still
-follows it keeps running a stale rewriter without being told. The same is true of
-tagging the old name from the wrong image, which leaves two names that no longer mean
-the same thing.
-
-So these tests do not grep the YAML for names -- a name mentioned in a shell comment
-inside a block scalar would satisfy that. They RUN each job's script under bash with a
-stub `docker` that records every call, replay those calls to work out which image each
-pushed reference actually holds, and assert on the result.
-
-RETIRING THE OLD NAME is an edit to REWRITER_NAMES below, made together with the four
-sites. That is deliberate: it turns the last step of #83 into a visible change here
-rather than something that can happen by accident. That step freezes `rewriter:latest`,
-and pre-rename checkouts following `latest` then pair an old rewriter with a moving
-haf_stats:latest. Deleting the tag would not avoid it -- their compose file falls back
-to building the checkout's rewriter -- so #83 records it as a decision, not a test. If
-that decision is to keep moving `rewriter:latest`, publish_latest keeps OLD while the
-other sites drop it, and REWRITER_NAMES has to become per-job.
+Four jobs publish the rewriter (docker-build-rewriter, publish_latest, publish_tag,
+publish_images). A partial edit to any of them goes unnoticed in CI: a name that stops
+moving at one site, a reference tagged from the wrong image, a push swallowed by
+`|| true`. So these tests do not grep the YAML for names -- a name mentioned in a shell
+comment inside a block scalar would satisfy that. They RUN each job's script under bash
+with a stub `docker` that records every call, replay those calls to work out which image
+each pushed reference actually holds, and assert on the EXACT set of references pushed.
+That exactness is also what keeps the retired name retired: re-adding it anywhere
+changes the set.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -49,14 +37,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".gitlab-ci.yml"
 
 NEW = "postgrest-rewriter"
+# Retired by #83 step 3. Kept only so the tests can say, explicitly, that it is gone.
 OLD = "rewriter"
-# The first entry is the name; the rest are aliases published from the same image.
-# #83's last step removes OLD from this tuple and from the four publish sites together.
-REWRITER_NAMES = (NEW, OLD)
-# PUBLISH_IMAGES order. The template pushes entries in order and stops at the first
-# refusal, so the rewriter name current haf_api_node pulls goes first: NEW, since
-# haf_api_node!248 (22e0a523). Before that it was OLD first.
-MIRROR_ORDER = ("haf_stats", NEW, OLD)
+# Every name the rewriter is published under. One, since #83 retired OLD.
+REWRITER_NAMES = (NEW,)
+# PUBLISH_IMAGES, exactly, in order: the template pushes entries in order and stops at
+# the first refusal.
+MIRROR_ORDER = ("haf_stats", NEW)
 
 IMG = "registry.example.com/hive/haf_stats"
 SHA = "0badc0de"
@@ -157,10 +144,32 @@ def _replay(calls: list[list[str]]) -> tuple[dict, list[str]]:
         verbs.append(verb)
         if verb == "build":
             builds += 1
-            refs = [args[i + 1] for i, a in enumerate(args) if a == "-t"]
+            refs, context, i = [], [], 0
+            while i < len(args):
+                if args[i] in ("-t", "--tag"):
+                    refs.append(args[i + 1])
+                    i += 2
+                elif args[i] in ("-f", "--file", "--build-arg", "--label", "--target",
+                                 "--platform", "--cache-from", "--cache-to", "--output",
+                                 "--secret", "--ssh", "--network"):
+                    i += 2
+                elif args[i].startswith("-"):
+                    i += 1
+                else:
+                    context.append(args[i])
+                    i += 1
             assert refs, f"docker build with no -t: {call}"
+            # Exactly one build context. ` .` shares a line with the last -t, so deleting
+            # that line -- e.g. while resolving a conflict -- drops the context too; docker
+            # then fails, but nothing here would notice without this.
+            assert len(context) == 1, (
+                f"docker build needs one build context, got {context}: {call}")
             for ref in refs:
                 local[ref] = f"built#{builds}"
+            # `docker build --push` publishes every -t directly, without a docker push.
+            if "--push" in args or any("push=true" in a for a in args):
+                for ref in refs:
+                    pushed[ref] = local[ref]
         elif verb == "pull":
             local[args[-1]] = f"pulled:{args[-1]}"
         elif verb == "tag":
@@ -203,19 +212,21 @@ def _rewriter_refs(tag: str) -> set[str]:
 
 # --- the build ---------------------------------------------------------------------
 
-def test_docker_build_rewriter_pushes_every_name_from_one_build(jobs, tmp_path):
-    """Both names, one build. Two builds would be two digests: BUILD_TIME is baked into
-    an OCI label, so an old name built separately would stop being an alias."""
+def test_docker_build_rewriter_pushes_what_it_built(jobs, tmp_path):
+    """One build, exactly the rewriter references expected -- no more -- and each holds
+    that build. BUILD_TIME is baked into an OCI label, so a second build is a second
+    digest."""
     pushed, verbs = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
                                      CI_COMMIT_BRANCH="develop"))
     assert verbs.count("build") == 1, verbs
     assert set(pushed) == _rewriter_refs(SHA), sorted(pushed)
-    assert len(set(pushed.values())) == 1, f"the names hold different images: {pushed}"
+    assert set(pushed.values()) == {"built#1"}, (
+        f"pushed something it did not build: {pushed}")
 
 
 def test_docker_build_rewriter_pushes_nothing_on_a_tag(jobs, tmp_path):
-    """#66's property, which the extra push must not have broken: a tag pipeline rebuilds
-    and must not overwrite the SHA tags a develop pipeline already published."""
+    """#66's property: a tag pipeline rebuilds, and must not overwrite the SHA tags a
+    develop pipeline already published."""
     pushed, _ = _replay(_run_job(jobs["docker-build-rewriter"], tmp_path,
                                  CI_COMMIT_TAG=TAG, CI_COMMIT_REF_PROTECTED="true"))
     assert pushed == {}, sorted(pushed)
@@ -303,7 +314,7 @@ def test_retag_jobs_publish_every_name_from_the_tested_image(jobs, tmp_path, job
             f"{ref} holds {pushed[ref]}, not the image published as {NEW}:{SHA}")
 
     # Tag everything, THEN push everything (#66): a failed pull must not leave a name
-    # half-moved. With a third reference it is easy to push one inside the tag loop.
+    # half-moved -- easy to break by pushing inside the tag loop.
     last_prep = max(i for i, v in enumerate(verbs) if v in ("pull", "tag"))
     first_push = min(i for i, v in enumerate(verbs) if v == "push")
     assert first_push > last_prep, f"a push precedes the last pull/tag: {verbs}"
@@ -323,8 +334,7 @@ def test_retag_jobs_stop_at_a_failed_docker_call(jobs, tmp_path, job_name, targe
     `|| true` on a push -- both plausible edits, e.g. to tolerate a SHA that predates #83
     -- passes every other test here. For real, the first releases the app under the new
     tag with no rewriter beside it; the second reports a release that did not happen.
-    Every push is failed in turn, the OLD name's included: that one silently not moving
-    is exactly the failure this module exists for. (`name` None is the app image.)
+    Every push is failed in turn. (`name` None is the app image.)
     """
     tag = SHA if verb == "pull" else target
     ref = f"{IMG}:{tag}" if name is None else f"{IMG}/{name}:{tag}"
@@ -340,14 +350,83 @@ def test_docker_build_rewriter_stops_at_a_failed_push(jobs, tmp_path, name):
              CI_COMMIT_BRANCH="develop")
 
 
+def _repository(ref: str) -> str:
+    """`registry/path/name:tag` -> `registry/path/name`. A tag is a colon after the last
+    slash; a colon before it would be a registry port."""
+    head, slash, tail = ref.rpartition("/")
+    return head + slash + tail.split(":", 1)[0]
+
+
+# Any reference to the retired repository -- $CI_REGISTRY_IMAGE/rewriter,
+# ${CI_REGISTRY_IMAGE}/rewriter or .../haf_stats/rewriter, tagged or not. Deliberately
+# broad: a loop, a variable holding the path, `docker image push` or `buildx imagetools
+# create` all publish without a `docker push .../rewriter` line. The price is flagging a
+# harmless mention in an echo too; that failure names the line, so adjust this test if a
+# reference is ever legitimate.
+_RETIRED_REF = re.compile(
+    r"(?:\$\{?CI_REGISTRY_IMAGE\}?|/haf_stats)/" + re.escape(OLD) + r"(?![\w-])")
+
+
+def test_the_retired_rewriter_name_is_published_nowhere(jobs, tmp_path):
+    """#83 retired `haf_stats/rewriter`. Checked two ways, because each sees what the other
+    cannot.
+
+    RUN the three publishing jobs' scripts and compare the REPOSITORY of every pushed
+    reference -- so an untagged push (implicitly `:latest`) is caught too.
+
+    SCAN every job in the file -- script, before_script, after_script, variables and
+    rules[].variables -- for ANY reference to the retired repository in a script line or
+    a variable value, or an old-name PUBLISH_IMAGES entry. The run only sees the
+    `script:` of known jobs on the pipeline types it simulates; an after_script, a new
+    job, a branch-guarded push or a rules:variables override of PUBLISH_IMAGES would get
+    past it.
+    """
+    old_repo = f"{IMG}/{OLD}"
+    runs = [("docker-build-rewriter", {"CI_COMMIT_BRANCH": "develop"}),
+            ("publish_latest", {"CI_COMMIT_BRANCH": "develop"}),
+            ("publish_tag", {"CI_COMMIT_TAG": TAG, "CI_COMMIT_REF_PROTECTED": "true"})]
+    for job_name, ci_vars in runs:
+        job_dir = tmp_path / job_name
+        job_dir.mkdir()
+        pushed, _ = _replay(_run_job(jobs[job_name], job_dir, **ci_vars))
+        bad = sorted(ref for ref in pushed if _repository(ref) == old_repo)
+        assert not bad, f"{job_name} publishes the retired {OLD} name again: {bad}"
+
+    offenders = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for key in ("before_script", "script", "after_script"):
+            for item in job.get(key) or []:
+                if isinstance(item, str):
+                    offenders += [f"{job_name}.{key}: {line}"
+                                  for line in _shell_lines(item)
+                                  if _RETIRED_REF.search(line)]
+        variable_sets = [job] if job_name == "variables" else [job.get("variables") or {}]
+        variable_sets += [rule.get("variables") or {} for rule in job.get("rules") or []
+                          if isinstance(rule, dict)]
+        for variables in variable_sets:
+            if not isinstance(variables, dict):
+                continue
+            entries = str(variables.get("PUBLISH_IMAGES", "")).split()
+            if OLD in entries:
+                offenders.append(f"{job_name}: PUBLISH_IMAGES={entries}")
+            # A variable holding the retired path, pushed later as "$VAR:tag".
+            for name, value in variables.items():
+                text = str(value.get("value", "") if isinstance(value, dict) else value)
+                if _RETIRED_REF.search(text):
+                    offenders.append(f"{job_name}: variable {name}={text!r}")
+    assert not offenders, (
+        "the retired rewriter name is published again:\n" + "\n".join(offenders))
+
+
 # --- the mirror --------------------------------------------------------------------
 
 def test_the_mirror_list_is_exactly_what_publish_tag_creates(jobs, tmp_path):
     """.docker_publish_job_template pulls each PUBLISH_IMAGES entry from the GitLab
     registry BY TAG. An entry publish_tag does not create fails the release; a name
     publish_tag creates but the mirror omits never reaches registry.hive.blog -- which
-    is where haf_api_node's default resolves the rewriter, under whichever name the
-    checkout carries."""
+    is where haf_api_node's default resolves the rewriter."""
     publish_images = jobs["publish_images"]["variables"]["PUBLISH_IMAGES"].split()
     project = "haf_stats"
     mirrored = {f"{IMG}:{TAG}" if entry == project else f"{IMG}/{entry}:{TAG}"

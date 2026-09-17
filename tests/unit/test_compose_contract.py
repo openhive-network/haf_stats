@@ -410,9 +410,9 @@ def test_the_rewriter_serves_the_public_paths(services):
     svc = services[REWRITER]
 
     # It must be the REWRITER image. Repointed at the app image, `up` starts the wrong
-    # container on the front-door port. And under its NEW name (#83): CI still publishes
-    # haf_stats/rewriter as an alias, but only until consumers move, and a default left
-    # on the old name would be the one thing still pulling it when it is retired.
+    # container on the front-door port. And under its NEW name (#83): the old
+    # haf_stats/rewriter name is retired, so a default left on it would pull an image
+    # that no longer moves.
     # The tag must stay ${HAF_STATS_VERSION}: one version for the pair, the same knob the
     # app services read. A literal here lets the rewriter drift from the app silently.
     assert svc["image"].endswith("}/haf_stats/postgrest-rewriter:${HAF_STATS_VERSION:-latest}}"), (
