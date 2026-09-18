@@ -69,9 +69,43 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.author_cohort_retention (
 -- Upgrade path for existing deployments: the eligible_at_Nd disclosure columns
 -- were added to move author retention onto per-member (first_post_at-based)
 -- eligibility; back-fill the schema on tables that predate them.
-ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT;
-ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT;
-ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_180d INT;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node that already has these columns (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.author_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_30d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_30d INT',
+    'author_cohort_retention.eligible_at_30d'
+);
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.author_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_90d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_90d INT',
+    'author_cohort_retention.eligible_at_90d'
+);
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.author_cohort_retention'::REGCLASS
+            AND a.attname = 'eligible_at_180d'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.author_cohort_retention ADD COLUMN IF NOT EXISTS eligible_at_180d INT',
+    'author_cohort_retention.eligible_at_180d'
+);
 
 GRANT SELECT ON haf_stats_backend.author_cohort_retention TO haf_stats_user;
 

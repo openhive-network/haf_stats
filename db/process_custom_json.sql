@@ -38,11 +38,35 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
 -- Idempotent migration from the earlier op-weighted rc_estimated column (issue #32):
 -- the read-time model stores inputs, so add op_bytes and drop the stored RC output. Existing
 -- rows need a one-time reprocess to populate op_bytes (the deploy truncates + re-backfills).
-ALTER TABLE haf_stats_backend.account_custom_json_daily
-ADD COLUMN IF NOT EXISTS op_bytes BIGINT NOT NULL DEFAULT 0;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node that already has this column (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS
+            AND a.attname = 'op_bytes'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_custom_json_daily
+     ADD COLUMN IF NOT EXISTS op_bytes BIGINT NOT NULL DEFAULT 0',
+    'account_custom_json_daily.op_bytes'
+);
 
-ALTER TABLE haf_stats_backend.account_custom_json_daily
-DROP COLUMN IF EXISTS rc_estimated;
+-- Guarded: no ACCESS EXCLUSIVE lock on a node where this column is already gone (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS
+            AND a.attname = 'rc_estimated'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_custom_json_daily
+     DROP COLUMN IF EXISTS rc_estimated',
+    'account_custom_json_daily.rc_estimated (drop)'
+);
 
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 

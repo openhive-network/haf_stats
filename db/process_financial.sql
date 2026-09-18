@@ -29,11 +29,52 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
 -- constraint would otherwise reject the new incoming/outgoing inserts. NOT VALID
 -- skips re-checking existing rows; the DELETE below removes them outright so the
 -- constraint holds for everything that remains.
-ALTER TABLE haf_stats_backend.account_financial_daily
-DROP CONSTRAINT IF EXISTS account_financial_daily_direction_check;
-ALTER TABLE haf_stats_backend.account_financial_daily
-ADD CONSTRAINT account_financial_daily_direction_check
-CHECK (direction IN ('incoming', 'outgoing')) NOT VALID;
+-- Guarded so a node that already carries the canonical constraint runs none of this (#96):
+-- ALTER TABLE takes ACCESS EXCLUSIVE before it evaluates IF [NOT] EXISTS, ADD CONSTRAINT and
+-- VALIDATE have no IF clause at all, and this table is named by get_network_top_accounts' four
+-- reward and transfer metrics -- bounded ranges and the all-time default alike, since a skipped
+-- UNION arm is still locked (#95). The only lock left on the normal path is the instant ACCESS
+-- SHARE pg_get_constraintdef() takes below, which is a reader's own lock.
+--
+-- "Canonical" below means: the definition names exactly two literals, 'incoming' then
+-- 'outgoing'. The DELETE and VALIDATE guards rely on that classification. No shipped revision
+-- had any other shape containing those two literals (4a915dd: income/expense; since then: the
+-- canonical IN list), so it holds for every deployment this upgrade can meet.
+SELECT haf_stats_app.apply_schema_migration(
+    EXISTS (
+        SELECT 1
+        FROM pg_constraint AS c
+        WHERE
+            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+            AND c.conname = 'account_financial_daily_direction_check'
+            AND (
+                pg_get_constraintdef(c.oid) NOT LIKE '%''incoming''%''outgoing''%'
+                -- ... and nothing else: a definition listing a third value contains both
+                -- literals too, and develop replaced such a constraint unconditionally.
+                OR (
+                    SELECT count(*)
+                    FROM regexp_matches(pg_get_constraintdef(c.oid), '''[^'']*''', 'g')
+                ) <> 2
+            )
+    ),
+    'ALTER TABLE haf_stats_backend.account_financial_daily
+     DROP CONSTRAINT IF EXISTS account_financial_daily_direction_check',
+    'account_financial_daily: drop the pre-canonical direction CHECK'
+);
+
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint AS c
+        WHERE
+            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+            AND c.conname = 'account_financial_daily_direction_check'
+    ),
+    'ALTER TABLE haf_stats_backend.account_financial_daily
+     ADD CONSTRAINT account_financial_daily_direction_check
+     CHECK (direction IN (''incoming'', ''outgoing'')) NOT VALID',
+    'account_financial_daily.direction CHECK'
+);
 
 -- Production resumes block processing immediately after install, and the new
 -- canonical-keyed upserts never overwrite rows written under the old
@@ -42,11 +83,38 @@ CHECK (direction IN ('incoming', 'outgoing')) NOT VALID;
 -- only canonical rows remain (and on fresh installs). Historical coverage is
 -- restored by scripts/rebuild_financial.sh (forward processing only fills new
 -- blocks).
-DELETE FROM haf_stats_backend.account_financial_daily
-WHERE direction NOT IN ('incoming', 'outgoing');
+-- Guarded like the statements around it (#96): a VALIDATED canonical CHECK proves no row
+-- violates it, so this scan has nothing to find. It takes only ROW EXCLUSIVE, which readers
+-- pass, but it is a full scan of the largest table in this file on every install.
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint AS c
+        WHERE
+            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+            AND c.conname = 'account_financial_daily_direction_check'
+            AND c.convalidated
+    ),
+    'DELETE FROM haf_stats_backend.account_financial_daily
+     WHERE direction NOT IN (''incoming'', ''outgoing'')',
+    'account_financial_daily: delete pre-canonical rows'
+);
 
-ALTER TABLE haf_stats_backend.account_financial_daily
-VALIDATE CONSTRAINT account_financial_daily_direction_check;
+-- VALIDATE takes SHARE UPDATE EXCLUSIVE, which readers pass -- but it scans the whole table,
+-- so skip it once the constraint is validated (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    EXISTS (
+        SELECT 1
+        FROM pg_constraint AS c
+        WHERE
+            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+            AND c.conname = 'account_financial_daily_direction_check'
+            AND NOT c.convalidated
+    ),
+    'ALTER TABLE haf_stats_backend.account_financial_daily
+     VALIDATE CONSTRAINT account_financial_daily_direction_check',
+    'account_financial_daily.direction CHECK: validate'
+);
 
 -- No (account_id, day) index: the primary key leads with exactly that, so it serves
 -- both per-account reads on its own (get_account_financial_summary, the rewards CTE
