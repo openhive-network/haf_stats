@@ -901,7 +901,7 @@ BEGIN
 -- an already-counted block range silently doubles it — that is exactly how #42
 -- happened. The haf_stats HAF context is NON-FORKING (hive.app_context_set_non_forking,
 -- haf_stats_app.sql), so blocks are delivered strictly forward and never re-delivered
--- by a reorg: the live loop is the sole caller (process_block_range <- main) and always
+-- by a reorg: the block path is the only caller (process_block_range <- main, or <- process_blocks under the HAF driver) and always
 -- passes _first_block = last_processed_block + 1. Any range overlapping the high-water
 -- mark is therefore an out-of-band reprocess, and reprocessing is never what the caller
 -- wants here. Refuse it instead of silently double-counting.

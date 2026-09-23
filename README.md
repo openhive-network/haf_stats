@@ -313,10 +313,15 @@ node.** The processor must stay stopped for the entire run — not just for the 
 but because `haf_stats` falls behind on votes/engagement/account stats while it's down and
 needs time to catch up afterward. Plan the maintenance window accordingly.
 
-The script refuses to start while a `haf_stats_app.main` backend is live, and re-checks
-before the reseal in case one started mid-rebuild — stop the processor first
-(`SELECT haf_stats_app.stop_processing();` or stop the `haf-stats-process` container)
+The script refuses to start while the block processor is connected — under either loop,
+matched by its `haf_stats_block_processing` application name — and re-checks before the
+reseal in case one started mid-rebuild. **Stop the `haf-stats-process` container first**
 and restart it after the rebuild completes.
+
+`SELECT haf_stats_app.stop_processing();` stops only the legacy `CALL main()` loop. Under
+the generic HAF driver (#85) the registry-era equivalent is
+`SELECT hive.app_pause('haf_stats');`, which needs a HAF carrying the application
+registry. Stopping the container works under both, which is why it is the instruction.
 
 Recurrence is also blocked at the database level: `process_content_stats` now refuses any
 block range at or below `app_status.last_processed_block`, so the out-of-band reprocess

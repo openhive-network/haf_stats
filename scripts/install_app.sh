@@ -277,6 +277,17 @@ run_sql_file "${SCRIPT_DIR}/../db/sync_status.sql"
 #    ordinary redeploy a request can land between the two steps.
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
 
+# 5b. Register in the HAF application registry (haf#341), so haf_app_driver.py can run
+#     this app. Must follow step 5 -- hive.app_register requires the context -- and
+#     db/haf_stats_app.sql, which defines the entry procedure it resolves.
+#
+#     Skips itself with a WARNING on a HAF without the registry (any 1.28.x, which is
+#     what this repo pins today), and scripts/process_blocks.sh probes the registry
+#     before exec'ing the driver. Those two have to agree: a skipped registration plus
+#     a driver that runs anyway is an indefinite crash loop, which is what review
+#     caught on hive/haf_fyp!51.
+run_sql_file "${SCRIPT_DIR}/../db/register_app.sql"
+
 # 6. API endpoints
 #
 # The base URL the published document advertises. This used to be

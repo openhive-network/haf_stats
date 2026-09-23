@@ -811,7 +811,7 @@ docker-build:
     # and NEITHER base is digest-pinned. An earlier revision said the rewriter's was:
     # nginx:9f5e12cd984bf12746ce9af081868e09ced8068f LOOKS like a digest and is a TAG --
     # a 40-hex git SHA-1 used as a tag name. A digest pin is `@sha256:<64 hex>`; this is
-    # 40 hex after a colon. So both bases are mutable tags (the app's is psql:14-2): if
+    # 40 hex after a colon. So both bases are mutable tags (the app's is psql:14-3): if
     # either is re-pushed between the develop pipeline and the tag pipeline, the rebuild
     # is not byte-identical to what was tested. The hole is twice as wide as stated. Small and upstream-owned,
     # but it is precisely the hole this sentence was written to close, so it is stated
