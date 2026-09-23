@@ -610,7 +610,49 @@ psql_cmd -c "
 log "Re-verifying op-type dependencies across the installed endpoints..."
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.assert_op_types(TRUE, ${OP_TYPE_BYPASS}); RESET ROLE;"
 
-log "Installation complete."
+# What actually got recorded, echoed here so a wrong version is visible in the install
+# log rather than only through GET /version later -- which is how it was found (#76): a
+# hand-built image reported "unknown", and only a comparison against the pre-deploy value
+# caught it. GIT_HASH is baked at BUILD time, so a wrong value needs a rebuild, not a
+# re-install; the sooner an operator learns that, the cheaper it is.
+# LIMIT 1, because app_version is the one control table in db/haf_stats_app.sql WITHOUT a
+# singleton unique index -- app_status and app_config both have one. get_version() and
+# get_health compensate the same way. Without it a table that accumulated rows under a
+# pre-TRUNCATE image returns a newline-joined string, which splits this log line AND makes
+# the comparison below false even when the placeholder IS what is recorded: the warning
+# would go quiet in precisely the case it was added for.
+#
+# The `if` distinguishes "no row" from "the query failed", which a `|| echo ""` conflated:
+# on the haf_api_node path version.sql is always present, so "(none recorded)" there could
+# only ever have meant a failed query, with nothing to tell the operator so.
+if _installed_version="$(psql_cmd -Atq -c "SELECT git_hash FROM haf_stats_app.app_version LIMIT 1")"; then
+    log "Installation complete. Recorded version: ${_installed_version:-(no row in app_version)}"
+else
+    _installed_version=""
+    log "Installation complete, but the recorded version could not be read (query failed)."
+fi
+
+if [ "${_installed_version}" = "unspecified" ]; then
+    # "without a GIT_HASH value", not "without --build-arg GIT_HASH": an explicit
+    # --build-arg GIT_HASH="" bakes the same placeholder.
+    log "WARNING: this image was built without a GIT_HASH value, so GET /version and"
+    log "         get_health.version cannot identify the commit this node is running."
+    log "         Rebuild AND re-install -- the value is written to app_version by this"
+    log "         script, so a rebuild on its own changes nothing here. README.md,"
+    log "         \"Building the image\":"
+    log "           docker build --build-arg GIT_HASH=\"\$(git rev-parse --short=8 HEAD)\" ..."
+elif [ -n "${_installed_version}" ] \
+     && ! printf '%s' "${_installed_version}" | grep -Eq '^[0-9a-f]{8}$'; then
+    # The state every node hand-built before this landed is in, including one of ours.
+    # CI bakes CI_COMMIT_SHORT_SHA, always eight hex characters, so anything else came
+    # from a hand-build -- most often `git rev-parse --short`, which is seven and matches
+    # no registry tag for the same commit. Without this arm the warning above would only
+    # ever have helped the NEXT operator, never the fleet that already exists.
+    log "WARNING: the recorded version ${_installed_version} is not an 8-character commit"
+    log "         hash, so it matches no registry tag for this commit. It was probably"
+    log "         built with \`git rev-parse --short\` (seven) rather than --short=8."
+    log "         Rebuild AND re-install; see README.md, \"Building the image\"."
+fi
 
 # PREREQUISITE (run by the balance_tracker schema owner, not this script):
 # get_network_hp_distribution reads current VESTS balances from balance_tracker.
