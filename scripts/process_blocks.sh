@@ -1,6 +1,9 @@
 #!/bin/bash
-# Starts the infinite block-processing loop.
-# Calls haf_stats_app.main() which blocks until stopped or killed.
+# Starts block processing, and blocks until stopped or killed.
+#
+# Two implementations: the generic HAF driver (haf_app_driver.py) when this HAF has the
+# application registry and haf_stats is registered in it, otherwise the legacy
+# haf_stats_app.main() loop. See the selection logic at the bottom of this file.
 #
 # OPTIONS:                                                      # --- help-start ---
 #   --host=VALUE   PostgreSQL host (default: $POSTGRES_HOST, else haf)
@@ -150,6 +153,87 @@ log "Block processing start time recorded: $(cat "${STARTUP_TIME_FILE}")"
 
 log "Starting block processing loop..."
 
+# The generic HAF block-processing driver (haf#341; on PATH from the psql:14-3 base
+# image) calls hive.app_next_iteration itself and runs the registered
+# haf_stats_app.process_blocks once per delivered range, committing between ranges and
+# idling on its own connection in between -- so no transaction spans the wait for a new
+# block, and the backend shows `idle` rather than `idle in transaction` holding context
+# row locks (which is what the legacy path does: hive.app_next_block takes
+# `FOR UPDATE` on hafd.contexts before the blocking wait inside it).
+#
+# exec'd, so the driver is PID 1 and receives SIGTERM directly; a bash parent swallows
+# it until docker's kill (learned on reputation_tracker!223).
+#
+# --startup-marker= is empty on purpose: the startup timestamp written above is OURS and
+# comes from the DATABASE clock, for the reasons in that block, while the driver's own
+# marker would be the container clock. docker/block-processing-healthcheck.sh compares
+# against the file we wrote.
+#
+# HAF_STATS_USE_LEGACY_LOOP=true forces the eternal CALL main() loop. The same fallback
+# is taken automatically when the driver is absent from PATH, or when this HAF has no
+# application registry.
+#
+# THE REGISTRY PROBE IS NOT OPTIONAL. `command -v` alone is not a sufficient guard: the
+# psql base image has shipped the driver since 14-3, so the test would be permanently
+# true, and the driver's first act is to read hafd.applications with no handler for a
+# missing table. On a HAF that predates haf#341 it would exit before its first range,
+# and since it is exec'd as PID 1 that is a container that never processes a block --
+# indefinitely, wherever a restart policy is set -- and one usually is: hive/haf_api_node's
+# haf_stats.yaml declares `restart: on-failure`, while a node we run has the container on
+# `unless-stopped`, which is neither compose file's value, because a deployment can
+# override it. This repo's own docker/docker-compose.yml sets none, so there it stops dead
+# instead. Either way the container never processes a block. The healthcheck hides it either way, because
+# start_period restarts with the container. db/register_app.sql already warns and skips on such a HAF; this is the
+# matching half. (hive/haf_fyp!51 shipped the binary-only guard and was corrected in
+# review; this app inherits the corrected form rather than the bug.)
+registry_has_haf_stats() {
+    # Two statements, not one. PostgreSQL resolves every relation at plan time, so a
+    # single query naming hafd.applications errors on a HAF without it whatever
+    # to_regclass() says in the same statement. Any psql failure counts as "not ready".
+    [ "$(psql_cmd -Atq -c "SELECT to_regclass('hafd.applications') IS NOT NULL" 2>/dev/null || true)" = "t" ] || return 1
+    # `process_procedure IS NOT NULL`, not just a row: haf_app_driver.py has TWO fatal
+    # exits before its first range -- "is not registered" and "is self-driven (no process
+    # procedure registered)". A row registered without an entry procedure (app_register's
+    # third argument defaults to NULL) satisfies a bare EXISTS and then reproduces exactly
+    # the crash loop this probe exists to prevent.
+    [ "$(psql_cmd -Atq -c "SELECT EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats' AND process_procedure IS NOT NULL)" 2>/dev/null || true)" = "t" ]
+}
+
+# Accepts the spellings install_app.sh's own flags accept. A bare `!= "true"` test made
+# TRUE/True/1/yes/on silently fail to enable the legacy loop -- i.e. a typo failed TOWARD
+# the driver, the opposite of this repo's stated convention that a typo fails safe.
+case "${HAF_STATS_USE_LEGACY_LOOP:-false}" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) _haf_stats_force_legacy=1 ;;
+    *)                                      _haf_stats_force_legacy=0 ;;
+esac
+if [ "${_haf_stats_force_legacy}" = "1" ]; then
+    log "HAF_STATS_USE_LEGACY_LOOP is set; using the legacy CALL main() loop"
+fi
+
+if command -v haf_app_driver.py >/dev/null 2>&1 \
+   && [ "${_haf_stats_force_legacy}" = "0" ]; then
+    if registry_has_haf_stats; then
+        log "haf_stats is registered in the HAF application registry; running haf_app_driver.py"
+        exec haf_app_driver.py --app=haf_stats \
+            --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing" \
+            --startup-marker=
+    fi
+    # Deliberately does not name a cause. Every psql failure in the probe above is
+    # swallowed, so "not registered" and "could not reach PostgreSQL" are indistinguishable
+    # here, and an earlier wording asserted the former.
+    log "WARNING: haf_app_driver.py is on PATH, but the HAF application registry does not"
+    log "         list haf_stats with an entry procedure -- HAF older than haf#341,"
+    log "         registration skipped, or the probe could not query the database;"
+    log "         falling back to the legacy CALL main() loop"
+fi
+
+# Tagged so ONE predicate finds either loop. scripts/rebuild_*.sh refuse to truncate
+# while a processor is connected, and the driver sets this same application_name through
+# its connection URI -- without it here, the legacy backend would be matched only by its
+# query text. Exported rather than passed per-command because psql_cmd takes no conninfo,
+# and set here rather than at the top of the script so the probe and the startup-timestamp
+# queries above are NOT mistaken for a running block processor.
+export PGAPPNAME="haf_stats_block_processing"
 psql_cmd -c "CALL haf_stats_app.main('haf_stats');"
 
 log "Block processing loop exited."

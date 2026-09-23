@@ -371,6 +371,90 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Driver entry point (haf#341 / hive.app_register): ONE delivered range, and the
+-- driver -- not this procedure -- owns the transaction.
+--
+-- Same per-range work as main()'s loop body. What it leaves out is deliberate, and
+-- each omission matters:
+--
+--   * NO COMMIT and no ROLLBACK. haf_app_driver.py opens the transaction, calls
+--     this, and commits. A COMMIT here would end the driver's transaction
+--     underneath it.
+--   * NO continue_processing() gate. That flag only ever broke main()'s loop; a
+--     driver call has no loop to break out of, so returning early on it would let
+--     the driver commit the range as processed with nothing written -- silent data
+--     loss rather than a stop. hive.app_pause is the registry-era equivalent, which
+--     makes stop_processing()/allow_processing()/continue_processing() legacy-loop
+--     machinery from here on.
+--   * NO hive.app_next_iteration(). The driver calls it and hands us what it
+--     returned, which is also what moves the context pointer and writes the
+--     last_active_at heartbeat the container healthcheck reads.
+--
+-- A NULL range returns without work. Note the driver never actually delivers one -- it
+-- maps both a SQL NULL and the all-NULL composite to None and skips the CALL -- so this
+-- arm is for a manual CALL or a --process-python run, and for parity with main(), which
+-- `CONTINUE`s on the NULL that hive.app_next_iteration yields when no block has arrived.
+--
+-- The search_path pin is belt-and-braces rather than a fix. Everything reached from here
+-- resolves schema-qualified, and the two unqualified tables in the block path --
+-- haf_stats_batch_authored_ops (process_block_range.sql) and
+-- haf_stats_community_batch_stage (process_content_stats.sql) -- are both TEMP, and
+-- pg_temp is searched first for relations whether or not it is listed. But the legacy
+-- loop inherits `"$user", public` from haf_stats_owner's session (verified on the node:
+-- the role carries no rolconfig) while the driver's connection is not ours to assume, and
+-- reputation_tracker!223 pins it for that reason.
+--
+-- pg_catalog FIRST, matching db/sync_status.sql, this file's only other pinned path. It
+-- is implicitly searched first when unlisted, so naming it last would have DEMOTED it
+-- below public for every function and operator resolved anywhere in the call tree. That
+-- is benign on a node where public holds only extension objects and PUBLIC lacks CREATE,
+-- and it is not a risk worth carrying for nothing.
+-- ---------------------------------------------------------------------------
+
+-- DROP then CREATE, for the same overload reason as main() above -- but note it opens a
+-- window the legacy loop does not have. This file is loaded with run_sql_file, not
+-- run_sql_file_atomic, so the two statements are separate transactions and the procedure
+-- briefly does not exist. main() is already executing by then and PostgreSQL lets a
+-- running function be dropped; the driver CALLs this one FRESH on every range, so a
+-- re-install against a live driver can land a range in the window and take 42883 --
+-- which haf_app_driver.py does not catch, so PID 1 exits. Self-healing where a restart
+-- policy exists, a stopped container where there is none. Stop the processor before
+-- re-installing on a registry-capable HAF.
+DROP PROCEDURE IF EXISTS haf_stats_app.process_blocks;
+CREATE OR REPLACE PROCEDURE haf_stats_app.process_blocks(
+    _block_range hive.BLOCKS_RANGE
+)
+LANGUAGE plpgsql
+SET search_path = pg_catalog, haf_stats_app, public
+AS $$
+BEGIN
+    IF _block_range IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- The massive-sync durability trade main() makes, kept identical. SET is
+    -- session-scoped, so it outlives the driver's per-range transaction and is
+    -- re-asserted cheaply on each call; the ELSIF restores durable commits once the
+    -- context leaves MASSIVE_PROCESSING, which matters here precisely because the
+    -- driver's session outlives any single stage.
+    IF hive.get_current_stage_name('haf_stats') = 'MASSIVE_PROCESSING' THEN
+        SET synchronous_commit = OFF;
+    ELSE
+        -- RESET, not `SET = ON`, which is where this deliberately differs from main().
+        -- The loop's version clamps to ON and tests for the literal 'off', so a node
+        -- configured `local`/`remote_write`/`remote_apply` either escapes the restore
+        -- entirely or is silently promoted to ON for the session. RESET restores whatever
+        -- postgresql.conf or the role actually says. It matters more here than in the
+        -- loop because the driver re-enters this procedure on every delivered range.
+        RESET synchronous_commit;
+    END IF;
+
+    PERFORM haf_stats_app.process_block_range(_block_range.first_block, _block_range.last_block);
+    UPDATE haf_stats_app.app_status SET last_processed_block = _block_range.last_block;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- One-time self-heal for the precomputed endpoint rollups (called by install_app.sh)
 --
 -- The period rollups (account_cohort_retention, active_users_period_counts,

@@ -95,7 +95,7 @@ BEGIN
               IN ACCESS EXCLUSIVE MODE;
     EXCEPTION WHEN lock_not_available THEN
         RAISE EXCEPTION 'content_volume rebuild consistency: could not lock the content tables within lock_timeout — the haf_stats processor is still actively writing them.'
-            USING HINT = 'Stop it first (SELECT haf_stats_app.stop_processing(); or stop the haf-stats-process container), then re-run verification.';
+            USING HINT = 'Stop it first (stop the haf-stats-process container; stop_processing() only stops the legacy CALL main() loop), then re-run verification.';
     END;
 
     _siblings_before := pg_temp.sibling_fingerprint();
