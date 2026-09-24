@@ -237,7 +237,6 @@ def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts
         '  *inet_server_addr*) if [ -n "${PGHOSTADDR:-}" ]; then\n'
         '                          printf "%s:5432/somedb as someone [cluster 1234]" "$PGHOSTADDR"\n'
         f'                      else printf "%s" {server!r}; fi ;;\n'
-        '  *"current_user ||"*) printf "someone on somedb" ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -1129,6 +1128,22 @@ def test_the_confirmation_asks_the_server_which_database_this_is():
     assert line.split('-c "', 1)[1].split('"', 1)[0] == "SELECT current_database()", line
 
 
+def test_the_confirmation_probe_tests_its_own_status():
+    """Same treatment as the identity query, for the same reason. `|| true` there
+    discarded psql's exit code, so a failed query reached the operator as "Aborted --
+    nothing was changed" -- their typed name not matching noise -- rather than as "could
+    not ask the server", which is a different fault pointing somewhere else. Behavioural
+    coverage would need a pty, so this is pinned at source, comments stripped."""
+    live = "\n".join(l.split("#", 1)[0]
+                     for l in SCRIPT.read_text(encoding="utf-8").splitlines())
+    start = live.index("_target_db=")
+    stanza = live[live.rindex("\n", 0, start):start + 400]
+    assert 'if ! _target_db="$(psql_cmd' in stanza, (
+        "the confirmation probe no longer tests whether psql succeeded:\n" + stanza)
+    assert "-X" in stanza.split("psql_cmd", 1)[1].split("-c", 1)[0], (
+        "the confirmation probe no longer passes -X, so ~/.psqlrc can speak into it")
+
+
 def test_the_confirmation_compares_against_the_servers_answer():
     """Comments stripped, so a commented-out copy of the old comparison cannot satisfy
     this -- the failure mode _probe_sql's own docstring describes."""
@@ -1382,6 +1397,103 @@ def test_a_failed_query_that_still_printed_something_is_not_an_identity(bash, tm
     assert "COULD NOT ASK THE SERVER" in r.stdout, r.stdout
     assert r.returncode == 1, r.returncode
     assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log")
+
+
+def test_a_well_formed_answer_from_a_FAILED_query_is_not_an_identity(bash, tmp_path):
+    """The one input that separates the status check from the shape check.
+
+    Every other failing stub in this file emits nothing, or something badly shaped, so the
+    SHAPE test rejects all of them on its own -- and removing the status test survived the
+    entire module while leaving the script destroying on a query that failed. psql exiting
+    non-zero after printing a perfectly good row is not exotic: the connection can drop
+    after the row is sent, and `-v ON_ERROR_STOP=on` turns a later notice into a failure.
+    A well-formed string from a failed query is not an answer.
+    """
+    make_psql(tmp_path)
+    write_exec(
+        tmp_path / "bin" / "psql",
+        "#!/bin/sh\n"
+        "cmd=''\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-c" ]; then cmd="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'case "$cmd" in\n'
+        # A textbook identity -- and a non-zero exit.
+        '  *inet_server_addr*) printf "10.1.1.7:5432/somedb as someone [cluster 1234]"\n'
+        '                      exit 3 ;;\n'
+        '  *is_superuser*)     printf "t" ;;\n'
+        '  *pg_stat_activity*) printf "0" ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    r = run(bash, tmp_path, "--force")
+    assert "COULD NOT ASK THE SERVER" in r.stdout, r.stdout
+    assert "10.1.1.7" not in r.stdout, (
+        "a string from a FAILED query was reported as the server's identity:\n" + r.stdout)
+    assert r.returncode == 1, r.returncode
+    assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log")
+
+
+def test_noise_BEFORE_the_answer_is_not_an_identity(bash, tmp_path):
+    """The shape check requires the answer to END in the cluster id, so it rejects
+    appended junk and ACCEPTS prepended junk -- and ~/.psqlrc produces prepended junk,
+    because `\\echo` writes at connection time. Measured on the real check:
+
+        "Timing is on. LOCAL SOCKET:-/haf_block_log as haf_admin [cluster 764]"
+
+    passed, reached the `reached:` and `server:` lines, and silently suppressed the LOCAL
+    SOCKET note, whose `case` is anchored at the START of the string. The script now
+    passes -X so psqlrc cannot speak at all, and rejects any answer of more than one line.
+    """
+    make_psql(tmp_path)
+    # A bespoke stub, because make_psql answers with `printf "%s" '<server>'` and printf
+    # interprets escapes in the FORMAT, not in an argument -- a "\n" in the server string
+    # stays two literal characters, so the answer would still be one line.
+    write_exec(
+        tmp_path / "bin" / "psql",
+        "#!/bin/sh\n"
+        "cmd=''\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-c" ]; then cmd="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'case "$cmd" in\n'
+        '  *inet_server_addr*)\n'
+        '      printf "Timing is on.\\n10.1.1.7:5432/somedb as x [cluster 1234]\\n" ;;\n'
+        '  *is_superuser*)     printf "t" ;;\n'
+        '  *pg_stat_activity*) printf "0" ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    r = run(bash, tmp_path, "--force")
+    assert "COULD NOT ASK THE SERVER" in r.stdout, r.stdout
+    assert "Timing is on." not in r.stdout, r.stdout
+    assert r.returncode == 1, r.returncode
+    assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log")
+
+
+def test_the_identity_query_does_not_read_the_operators_psqlrc(bash, tmp_path):
+    """-X is what removes the whole noise class at source. Without it an operator's own
+    dotfile decides part of the text naming what is about to be destroyed."""
+    make_psql(tmp_path)
+    run(bash, tmp_path, "--force")
+    identity = [l for l in (tmp_path / "argv.log").read_text(encoding="utf-8").splitlines()
+                if "inet_server_addr" in l]
+    assert identity, "the identity query was never issued"
+    assert "-X" in identity[0].split(" -c ", 1)[0].split(), identity[0]
+
+
+def test_a_service_file_path_with_spaces_is_named_once(bash, tmp_path):
+    """PGSERVICEFILE is a PATH. An unquoted `for` split it on spaces, so a file under
+    /etc/my conf/ printed as two NOTE lines naming two files that do not exist -- in the
+    line whose entire job is telling the operator which file to go and read."""
+    _guarded_psql(tmp_path)
+    r = run(bash, tmp_path, "--force",
+            env_extra={"PGSERVICE": "decoy", "PGSERVICEFILE": "/etc/my conf/pg_service.conf"})
+    assert "NOTE     : PGSERVICEFILE=/etc/my conf/pg_service.conf" in r.stdout, r.stdout
 
 
 def test_an_answer_without_a_cluster_id_is_not_an_identity(bash, tmp_path):

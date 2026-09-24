@@ -85,12 +85,6 @@ for arg in "$@"; do
         # application_name tag, passing the conninfo through, and a redactor that survives
         # ?password= -- none of which this script does.
         #
-        # Honouring it properly means the healthcheck's application_name
-        # tag (the uninstall session guard excludes the probe by that literal), passing
-        # the conninfo through to the healthcheck, a redactor that survives
-        # ?password= and keyword/value forms, and the other scripts. That is tracked
-        # separately.
-        #
         # Refusing is safe here, unlike for --schema: --postgres-url appears in exactly
         # one upstream module file (hivemind.yaml, on hivemind-uninstall) and that file
         # carries no `restart:` key, so this cannot crash-loop a service. One clear
@@ -169,6 +163,11 @@ wait_for_postgres
 # inet_server_addr() returns NULL over a Unix socket, which is exactly the signal that
 # matters: it describes the connection that was MADE. No amount of flag validation can
 # produce that, because none of these arrive through a flag.
+# A literal newline, for the multi-line checks below. `$(printf '\n')` cannot carry
+# one: command substitution strips trailing newlines, so it yields the empty string.
+_NEWLINE='
+'
+
 _server_identity() {
     # host(), not ::text: inet's CAST to text keeps a /32 that means nothing here (the
     # type's own output suppresses it; text(inet) does not). That is the whole argument --
@@ -190,7 +189,10 @@ _server_identity() {
     # writes to stdout if anything already has, and a ~/.psqlrc `\echo` or `\timing` does
     # exactly that at connection time. Nothing in this repo passes --no-psqlrc. The
     # refusal then never fired and the `reached:` line printed that noise as an identity.
-    psql_cmd -Atq -c "
+    # -X: do not read ~/.psqlrc. An `\\echo` there writes at CONNECTION time and a
+    # `\\timing` after every command, both to stdout, so an operator's own dotfile could
+    # put arbitrary text into the line this script uses to name what it is destroying.
+    psql_cmd -X -Atq -c "
         SELECT coalesce(host(inet_server_addr()), 'LOCAL SOCKET')
             || ':' || coalesce(inet_server_port()::text, '-')
             || '/' || current_database()
@@ -199,7 +201,7 @@ _server_identity() {
                     THEN ' (current_user differs from session_user ' || session_user || ')'
                     ELSE '' END
             || ' [cluster ' || (SELECT system_identifier FROM pg_control_system()) || ']'
-    " | tr '\n' ' '
+    "
 }
 
 # The reached target, plus a note when the environment is what redirected us. Printed on
@@ -207,11 +209,27 @@ _server_identity() {
 # Resolved ONCE, into _reached, and reused by every later line. An earlier revision
 # asked the server again from the refusal path, which issued the same query twice.
 _resolve_target() {
-    # The STATUS, then the shape. psql failing is the branch the refusal exists for, and
-    # stdout noise on a SUCCESSFUL query corrupts the line just as badly -- so anything
-    # that does not end in the cluster id this query always appends is not an identity.
-    if ! _reached="$(_server_identity)"; then _reached=""; fi
-    _reached="${_reached% }"
+    # THE STATUS, then the LINE COUNT, then the shape. Three checks, because each one
+    # misses what the others catch:
+    #
+    #   status -- psql failing is the branch this refusal exists for, and a failing psql
+    #     still writes to stdout if anything already did, so emptiness alone is not it.
+    #   line count -- `-Atq` on a single-row query emits EXACTLY one line, so a second
+    #     line means something other than the query spoke. This is the check that sees
+    #     PREPENDED noise: the shape test below requires the string to END in the cluster
+    #     id, so it rejects trailing junk and ACCEPTS leading junk -- and ~/.psqlrc
+    #     produces leading junk. Measured: "Timing is on. LOCAL SOCKET:-/haf_block_log as
+    #     haf_admin [cluster 764]" passed the shape test, reached the `reached:` and
+    #     `server:` lines, and silently suppressed the LOCAL SOCKET note below, whose
+    #     `case` is anchored at the START of the string. -X above should mean this never
+    #     fires; it is here because "should" is doing the work in that sentence.
+    #   shape -- the query always appends ` [cluster <n>]`, so an answer not ending that
+    #     way is not this query's answer, however it arrived.
+    if ! _raw="$(_server_identity)"; then _raw=""; fi
+    case "${_raw}" in
+        *"${_NEWLINE}"*) _reached="" ;;
+        *)               _reached="${_raw% }" ;;
+    esac
     case "${_reached}" in
         *"[cluster "*"]") : ;;
         *) _reached="" ;;
@@ -234,18 +252,22 @@ _resolve_target() {
     # meant a destructive run printed a redirect warning for a variable that redirects
     # nothing, so it is reported only alongside PGSERVICE -- where it says WHICH file to
     # go and read.
+    # NEWLINE-joined, not space-joined: PGSERVICEFILE is a PATH, and the loop below
+    # used to split it on spaces, so /etc/my conf/pg_service.conf printed as two NOTE
+    # lines naming two files that do not exist -- in the line whose entire job is telling
+    # the operator which file to go and read.
     _redirect=""
-    [ -n "${PGHOSTADDR:-}" ] && _redirect="${_redirect} PGHOSTADDR=${PGHOSTADDR}"
-    [ -n "${PGSERVICE:-}" ]  && _redirect="${_redirect} PGSERVICE=${PGSERVICE}"
+    [ -n "${PGHOSTADDR:-}" ] && _redirect="${_redirect}PGHOSTADDR=${PGHOSTADDR}${_NEWLINE}"
+    [ -n "${PGSERVICE:-}" ]  && _redirect="${_redirect}PGSERVICE=${PGSERVICE}${_NEWLINE}"
     if [ -n "${PGSERVICE:-}" ] && [ -n "${PGSERVICEFILE:-}" ]; then
-        _redirect="${_redirect} PGSERVICEFILE=${PGSERVICEFILE}"
+        _redirect="${_redirect}PGSERVICEFILE=${PGSERVICEFILE}${_NEWLINE}"
     fi
     if [ -n "${_redirect}" ]; then
         # One per line. Run together they read as a single ungrammatical value, and with
         # all of them set the first line ran ~140 columns while its own continuations
         # wrapped at 85.
-        for _var in ${_redirect}; do
-            log "  NOTE     : ${_var}"
+        printf '%s' "${_redirect}" | while IFS= read -r _var; do
+            [ -n "${_var}" ] && log "  NOTE     : ${_var}"
         done
         log "             Any of PGHOSTADDR, PGSERVICE or PGSERVICEFILE can carry a"
         log "             hostaddr, which libpq connects to INSTEAD of the --host /"
@@ -599,11 +621,18 @@ if [ "$FORCE" -ne 1 ]; then
     #
     # haf_fyp's uninstall_app.sh has NOT taken this step: its !56 did, and was closed, so
     # its develop still compares against ${POSTGRES_DB}. Filed there as haf_fyp#69.
-    _target_db="$(psql_cmd -Atq -c "SELECT current_database()" | tr -d '\n' || true)"
-    if [ -z "${_target_db}" ]; then
-        log "ERROR: could not ask the server which database this is; refusing to prompt."
-        exit 1
+    # -X and the status, for the reasons at _server_identity. `|| true` here discarded
+    # psql's exit code, so a failed query reached the operator as "Aborted -- nothing was
+    # changed" (their typed name not matching noise) rather than as "could not ask the
+    # server", which is a different fault and sends them somewhere else.
+    if ! _target_db="$(psql_cmd -X -Atq -c "SELECT current_database()")"; then
+        _target_db=""
     fi
+    case "${_target_db}" in
+        "" | *"${_NEWLINE}"*)
+            log "ERROR: could not ask the server which database this is; refusing to prompt."
+            exit 1 ;;
+    esac
     printf '[haf_stats] Type the database name to confirm: '
     read -r _reply
     if [ "${_reply}" != "${_target_db}" ]; then
@@ -619,7 +648,7 @@ if [ "$FORCE" -ne 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3-5. Teardown.
+# 3-5. Teardown. (Steps 3, 4 and 5 run below; the helpers they use are defined above.)
 # ---------------------------------------------------------------------------
 # 3. The HAF context, FIRST -- while its schema still exists. hive.app_remove_context
 #    drops the context's own table and views, which live in the application schema, so

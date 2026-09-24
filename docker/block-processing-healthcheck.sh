@@ -94,9 +94,12 @@ postgres_db=${POSTGRES_DB:-"haf_block_log"}
 # "N session(s) are still connected" on a race the operator cannot reason about.
 #
 # Nothing else in this app honours POSTGRES_URL either: --postgres-url is
-# recognised and refused by all three scripts, because honouring it moved only the
-# psql connection while every message and the teardown's confirmation prompt still
-# read POSTGRES_HOST/POSTGRES_DB. One connection path, one description of it.
+# recognised and refused by all three scripts, because honouring it moves only the
+# psql connection -- this healthcheck's application_name tag, the conninfo it would
+# have to be given, and a password redactor all still assume the discrete variables.
+# (The teardown's own messages no longer do: since #75 it reports the server that
+# answered. That half is fixed; the rest is not.) One connection path, one
+# description of it.
 POSTGRES_ACCESS="postgresql://$postgres_user@$postgres_host:$postgres_port/$postgres_db?application_name=haf_stats_health_check"
 
 CONTEXT=${HAF_STATS_CONTEXT:-"haf_stats"}

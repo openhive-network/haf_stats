@@ -514,12 +514,15 @@ pointing at `--host`/`--port`/`--user`. `haf_api_node`'s `hivemind.yaml` does pa
 all three of balance_tracker's scripts take the flag -- so this is a real gap, tracked in
 issue #59.
 
-It is refused rather than honoured because honouring it moved only the psql connection.
-Every message, and the teardown's type-the-database-name confirmation, still read
-`POSTGRES_HOST`/`POSTGRES_DB`, so the script dropped schemas on the URI's host while
-reporting the discrete one -- in the gate whose stated purpose is catching "the right
-command against the wrong host". Refusing is safe here, unlike for `--schema`: the flag
-appears in exactly one upstream module file, on a service with no `restart:` key.
+It is refused rather than honoured because honouring it moves only the psql connection.
+That used to mean the script dropped schemas on the URI's host while every message
+reported the discrete one; since #75 the teardown reports the server that **answered** and
+its confirmation compares against `SELECT current_database()`, so that particular blindness
+is gone. The flag stays refused because honouring it properly still means the healthcheck's
+`application_name` tag, passing the conninfo through to it, a redactor that survives
+`?password=` and keyword/value forms, and the other scripts -- none of which exist yet.
+Refusing is safe here, unlike for `--schema`: the flag appears in exactly one upstream
+module file, on a service with no `restart:` key.
 
 Two more flags are accepted only for module-file compatibility, and **both warn and
 continue** rather than refusing. `--schema=` naming anything but `haf_stats_app` is
@@ -565,6 +568,12 @@ caller's still-open transaction), so the observed age spans up to *two* iteratio
 durations — 300s tolerates iterations of roughly 150s. It is also not a sub-batch
 heartbeat, so on a long MASSIVE batch this check **can report unhealthy on a healthy
 replay**. The window is a deliberately wide guess; narrow it once a batch has been timed.
+
+`uninstall_app` also **refuses** if it cannot establish which server answered -- it asks
+the database for its address, port, database, role and cluster id before any guard runs,
+and exits rather than naming a target it cannot verify. `docker/docker-compose.yml` ships
+`--force`, so an unattended teardown against a server that cannot answer one `SELECT` now
+stops instead of proceeding ([#75](https://gitlab.syncad.com/hive/haf_stats/-/issues/75)).
 
 ## Redeploying against a node under load
 

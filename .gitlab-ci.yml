@@ -694,10 +694,13 @@ docker-build:
       # in between, but was a clobber waiting to matter.)
       grep -q "WARNING: --schema" "$OUT"
       echo "--- a connection URI is REFUSED, not half-honoured ---"
-      # Honouring it moved only the psql connection: the messages and the teardown's
-      # confirmation prompt still read POSTGRES_HOST/POSTGRES_DB, so it could act on one
-      # database while reporting another. Refusing is safe -- --postgres-url appears in
-      # one upstream module file, on a service with no restart policy.
+      # Honouring it moves only the psql connection. Since #75 the teardown reports the
+      # server that ANSWERED and compares the confirmation against SELECT
+      # current_database(), so it no longer describes one database while acting on
+      # another -- but honouring the flag properly still needs the healthcheck's
+      # application_name tag, the conninfo passed through, and a password redactor.
+      # Refusing is safe -- --postgres-url appears in one upstream module file, on a
+      # service with no restart policy.
       for verb in install_app uninstall_app process_blocks; do
         expect_fail "$verb" --postgres-url=postgresql://haf_admin@haf/haf_block_log
         grep -q "not supported yet" "$OUT" || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
