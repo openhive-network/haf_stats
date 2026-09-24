@@ -26,11 +26,11 @@
 # =============================================================================
 
 stages:
-  - detect
-  - lint
-  - build
-  - sync
-  - test
+- detect
+- lint
+- build
+- sync
+- test
   # `release` exists to ORDER two jobs that would otherwise race (hive/haf_stats#66).
   #
   # publish_images pulls ${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG} BY TAG, and publish_tag
@@ -54,9 +54,9 @@ stages:
   # invariant -- a non-optional
   # need would require publish_tag to exist in every pipeline where publish_images
   # does, which is true today only because their rules happen to be a superset.
-  - release
-  - publish
-  - cleanup
+- release
+- publish
+- cleanup
 
 variables:
   # ---------------------------------------------------------------------------
@@ -123,18 +123,18 @@ variables:
   GIT_SUBMODULE_STRATEGY: "none"
 
 include:
-  - template: Workflows/Branch-Pipelines.gitlab-ci.yml
+- template: Workflows/Branch-Pipelines.gitlab-ci.yml
   # Pinned to a SHA (not develop) for reproducibility — bump deliberately.
-  - project: 'hive/common-ci-configuration'
-    ref: 96889a650b3f45244cecc4bb3f250af439a71900
-    file:
-      - '/templates/base.gitlab-ci.yml'
-      - '/templates/docker_image_jobs.gitlab-ci.yml'
-      - '/templates/haf_data_preparation.gitlab-ci.yml'
-      - '/templates/cache_cleanup.gitlab-ci.yml'
-      - '/templates/test_jobs.gitlab-ci.yml'
-      - '/templates/haf_app_testing.gitlab-ci.yml'
-      - '/templates/source_change_detection.gitlab-ci.yml'
+- project: 'hive/common-ci-configuration'
+  ref: 4fd0bd8c4d3eedeb342f4cfa411726a3ae3ed662
+  file:
+  - '/templates/base.gitlab-ci.yml'
+  - '/templates/docker_image_jobs.gitlab-ci.yml'
+  - '/templates/haf_data_preparation.gitlab-ci.yml'
+  - '/templates/cache_cleanup.gitlab-ci.yml'
+  - '/templates/test_jobs.gitlab-ci.yml'
+  - '/templates/haf_app_testing.gitlab-ci.yml'
+  - '/templates/source_change_detection.gitlab-ci.yml'
 
 # =============================================================================
 # DETECT
@@ -143,7 +143,7 @@ find_haf_image:
   extends: .find_haf_image
   stage: detect
   variables:
-    UPSTREAM_BRANCH: "develop"
+    UPSTREAM_BRANCH: "1.28.8-rc1"
     HAF_PATTERNS_REF: "develop"
     # A registry miss must not take the whole pipeline down (haf_stats#51, upstream
     # hive/haf#335). The template's 25-commit develop walk stays the preferred path; the
@@ -165,122 +165,122 @@ find_haf_image:
   # moving that file is the same class of upstream churn that caused #51. A stale pattern
   # list only changes which commits the walk considers, so degrading is strictly better.
   before_script:
-    - |
-      PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/${HAF_PATTERNS_REF}/scripts/ci-helpers/source-patterns.sh"
-      echo "Fetching HAF source patterns from: $PATTERNS_URL"
-      UPSTREAM_PATTERNS="$(curl -sf "$PATTERNS_URL" | sh || true)"
-      if [ -z "$UPSTREAM_PATTERNS" ] && [ "$HAF_PATTERNS_REF" != "develop" ]; then
-        echo "WARNING: HAF_PATTERNS_REF '$HAF_PATTERNS_REF' not found, falling back to develop"
-        UPSTREAM_PATTERNS="$(curl -sf "https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh" | sh || true)"
-      fi
-      if [ -z "$UPSTREAM_PATTERNS" ]; then
-        UPSTREAM_PATTERNS="$HAF_DEFAULT_SOURCE_PATTERNS"
-        echo "WARNING: could not fetch source-patterns.sh from HAF; using this repo's pinned copy."
-        echo "         If this persists, hive/haf moved the file and the list needs refreshing."
-      fi
-      echo "Loaded patterns: $UPSTREAM_PATTERNS"
-      export UPSTREAM_PATTERNS
-    - |
-      if [ -n "$HAF_IMAGE_TYPE" ]; then
-        export UPSTREAM_IMAGE="$HAF_IMAGE_TYPE"
-        echo "Looking for HAF $HAF_IMAGE_TYPE image"
-      else
-        echo "Looking for HAF mainnet image"
-      fi
-    - |
-      if [ -n "$HAF_IMAGE_TYPE" ]; then
-        export UPSTREAM_OUTPUT="haf_${HAF_IMAGE_TYPE}_image.env"
-      else
-        export UPSTREAM_OUTPUT="haf_image.env"
-      fi
+  - |
+    PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/${HAF_PATTERNS_REF}/scripts/ci-helpers/source-patterns.sh"
+    echo "Fetching HAF source patterns from: $PATTERNS_URL"
+    UPSTREAM_PATTERNS="$(curl -sf "$PATTERNS_URL" | sh || true)"
+    if [ -z "$UPSTREAM_PATTERNS" ] && [ "$HAF_PATTERNS_REF" != "develop" ]; then
+      echo "WARNING: HAF_PATTERNS_REF '$HAF_PATTERNS_REF' not found, falling back to develop"
+      UPSTREAM_PATTERNS="$(curl -sf "https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh" | sh || true)"
+    fi
+    if [ -z "$UPSTREAM_PATTERNS" ]; then
+      UPSTREAM_PATTERNS="$HAF_DEFAULT_SOURCE_PATTERNS"
+      echo "WARNING: could not fetch source-patterns.sh from HAF; using this repo's pinned copy."
+      echo "         If this persists, hive/haf moved the file and the list needs refreshing."
+    fi
+    echo "Loaded patterns: $UPSTREAM_PATTERNS"
+    export UPSTREAM_PATTERNS
+  - |
+    if [ -n "$HAF_IMAGE_TYPE" ]; then
+      export UPSTREAM_IMAGE="$HAF_IMAGE_TYPE"
+      echo "Looking for HAF $HAF_IMAGE_TYPE image"
+    else
+      echo "Looking for HAF mainnet image"
+    fi
+  - |
+    if [ -n "$HAF_IMAGE_TYPE" ]; then
+      export UPSTREAM_OUTPUT="haf_${HAF_IMAGE_TYPE}_image.env"
+    else
+      export UPSTREAM_OUTPUT="haf_image.env"
+    fi
   script:
-    - !reference [.find_haf_image, script]
-    - |
-      # Registry retention purged every per-commit develop image in July 2026 while HAF
-      # develop itself sat frozen, so all 25 candidates 404'd and this job — and with it
-      # every job that needs: it — stayed red for ~12 days (haf_stats#51 / hive/haf#335).
-      # Prefer the develop image; fall back only when there is genuinely nothing to find.
-      #
-      # Residual: the referenced step above can still exit non-zero on its own (a failed
-      # clone of hive/haf, or no commit matching the source patterns), and set -e kills the
-      # job there, before this runs. Those mean "cannot even ask the question", unlike the
-      # empty-registry case this handles.
-      PREFIX="${HAF_VAR_PREFIX:-HAF}"
-      ENV_FILE="${UPSTREAM_OUTPUT:-haf_image.env}"
-      # Fail closed: the flag has to be there and be explicit. If upstream renames it (those
-      # scripts are fetched from an unpinned develop ref) we must not read the absence as a
-      # miss and silently serve the fallback on every run from then on.
-      STATE="$(grep -m1 "^${PREFIX}_UPSTREAM_CACHE_HIT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
-      if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" != "true" ] && [ "$STATE" != "false" ]; then
-        echo "ERROR: $ENV_FILE has no usable ${PREFIX}_UPSTREAM_CACHE_HIT line (got: '${STATE}')."
-        echo "       The upstream resolver changed its output; this job's fallback logic needs updating."
+  - !reference [.find_haf_image, script]
+  - |
+    # Registry retention purged every per-commit develop image in July 2026 while HAF
+    # develop itself sat frozen, so all 25 candidates 404'd and this job — and with it
+    # every job that needs: it — stayed red for ~12 days (haf_stats#51 / hive/haf#335).
+    # Prefer the develop image; fall back only when there is genuinely nothing to find.
+    #
+    # Residual: the referenced step above can still exit non-zero on its own (a failed
+    # clone of hive/haf, or no commit matching the source patterns), and set -e kills the
+    # job there, before this runs. Those mean "cannot even ask the question", unlike the
+    # empty-registry case this handles.
+    PREFIX="${HAF_VAR_PREFIX:-HAF}"
+    ENV_FILE="${UPSTREAM_OUTPUT:-haf_image.env}"
+    # Fail closed: the flag has to be there and be explicit. If upstream renames it (those
+    # scripts are fetched from an unpinned develop ref) we must not read the absence as a
+    # miss and silently serve the fallback on every run from then on.
+    STATE="$(grep -m1 "^${PREFIX}_UPSTREAM_CACHE_HIT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+    if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" != "true" ] && [ "$STATE" != "false" ]; then
+      echo "ERROR: $ENV_FILE has no usable ${PREFIX}_UPSTREAM_CACHE_HIT line (got: '${STATE}')."
+      echo "       The upstream resolver changed its output; this job's fallback logic needs updating."
+      exit 1
+    fi
+    if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" = "true" ]; then
+      echo "find_haf_image: resolved a develop commit image; no fallback needed."
+    else
+      if [ "${HAF_FORCE_FALLBACK}" = "true" ]; then
+        echo "HAF_FORCE_FALLBACK=true - exercising the fallback path deliberately."
+      else
+        echo "WARNING: no develop commit image for any of the last ${UPSTREAM_MAX_SEARCH} source commits."
+      fi
+      echo "         Falling back, newest first: ${HAF_FALLBACK_TAGS}"
+      BASE="${UPSTREAM_REGISTRY}"
+      if [ -n "${UPSTREAM_IMAGE:-}" ]; then BASE="${UPSTREAM_REGISTRY}/${UPSTREAM_IMAGE}"; fi
+      RESOLVED=""
+      for TAG in ${HAF_FALLBACK_TAGS}; do
+        REF="${BASE}:${TAG}"
+        # One probe answers both "does it exist" and "what is its digest". Resolving the
+        # digest is mandatory, not best-effort: HAF_COMMIT is the replay cache key, so a
+        # mutable tag as the key would let a datadir replayed by one HAF version be served
+        # to a stack running another, with nothing able to detect it. A tag we cannot pin
+        # is therefore skipped, not accepted.
+        DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+        if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+          # Second source, in case buildx is absent or too old for --format.
+          DIGEST="$(docker manifest inspect --verbose "$REF" 2>/dev/null | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 || true)"
+        fi
+        if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+          echo "  skip: $REF (absent, or no verifiable digest)"
+          continue
+        fi
+        IMAGE="${BASE}@${DIGEST}"
+        # Key the cache by the commit the image was BUILT from, not by the tag: that is the
+        # same key the develop walk uses, so falling back to an image the walk would have
+        # picked anyway reuses its replay cache instead of stranding a second multi-GB copy.
+        REV="$(docker buildx imagetools inspect "$REF" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+        if printf '%s' "$REV" | grep -qE '^[0-9a-f]{40}$'; then
+          KEY="$REV"
+        else
+          KEY="${TAG}_$(printf '%s' "${DIGEST#sha256:}" | cut -c1-12)"
+          echo "  note: no revision label on $REF; keying the cache by digest instead"
+        fi
+        echo "  hit:  $REF -> $IMAGE (${PREFIX}_COMMIT=$KEY)"
+        {
+          echo "${PREFIX}_UPSTREAM_BRANCH=${UPSTREAM_BRANCH}"
+          # Upstream's own flag means "an older develop COMMIT was used" — a benign timing
+          # race. Ours means "no develop image existed at all". Keep them distinct so a
+          # surrender to a release tag is visible downstream and in the dotenv artifact.
+          echo "${PREFIX}_UPSTREAM_FALLBACK=false"
+          echo "${PREFIX}_UPSTREAM_TAG_FALLBACK=true"
+          echo "${PREFIX}_UPSTREAM_CACHE_HIT=true"
+          echo "${PREFIX}_UPSTREAM_COMMIT=${KEY}"
+          echo "${PREFIX}_UPSTREAM_TAG=${TAG}"
+          echo "${PREFIX}_UPSTREAM_IMAGE=${IMAGE}"
+          echo "${PREFIX}_UPSTREAM_REGISTRY=${BASE}"
+          echo "${PREFIX}_IMAGE_NAME=${IMAGE}"
+          echo "${PREFIX}_COMMIT=${KEY}"
+        } > "$ENV_FILE"
+        RESOLVED="$TAG"
+        break
+      done
+      if [ -z "$RESOLVED" ]; then
+        echo "ERROR: no develop commit image and no fallback tag resolved - cannot continue."
         exit 1
       fi
-      if [ "${HAF_FORCE_FALLBACK}" != "true" ] && [ "$STATE" = "true" ]; then
-        echo "find_haf_image: resolved a develop commit image; no fallback needed."
-      else
-        if [ "${HAF_FORCE_FALLBACK}" = "true" ]; then
-          echo "HAF_FORCE_FALLBACK=true - exercising the fallback path deliberately."
-        else
-          echo "WARNING: no develop commit image for any of the last ${UPSTREAM_MAX_SEARCH} source commits."
-        fi
-        echo "         Falling back, newest first: ${HAF_FALLBACK_TAGS}"
-        BASE="${UPSTREAM_REGISTRY}"
-        if [ -n "${UPSTREAM_IMAGE:-}" ]; then BASE="${UPSTREAM_REGISTRY}/${UPSTREAM_IMAGE}"; fi
-        RESOLVED=""
-        for TAG in ${HAF_FALLBACK_TAGS}; do
-          REF="${BASE}:${TAG}"
-          # One probe answers both "does it exist" and "what is its digest". Resolving the
-          # digest is mandatory, not best-effort: HAF_COMMIT is the replay cache key, so a
-          # mutable tag as the key would let a datadir replayed by one HAF version be served
-          # to a stack running another, with nothing able to detect it. A tag we cannot pin
-          # is therefore skipped, not accepted.
-          DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
-          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
-            # Second source, in case buildx is absent or too old for --format.
-            DIGEST="$(docker manifest inspect --verbose "$REF" 2>/dev/null | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 || true)"
-          fi
-          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
-            echo "  skip: $REF (absent, or no verifiable digest)"
-            continue
-          fi
-          IMAGE="${BASE}@${DIGEST}"
-          # Key the cache by the commit the image was BUILT from, not by the tag: that is the
-          # same key the develop walk uses, so falling back to an image the walk would have
-          # picked anyway reuses its replay cache instead of stranding a second multi-GB copy.
-          REV="$(docker buildx imagetools inspect "$REF" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
-          if printf '%s' "$REV" | grep -qE '^[0-9a-f]{40}$'; then
-            KEY="$REV"
-          else
-            KEY="${TAG}_$(printf '%s' "${DIGEST#sha256:}" | cut -c1-12)"
-            echo "  note: no revision label on $REF; keying the cache by digest instead"
-          fi
-          echo "  hit:  $REF -> $IMAGE (${PREFIX}_COMMIT=$KEY)"
-          {
-            echo "${PREFIX}_UPSTREAM_BRANCH=${UPSTREAM_BRANCH}"
-            # Upstream's own flag means "an older develop COMMIT was used" — a benign timing
-            # race. Ours means "no develop image existed at all". Keep them distinct so a
-            # surrender to a release tag is visible downstream and in the dotenv artifact.
-            echo "${PREFIX}_UPSTREAM_FALLBACK=false"
-            echo "${PREFIX}_UPSTREAM_TAG_FALLBACK=true"
-            echo "${PREFIX}_UPSTREAM_CACHE_HIT=true"
-            echo "${PREFIX}_UPSTREAM_COMMIT=${KEY}"
-            echo "${PREFIX}_UPSTREAM_TAG=${TAG}"
-            echo "${PREFIX}_UPSTREAM_IMAGE=${IMAGE}"
-            echo "${PREFIX}_UPSTREAM_REGISTRY=${BASE}"
-            echo "${PREFIX}_IMAGE_NAME=${IMAGE}"
-            echo "${PREFIX}_COMMIT=${KEY}"
-          } > "$ENV_FILE"
-          RESOLVED="$TAG"
-          break
-        done
-        if [ -z "$RESOLVED" ]; then
-          echo "ERROR: no develop commit image and no fallback tag resolved - cannot continue."
-          exit 1
-        fi
-        echo "Variables in $ENV_FILE:"
-        cat "$ENV_FILE"
-      fi
+      echo "Variables in $ENV_FILE:"
+      cat "$ENV_FILE"
+    fi
 
 # Inherits HAF_APP_SKIP_PATTERNS from the top-level variables: SQL/scripts/docker/
 # Dockerfile changes DO require a re-sync; only docs/tests/CI-yaml are safe to skip.
@@ -296,13 +296,13 @@ sql-lint:
   image: python:3.12-slim
   needs: []
   script:
-    - pip install sqlfluff==3.3.0 -q
-    - sqlfluff lint db/ endpoints/ --dialect postgres
+  - pip install sqlfluff==3.3.0 -q
+  - sqlfluff lint db/ endpoints/ --dialect postgres
     # scripts/ and docker/ added with #57's two new .sql files. shell-lint already reads
     # both directories; sql-lint did not, so a new .sql there would have gone unlinted.
     #
     # scripts/uninstall_verify.sql passes STRICT, so it is linted strictly.
-    - sqlfluff lint scripts/ --dialect postgres
+  - sqlfluff lint scripts/ --dialect postgres
     # Only docker/block-processing-healthcheck.sql needs the layout rules relaxed: it is
     # fed to psql with -v and uses :'var' substitution, which sqlfluff cannot parse (it
     # reads the colon as an operator, so every placeholder becomes a spacing or indent
@@ -312,12 +312,12 @@ sql-lint:
     # Note that CLI --exclude-rules REPLACES .sqlfluff's exclude_rules rather than
     # merging, so this invocation also re-enables whatever that file turns off. That is
     # acceptable for one generated-style file; do not widen it.
-    - sqlfluff lint docker/ --dialect postgres --exclude-rules LT01,LT02,LT14
+  - sqlfluff lint docker/ --dialect postgres --exclude-rules LT01,LT02,LT14
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 openapi-drift:
   stage: lint
@@ -340,56 +340,58 @@ openapi-drift:
     # drift without someone editing the pin -- which is the intended property, but
     # it also means nothing enforces that the script's default and this file's
     # COMMON_CI_REF stay equal. They are equal today; keep them so by hand.
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl >/dev/null
-    - bash scripts/openapi_rewrite.sh
+  - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl
+    >/dev/null
+  - bash scripts/openapi_rewrite.sh
     # A pathspec that matches NOTHING also exits 0 with empty output (see the table
     # below), so a renamed endpoints/ would leave this job reporting success
     # indefinitely. Today that is caught only incidentally, by openapi_rewrite.sh's
     # cp failing first under set -e. Assert the two artifacts are tracked at the path
     # the check is about.
-    - git ls-files --error-unmatch endpoints/endpoint_schema.sql endpoints/rewrite_rules.conf >/dev/null
-    - |
-      # git status, not `git diff`: diff ignores UNTRACKED files, so a new endpoint
-      # whose generated artifact is not yet added would slip through. --porcelain is
-      # stable output by contract. (The pathspec scopes this to endpoints/; the
-      # script's own leftovers elsewhere are handled by its EXIT trap, and a failed
-      # run fails the job at the step above regardless.)
-      #
-      # `git status --porcelain` exits 0 whether the tree is clean or dirty -- drift is
-      # signalled by non-empty OUTPUT, never by the exit code. Measured:
-      #
-      #                              status --porcelain   diff --quiet
-      #   clean                      rc=0                 rc=0
-      #   tracked file modified      rc=0                 rc=1
-      #   untracked file present     rc=0                 rc=0
-      #   pathspec matches nothing   rc=0, empty          --
-      #
-      # The 0/1/>=128 taxonomy belongs to `git diff --exit-code`, which is the command
-      # this job deliberately does NOT use, for the untracked-file reason above. An
-      # earlier revision of this comment attributed it to `git status` -- harmless to
-      # the code, but it argues for collapsing this to
-      # `if ! git status --porcelain -- endpoints/ >/dev/null`, which is green forever.
-      #
-      # So a non-zero status HERE is only ever a real git failure (dubious-ownership, a
-      # GIT_STRATEGY override), and reporting it as "endpoints/ is not what the
-      # generator produces" would print an EMPTY diff and send the author off to
-      # regenerate a file that was already correct.
-      # `if ! changed=$(...)`, not a separate $? test: gitlab-runner emits
-      # `set -eo pipefail` at the top of the job script, so a failing command
-      # substitution in a plain assignment kills the shell before $? is ever read.
-      # The rc branch below only runs because the assignment is inside `if !`.
-      if ! changed="$(git status --porcelain -- endpoints/)"; then
-        echo "ERROR: git failed -- this is a runner problem, not drift."
-        exit 1
-      fi
-      if [ -n "$changed" ]; then
-        echo "ERROR: endpoints/ is not what scripts/openapi_rewrite.sh generates."
-        echo "Run it locally and commit the result."
-        echo "$changed"
-        git --no-pager diff -- endpoints/
-        exit 1
-      fi
-    - echo "endpoints/ matches the generator."
+  - git ls-files --error-unmatch endpoints/endpoint_schema.sql endpoints/rewrite_rules.conf
+    >/dev/null
+  - |
+    # git status, not `git diff`: diff ignores UNTRACKED files, so a new endpoint
+    # whose generated artifact is not yet added would slip through. --porcelain is
+    # stable output by contract. (The pathspec scopes this to endpoints/; the
+    # script's own leftovers elsewhere are handled by its EXIT trap, and a failed
+    # run fails the job at the step above regardless.)
+    #
+    # `git status --porcelain` exits 0 whether the tree is clean or dirty -- drift is
+    # signalled by non-empty OUTPUT, never by the exit code. Measured:
+    #
+    #                              status --porcelain   diff --quiet
+    #   clean                      rc=0                 rc=0
+    #   tracked file modified      rc=0                 rc=1
+    #   untracked file present     rc=0                 rc=0
+    #   pathspec matches nothing   rc=0, empty          --
+    #
+    # The 0/1/>=128 taxonomy belongs to `git diff --exit-code`, which is the command
+    # this job deliberately does NOT use, for the untracked-file reason above. An
+    # earlier revision of this comment attributed it to `git status` -- harmless to
+    # the code, but it argues for collapsing this to
+    # `if ! git status --porcelain -- endpoints/ >/dev/null`, which is green forever.
+    #
+    # So a non-zero status HERE is only ever a real git failure (dubious-ownership, a
+    # GIT_STRATEGY override), and reporting it as "endpoints/ is not what the
+    # generator produces" would print an EMPTY diff and send the author off to
+    # regenerate a file that was already correct.
+    # `if ! changed=$(...)`, not a separate $? test: gitlab-runner emits
+    # `set -eo pipefail` at the top of the job script, so a failing command
+    # substitution in a plain assignment kills the shell before $? is ever read.
+    # The rc branch below only runs because the assignment is inside `if !`.
+    if ! changed="$(git status --porcelain -- endpoints/)"; then
+      echo "ERROR: git failed -- this is a runner problem, not drift."
+      exit 1
+    fi
+    if [ -n "$changed" ]; then
+      echo "ERROR: endpoints/ is not what scripts/openapi_rewrite.sh generates."
+      echo "Run it locally and commit the result."
+      echo "$changed"
+      git --no-pager diff -- endpoints/
+      exit 1
+    fi
+  - echo "endpoints/ matches the generator."
     # Generator-fidelity is not the same as spec validity, and this MR proved it:
     # a re-indentation that the generator faithfully reproduced turned the served
     # spec INVALID (a stray key became a phantom response property) while the diff
@@ -398,23 +400,23 @@ openapi-drift:
     # lines down carries the note explaining why: an unpinned linter started
     # failing this pipeline with no repo change. A validator release that adds or
     # tightens an OpenAPI 3.1 rule would do exactly that here.
-    - pip install openapi-spec-validator==0.9.0 -q
-    - |
-      python - <<'PY'
-      import re, sys, json
-      from openapi_spec_validator import OpenAPIV31SpecValidator
-      src = open("endpoints/endpoint_schema.sql", encoding="utf-8").read()
-      m = re.search(r"openapi json = \$\$(.*?)\$\$;", src, re.S)
-      if not m:
-          sys.exit("could not extract the embedded OpenAPI blob")
-      errs = list(OpenAPIV31SpecValidator(json.loads(m.group(1))).iter_errors())
-      for e in errs:
-          print("INVALID:", list(e.absolute_path), "-", str(e)[:200])
-      sys.exit(1 if errs else 0)
-      PY
-    - echo "served OpenAPI document is valid." 
+  - pip install openapi-spec-validator==0.9.0 -q
+  - |
+    python - <<'PY'
+    import re, sys, json
+    from openapi_spec_validator import OpenAPIV31SpecValidator
+    src = open("endpoints/endpoint_schema.sql", encoding="utf-8").read()
+    m = re.search(r"openapi json = \$\$(.*?)\$\$;", src, re.S)
+    if not m:
+        sys.exit("could not extract the embedded OpenAPI blob")
+    errs = list(OpenAPIV31SpecValidator(json.loads(m.group(1))).iter_errors())
+    for e in errs:
+        print("INVALID:", list(e.absolute_path), "-", str(e)[:200])
+    sys.exit(1 if errs else 0)
+    PY
+  - echo "served OpenAPI document is valid."
   rules:
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 # -----------------------------------------------------------------------------
 # haf-drift -- the only thing in this repo that compares our HAF transcription
@@ -445,9 +447,9 @@ openapi-drift:
   image: alpine:3.20
   needs: []
   before_script:
-    - apk add --no-cache bash curl >/dev/null
+  - apk add --no-cache bash curl >/dev/null
   rules:
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 # Blocking. Checks the HAF we pin and run.
 haf-drift:
@@ -455,7 +457,7 @@ haf-drift:
   variables:
     HAF_DRIFT_REF: "pinned"
   script:
-    - bash scripts/check_haf_drift.sh
+  - bash scripts/check_haf_drift.sh
 
 # Advisory. Checks where HAF is going.
 #
@@ -468,7 +470,7 @@ haf-drift-develop:
   variables:
     HAF_DRIFT_REF: "develop"
   script:
-    - bash scripts/check_haf_drift.sh
+  - bash scripts/check_haf_drift.sh
   allow_failure: true
 
 shell-lint:
@@ -478,12 +480,12 @@ shell-lint:
   image: koalaman/shellcheck-alpine:v0.11.0
   needs: []
   script:
-    - find scripts/ docker/ -name "*.sh" -exec shellcheck --severity=warning {} +
+  - find scripts/ docker/ -name "*.sh" -exec shellcheck --severity=warning {} +
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 # Behavioural tests for the shell scripts that make up the image contract (#57):
 # the entrypoint's verb dispatch, the block-processing healthcheck, the uninstall
@@ -505,13 +507,13 @@ shell-tests:
     # pyyaml: tests/unit/test_compose_contract.py parses docker-compose.yml. It FAILS
     # rather than skips when the module is missing under CI, for the same reason the
     # bash harness does -- a silent skip would put the compose file back to uncovered.
-    - pip install --quiet 'pytest<9' pyyaml
+  - pip install --quiet 'pytest<9' pyyaml
     # CI is set, so tests/unit/shell_harness.py FAILS rather than skips if bash ever
     # leaves the image -- otherwise every shell test would quietly stop running and the
     # pipeline would stay green with the scripts uncovered.
-    - PYTHONPATH=. pytest tests/unit/ -q
+  - PYTHONPATH=. pytest tests/unit/ -q
   rules:
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 hadolint:
   stage: lint
@@ -521,12 +523,12 @@ hadolint:
     # DL3066 (non-numeric user-id): "USER root" is deliberate (DL3002 is already
     # ignored for the same reason); the rule appeared in a newer hadolint and the
     # unpinned latest-alpine image made it start failing without a repo change.
-    - hadolint --ignore DL3006 --ignore DL3002 --ignore DL3066 Dockerfile
+  - hadolint --ignore DL3006 --ignore DL3002 --ignore DL3066 Dockerfile
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 compose-validate:
   stage: lint
@@ -545,24 +547,24 @@ compose-validate:
     HAF_DATA_DIRECTORY: "/tmp/haf_data"
     HAF_SHM_DIRECTORY: "/tmp/haf_shm"
   script:
-    - cd docker
-    - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
-    - docker compose -f docker-compose-ci-test.yml config --quiet
-    - docker compose -f docker-compose-ci-install.yml config --quiet
+  - cd docker
+  - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
+  - docker compose -f docker-compose-ci-test.yml config --quiet
+  - docker compose -f docker-compose-ci-install.yml config --quiet
     # ...and again with HAF_STATS_IMAGE UNSET, which is how pattern-test and
     # regression-test actually read this file. The dummy above masks that: on pipeline
     # 178863 a `${HAF_STATS_IMAGE:?}` in the PROFILED haf-stats-setup service passed
     # this lint and then broke both sibling lanes, because compose interpolates EVERY
     # service in the file -- `profiles:` gates whether a service STARTS, not whether
     # its definition is interpolated. This turns that incident into a 15-second gate.
-    - env -u HAF_STATS_IMAGE docker compose -f docker-compose-ci-test.yml config --quiet
-    - docker compose -f docker-compose-ci.yml config --quiet
-    - docker compose --env-file .env -f docker-compose-test.yml config --quiet
+  - env -u HAF_STATS_IMAGE docker compose -f docker-compose-ci-test.yml config --quiet
+  - docker compose -f docker-compose-ci.yml config --quiet
+  - docker compose --env-file .env -f docker-compose-test.yml config --quiet
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 # =============================================================================
 # BUILD
@@ -573,14 +575,14 @@ docker-build:
   image: docker:24
   needs: []
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   before_script:
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
-    - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA"
-        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+  - docker build --build-arg GIT_HASH="$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    .
     # Smoke-run the image (#57). Be precise about the gap this closes, because an
     # earlier revision of this comment overstated it: the `sync` job DOES start
     # containers from this image and exercises install_app/process_blocks for real. What
@@ -600,127 +602,127 @@ docker-build:
     # before the first connection. `uninstall_app` without --force is deliberately NOT
     # smoke-tested -- it calls wait_for_postgres BEFORE its no-TTY refusal, so it would
     # hang here rather than fail. A unit test covers it instead.
-    - |
-      set -e
-      IMG="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-      # CAPTURES instead of streaming, and that is not cosmetic. Five call sites below
-      # did `expect_ok ... | grep -q X`. grep -q exits the instant it matches, so the
-      # pipe closes while the producer is still writing, and the producer takes EPIPE.
-      # It is a race against pipe-buffer timing: it passed almost always and failed
-      # occasionally, costing pipeline 179123 a spurious red on a commit whose build
-      # context was byte-identical to the previous green one. (#86)
-      #
-      # WHY A RED, when the pipeline's LAST element (grep -q) had succeeded: because
-      # gitlab-runner emits `set -eo pipefail`, which this file already records at the
-      # openapi-drift job above -- see the comment beginning "gitlab-runner emits". With
-      # pipefail, the EPIPE'd producer's status is the pipeline's status.
-      #
-      # TWO producers could supply it, and the trace showed the first:
-      #   * the docker CLI -- `write /dev/stdout: broken pipe`, exit 1 (what job 3271974 hit)
-      #   * the container itself -- docker/docker_entrypoint.sh and scripts/common.sh both
-      #     run `set -euo pipefail`, and every print_help is itself a `sed ... | sed ...`,
-      #     so a SIGPIPE on the inner sed exits 141 and docker propagates it.
-      # Removing the pipe closes both, and makes the assertions independent of pipefail.
-      #
-      # expect_fail already captured rather than piped -- that half was never the bug.
-      # It did NOT split its streams, so this change gives both helpers the same shape.
-      #
-      # STDOUT AND STDERR STAY SEPARATE. The old pipe fed grep STDOUT ONLY, so folding
-      # stderr in would quietly widen every assertion -- and one of them, the entrypoint
-      # usage check below, exists precisely to assert that usage goes to stdout
-      # (docker_entrypoint.sh says so, and exits 1 on the stderr path). Merging the
-      # streams would have let `usage >&2` pass it.
-      #
-      # `cat` afterwards on purpose, matching expect_fail: an assertion that fails under
-      # `grep -q` otherwise tells you only that it failed, never what the image said.
-      # `|| true` on the cats so a redirect failure still reports docker's real rc rather
-      # than cat's.
-      #
-      # COUPLED PAIR: `expect_ok ...` and the `grep ... "$OUT"` after it are one
-      # assertion split across two statements. Do not insert another expect_ok between
-      # them -- the grep would silently read the wrong output and still pass.
-      OUT=/tmp/expect_ok_out
-      ERR=/tmp/expect_ok_err
-      expect_ok()   { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; return "$rc"; }
-      # 124 is timeout's own kill, 125/126 are docker/exec failures, 127 is
-      # "not found" -- none of them is the script rejecting its input. Excluding
-      # them is the rule round two arrived at the hard way: an assertion whose
-      # expected outcome is a non-zero exit must name a SPECIFIC reachable exit.
-      # Streams split for the SAME reason as expect_ok above, and the assertions below
-      # now name which one they expect. Merging them let an error message move between
-      # stdout and stderr unnoticed: `unknown verb` is written to stderr
-      # (docker_entrypoint.sh), while `is not a valid option` and `not supported yet`
-      # come from common.sh's log(), which echoes to stdout. A merged capture cannot
-      # tell those apart, and the comment above would have been half true -- expect_ok
-      # split, expect_fail merged.
-      expect_fail() { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; case "$rc" in 0|124|125|126|127) return 1 ;; *) return 0 ;; esac; }
+  - |
+    set -e
+    IMG="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    # CAPTURES instead of streaming, and that is not cosmetic. Five call sites below
+    # did `expect_ok ... | grep -q X`. grep -q exits the instant it matches, so the
+    # pipe closes while the producer is still writing, and the producer takes EPIPE.
+    # It is a race against pipe-buffer timing: it passed almost always and failed
+    # occasionally, costing pipeline 179123 a spurious red on a commit whose build
+    # context was byte-identical to the previous green one. (#86)
+    #
+    # WHY A RED, when the pipeline's LAST element (grep -q) had succeeded: because
+    # gitlab-runner emits `set -eo pipefail`, which this file already records at the
+    # openapi-drift job above -- see the comment beginning "gitlab-runner emits". With
+    # pipefail, the EPIPE'd producer's status is the pipeline's status.
+    #
+    # TWO producers could supply it, and the trace showed the first:
+    #   * the docker CLI -- `write /dev/stdout: broken pipe`, exit 1 (what job 3271974 hit)
+    #   * the container itself -- docker/docker_entrypoint.sh and scripts/common.sh both
+    #     run `set -euo pipefail`, and every print_help is itself a `sed ... | sed ...`,
+    #     so a SIGPIPE on the inner sed exits 141 and docker propagates it.
+    # Removing the pipe closes both, and makes the assertions independent of pipefail.
+    #
+    # expect_fail already captured rather than piped -- that half was never the bug.
+    # It did NOT split its streams, so this change gives both helpers the same shape.
+    #
+    # STDOUT AND STDERR STAY SEPARATE. The old pipe fed grep STDOUT ONLY, so folding
+    # stderr in would quietly widen every assertion -- and one of them, the entrypoint
+    # usage check below, exists precisely to assert that usage goes to stdout
+    # (docker_entrypoint.sh says so, and exits 1 on the stderr path). Merging the
+    # streams would have let `usage >&2` pass it.
+    #
+    # `cat` afterwards on purpose, matching expect_fail: an assertion that fails under
+    # `grep -q` otherwise tells you only that it failed, never what the image said.
+    # `|| true` on the cats so a redirect failure still reports docker's real rc rather
+    # than cat's.
+    #
+    # COUPLED PAIR: `expect_ok ...` and the `grep ... "$OUT"` after it are one
+    # assertion split across two statements. Do not insert another expect_ok between
+    # them -- the grep would silently read the wrong output and still pass.
+    OUT=/tmp/expect_ok_out
+    ERR=/tmp/expect_ok_err
+    expect_ok()   { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; return "$rc"; }
+    # 124 is timeout's own kill, 125/126 are docker/exec failures, 127 is
+    # "not found" -- none of them is the script rejecting its input. Excluding
+    # them is the rule round two arrived at the hard way: an assertion whose
+    # expected outcome is a non-zero exit must name a SPECIFIC reachable exit.
+    # Streams split for the SAME reason as expect_ok above, and the assertions below
+    # now name which one they expect. Merging them let an error message move between
+    # stdout and stderr unnoticed: `unknown verb` is written to stderr
+    # (docker_entrypoint.sh), while `is not a valid option` and `not supported yet`
+    # come from common.sh's log(), which echoes to stdout. A merged capture cannot
+    # tell those apart, and the comment above would have been half true -- expect_ok
+    # split, expect_fail merged.
+    expect_fail() { rc=0; timeout 60 docker run --rm "$IMG" "$@" >"$OUT" 2>"$ERR" || rc=$?; cat "$OUT" || true; cat "$ERR" >&2 || true; case "$rc" in 0|124|125|126|127) return 1 ;; *) return 0 ;; esac; }
 
-      echo "--- the image's userland is what the scripts assume ---"
-      # Asserted in three places in this repo and verified nowhere until now: that the
-      # base is Alpine (so `date` is BusyBox and has no --iso-8601), and that bash exists
-      # for the #!/bin/bash scripts. One line settles both.
-      docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
-      echo "--- entrypoint dispatches its own usage on stdout ---"
-      expect_ok --help; grep -q "install_app" "$OUT"
-      echo "--- unknown verb fails with the right message, not merely non-zero ---"
-      expect_fail install-app; grep -q "unknown verb: install-app" "$ERR"
-      echo "--- the scripts parse and render help under the image's BusyBox userland ---"
-      expect_ok install_app    --help; grep -q -- "--swagger-url" "$OUT"
-      expect_ok uninstall_app  --help; grep -q -- "--force" "$OUT"
-      expect_ok process_blocks --help; grep -q -- "--host" "$OUT"
-      echo "--- an invalid option is rejected, not ignored ---"
-      expect_fail install_app --nope; grep -q "is not a valid option" "$OUT"
-      echo "--- a foreign --schema warns and does NOT exit at the option loop ---"
-      # It must not hard-fail: upstream module files pass --schema= to process_blocks on
-      # a service that is `restart: on-failure`, so exiting here is a permanent
-      # crash-loop.
-      #
-      # `--help` AFTER it, deliberately. The option loop processes every argument, so the
-      # warning is emitted and then --help exits 0 -- WITHOUT falling into
-      # wait_for_postgres. The previous form was `expect_fail install_app
-      # --schema=btracker_app`, which HUNG this job for 58 minutes on the first run after
-      # the hard failure was removed: with nothing to exit at, the script reached
-      # wait_for_postgres, an unbounded `until pg_isready; do sleep 2; done`, against a
-      # container that has no `haf` host. `timeout 60` did not save it -- it kills the
-      # docker CLI while the container keeps running and holds the redirect open, so the
-      # shell waits on the pipe. The job had to be cancelled by hand.
-      #
-      # Two lessons kept here on purpose: an assertion whose expected outcome is a
-      # NON-zero exit must name a specific reachable exit, not "anything but 0"; and a
-      # smoke test must never invoke a verb in a way that reaches the connect.
-      expect_ok install_app --schema=btracker_app --help
-      # scripts/common.sh's log() writes to stdout, so $OUT is the right file here.
-      # (The old form redirected into /tmp/o -- expect_fail's file -- which nothing read
-      # in between, but was a clobber waiting to matter.)
-      grep -q "WARNING: --schema" "$OUT"
-      echo "--- a connection URI is REFUSED, not half-honoured ---"
-      # Honouring it moved only the psql connection: the messages and the teardown's
-      # confirmation prompt still read POSTGRES_HOST/POSTGRES_DB, so it could act on one
-      # database while reporting another. Refusing is safe -- --postgres-url appears in
-      # one upstream module file, on a service with no restart policy.
-      for verb in install_app uninstall_app process_blocks; do
-        expect_fail "$verb" --postgres-url=postgresql://haf_admin@haf/haf_block_log
-        grep -q "not supported yet" "$OUT" || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
-        grep -q -- "--host=" "$OUT" || { echo "FAIL: $verb did not name the alternative flags"; exit 1; }
-      done
-      echo "--- the compat path the LIVE node uses still dispatches ---"
-      expect_ok /app/scripts/install_app.sh --help; grep -q -- "--swagger-url" "$OUT"
-      echo "--- the healthcheck ships at the path module files hardcode ---"
-      expect_ok test -r /app/block-processing-healthcheck.sql
-      timeout 60 docker run --rm --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h 2>&1 && exit 1
-      cat /tmp/h; grep -q "hasn.t started yet" /tmp/h
-      echo "--- and fails CLOSED when it has a startup time but no database ---"
-      timeout 60 docker run --rm -e HAF_STATS_STARTUP_TIME_FILE=/etc/hostname         --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h2 2>&1 && exit 1
-      cat /tmp/h2
-      grep -q "psql: error:" /tmp/h2
-      # `if ... then exit 1`, NOT `! grep ...`. POSIX and bash both exempt a
-      # !-inverted pipeline from errexit, so `set -e; ! grep -q X` CONTINUES when X
-      # matches -- the assertion could never fail. Verified locally.
-      if grep -q "healthcheck SQL not found" /tmp/h2; then
-        echo "the healthcheck could not find its .sql -- COPY missing?" >&2; exit 1
-      fi
-      echo "image smoke tests passed"
-    # BRANCH PIPELINES ONLY, and that guard is load-bearing (hive/haf_stats#66).
+    echo "--- the image's userland is what the scripts assume ---"
+    # Asserted in three places in this repo and verified nowhere until now: that the
+    # base is Alpine (so `date` is BusyBox and has no --iso-8601), and that bash exists
+    # for the #!/bin/bash scripts. One line settles both.
+    docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
+    echo "--- entrypoint dispatches its own usage on stdout ---"
+    expect_ok --help; grep -q "install_app" "$OUT"
+    echo "--- unknown verb fails with the right message, not merely non-zero ---"
+    expect_fail install-app; grep -q "unknown verb: install-app" "$ERR"
+    echo "--- the scripts parse and render help under the image's BusyBox userland ---"
+    expect_ok install_app    --help; grep -q -- "--swagger-url" "$OUT"
+    expect_ok uninstall_app  --help; grep -q -- "--force" "$OUT"
+    expect_ok process_blocks --help; grep -q -- "--host" "$OUT"
+    echo "--- an invalid option is rejected, not ignored ---"
+    expect_fail install_app --nope; grep -q "is not a valid option" "$OUT"
+    echo "--- a foreign --schema warns and does NOT exit at the option loop ---"
+    # It must not hard-fail: upstream module files pass --schema= to process_blocks on
+    # a service that is `restart: on-failure`, so exiting here is a permanent
+    # crash-loop.
+    #
+    # `--help` AFTER it, deliberately. The option loop processes every argument, so the
+    # warning is emitted and then --help exits 0 -- WITHOUT falling into
+    # wait_for_postgres. The previous form was `expect_fail install_app
+    # --schema=btracker_app`, which HUNG this job for 58 minutes on the first run after
+    # the hard failure was removed: with nothing to exit at, the script reached
+    # wait_for_postgres, an unbounded `until pg_isready; do sleep 2; done`, against a
+    # container that has no `haf` host. `timeout 60` did not save it -- it kills the
+    # docker CLI while the container keeps running and holds the redirect open, so the
+    # shell waits on the pipe. The job had to be cancelled by hand.
+    #
+    # Two lessons kept here on purpose: an assertion whose expected outcome is a
+    # NON-zero exit must name a specific reachable exit, not "anything but 0"; and a
+    # smoke test must never invoke a verb in a way that reaches the connect.
+    expect_ok install_app --schema=btracker_app --help
+    # scripts/common.sh's log() writes to stdout, so $OUT is the right file here.
+    # (The old form redirected into /tmp/o -- expect_fail's file -- which nothing read
+    # in between, but was a clobber waiting to matter.)
+    grep -q "WARNING: --schema" "$OUT"
+    echo "--- a connection URI is REFUSED, not half-honoured ---"
+    # Honouring it moved only the psql connection: the messages and the teardown's
+    # confirmation prompt still read POSTGRES_HOST/POSTGRES_DB, so it could act on one
+    # database while reporting another. Refusing is safe -- --postgres-url appears in
+    # one upstream module file, on a service with no restart policy.
+    for verb in install_app uninstall_app process_blocks; do
+      expect_fail "$verb" --postgres-url=postgresql://haf_admin@haf/haf_block_log
+      grep -q "not supported yet" "$OUT" || { echo "FAIL: $verb did not refuse --postgres-url clearly"; exit 1; }
+      grep -q -- "--host=" "$OUT" || { echo "FAIL: $verb did not name the alternative flags"; exit 1; }
+    done
+    echo "--- the compat path the LIVE node uses still dispatches ---"
+    expect_ok /app/scripts/install_app.sh --help; grep -q -- "--swagger-url" "$OUT"
+    echo "--- the healthcheck ships at the path module files hardcode ---"
+    expect_ok test -r /app/block-processing-healthcheck.sql
+    timeout 60 docker run --rm --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h 2>&1 && exit 1
+    cat /tmp/h; grep -q "hasn.t started yet" /tmp/h
+    echo "--- and fails CLOSED when it has a startup time but no database ---"
+    timeout 60 docker run --rm -e HAF_STATS_STARTUP_TIME_FILE=/etc/hostname         --entrypoint /app/block-processing-healthcheck.sh "$IMG" >/tmp/h2 2>&1 && exit 1
+    cat /tmp/h2
+    grep -q "psql: error:" /tmp/h2
+    # `if ... then exit 1`, NOT `! grep ...`. POSIX and bash both exempt a
+    # !-inverted pipeline from errexit, so `set -e; ! grep -q X` CONTINUES when X
+    # matches -- the assertion could never fail. Verified locally.
+    if grep -q "healthcheck SQL not found" /tmp/h2; then
+      echo "the healthcheck could not find its .sql -- COPY missing?" >&2; exit 1
+    fi
+    echo "image smoke tests passed"
+   # BRANCH PIPELINES ONLY, and that guard is load-bearing (hive/haf_stats#66).
     #
     # This job also runs on a tag, because sync and reinstall-test carry a NON-OPTIONAL
     # `needs: docker-build` and GitLab refuses to create a pipeline whose needs cannot
@@ -739,10 +741,10 @@ docker-build:
     # simply not published. publish_tag in the release stage then pulls the SHA image
     # the develop pipeline tested and retags it, so the released bytes ARE the tested
     # bytes. `latest` gets the same treatment in publish_latest, for the same reason.
-    - |
-      if [ -z "${CI_COMMIT_TAG:-}" ]; then
-        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-      fi
+  - |
+    if [ -z "${CI_COMMIT_TAG:-}" ]; then
+      docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    fi
   rules:
     # Branches AND tags. Workflows/Branch-Pipelines.gitlab-ci.yml creates pipelines
     # for both and no merge_request_event pipelines, so GitLab shows the branch
@@ -816,8 +818,8 @@ docker-build:
     # is not byte-identical to what was tested. The hole is twice as wide as stated. Small and upstream-owned,
     # but it is precisely the hole this sentence was written to close, so it is stated
     # rather than papered over.
-    - if: $CI_COMMIT_BRANCH
-    - if: $CI_COMMIT_TAG
+  - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_TAG
 
 # Build + push the PostgREST URL rewriter image (Dockerfile.rewriter: openresty
 # serving clean REST URLs that map to /rpc/ calls, per the rules generated from
@@ -856,25 +858,23 @@ docker-build-rewriter:
   image: docker:24
   needs: []
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   before_script:
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
-    - docker build -f Dockerfile.rewriter
-        --build-arg GIT_COMMIT_SHA="$CI_COMMIT_SHA"
-        --build-arg GIT_CURRENT_BRANCH="${CI_COMMIT_BRANCH:-}"
-        --build-arg GIT_LAST_LOG_MESSAGE="$CI_COMMIT_TITLE"
-        --build-arg BUILD_TIME="$CI_JOB_STARTED_AT"
-        -t "$CI_REGISTRY_IMAGE/postgrest-rewriter:$CI_COMMIT_SHORT_SHA" .
+  - docker build -f Dockerfile.rewriter --build-arg GIT_COMMIT_SHA="$CI_COMMIT_SHA"
+    --build-arg GIT_CURRENT_BRANCH="${CI_COMMIT_BRANCH:-}" --build-arg GIT_LAST_LOG_MESSAGE="$CI_COMMIT_TITLE"
+    --build-arg BUILD_TIME="$CI_JOB_STARTED_AT" -t "$CI_REGISTRY_IMAGE/postgrest-rewriter:$CI_COMMIT_SHORT_SHA"
+    .
     # Branch pipelines only -- see the long note in docker-build. This image is the one
     # that makes the rebuild-is-not-the-same-bytes problem provable rather than
     # theoretical, because BUILD_TIME above lands in an OCI label.
-    - |
-      if [ -z "${CI_COMMIT_TAG:-}" ]; then
-        docker push "$CI_REGISTRY_IMAGE/postgrest-rewriter:$CI_COMMIT_SHORT_SHA"
-      fi
+  - |
+    if [ -z "${CI_COMMIT_TAG:-}" ]; then
+      docker push "$CI_REGISTRY_IMAGE/postgrest-rewriter:$CI_COMMIT_SHORT_SHA"
+    fi
   rules:
     # Branches and tags, same as docker-build, and for the SAME surviving reason:
     # reinstall-test's non-optional `needs`. An earlier revision said "the publish job
@@ -882,8 +882,8 @@ docker-build-rewriter:
     # true when the SHA push became branch-only and publish_tag took over creating
     # ${CI_COMMIT_TAG}. Same correction as on docker-build; this copy was missed the
     # first time.
-    - if: $CI_COMMIT_BRANCH
-    - if: $CI_COMMIT_TAG
+  - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_TAG
 
 # Replay the 5M reference chain ONCE and cache the HAF datadir (cache type `haf`,
 # keyed by HAF_COMMIT). Shared across all app commits — cache-hit runs are instant.
@@ -895,8 +895,8 @@ prepare_haf_data:
     BLOCK_LOG_SOURCE_DIR: "$BLOCK_LOG_SOURCE_DIR_5M"
     CONFIG_INI_SOURCE: "/tmp/config_5M.ini"
   before_script:
-    - curl -fsSL "${COMMON_CI_URL}/haf-app-tools/config/config_5M.ini" -o /tmp/config_5M.ini
-    - echo "Using HAF image:${HAF_IMAGE_NAME} (commit:${HAF_COMMIT})"
+  - curl -fsSL "${COMMON_CI_URL}/haf-app-tools/config/config_5M.ini" -o /tmp/config_5M.ini
+  - echo "Using HAF image:${HAF_IMAGE_NAME} (commit:${HAF_COMMIT})"
   # Warm the shared HAF replay cache on NFS when it's missing, so a `sync` that
   # lands on a different builder gets a hit instead of dying on an NFS miss.
   #
@@ -917,33 +917,33 @@ prepare_haf_data:
   # short-circuit. Copies the already-built local tar (no re-tar), is a no-op once
   # NFS is warm, and is a safe no-op on the NFS host (no /cache/<type>_<key>.tar).
   script:
-    - !reference [.prepare_haf_data_5m, script]
-    - |
-      NFS_TAR="${CACHE_NFS_PATH:-/nfs/ci-cache}/${HAF_CACHE_TYPE:-haf}/${HAF_COMMIT}.tar"
-      LOCAL_TAR="${CACHE_LOCAL_PATH:-/cache}/${HAF_CACHE_TYPE:-haf}_${HAF_COMMIT}.tar"
-      if [[ -n "${FILTERED_CACHE_KEY:-}" ]]; then
-        echo "NFS warm guard: skipped (custom cache key)"
-      elif head -c1 "$NFS_TAR" >/dev/null 2>&1; then
-        # head (open syscall) not [[ -f ]] (stat): dodges the NFS negative-dentry
-        # cache that can make a present file look missing for seconds.
-        echo "NFS warm guard: HAF cache already on NFS ($NFS_TAR)"
-      elif [[ ! -f "$LOCAL_TAR" ]]; then
-        echo "NFS warm guard: no client-local tar at $LOCAL_TAR; nothing to copy (NFS host, or template already pushed)"
+  - !reference [.prepare_haf_data_5m, script]
+  - |
+    NFS_TAR="${CACHE_NFS_PATH:-/nfs/ci-cache}/${HAF_CACHE_TYPE:-haf}/${HAF_COMMIT}.tar"
+    LOCAL_TAR="${CACHE_LOCAL_PATH:-/cache}/${HAF_CACHE_TYPE:-haf}_${HAF_COMMIT}.tar"
+    if [[ -n "${FILTERED_CACHE_KEY:-}" ]]; then
+      echo "NFS warm guard: skipped (custom cache key)"
+    elif head -c1 "$NFS_TAR" >/dev/null 2>&1; then
+      # head (open syscall) not [[ -f ]] (stat): dodges the NFS negative-dentry
+      # cache that can make a present file look missing for seconds.
+      echo "NFS warm guard: HAF cache already on NFS ($NFS_TAR)"
+    elif [[ ! -f "$LOCAL_TAR" ]]; then
+      echo "NFS warm guard: no client-local tar at $LOCAL_TAR; nothing to copy (NFS host, or template already pushed)"
+    else
+      echo "NFS warm guard: NFS HAF cache MISSING - copying client-local tar -> NFS so cross-builder sync hits"
+      TMP="${NFS_TAR}.tmp.$(hostname 2>/dev/null || echo h).${CI_JOB_ID:-$$}"
+      mkdir -p "$(dirname "$NFS_TAR")"
+      if cp "$LOCAL_TAR" "$TMP" && mv "$TMP" "$NFS_TAR"; then
+        echo "NFS warm guard: pushed $(stat -c %s "$NFS_TAR" 2>/dev/null || echo '?') bytes to $NFS_TAR"
       else
-        echo "NFS warm guard: NFS HAF cache MISSING - copying client-local tar -> NFS so cross-builder sync hits"
-        TMP="${NFS_TAR}.tmp.$(hostname 2>/dev/null || echo h).${CI_JOB_ID:-$$}"
-        mkdir -p "$(dirname "$NFS_TAR")"
-        if cp "$LOCAL_TAR" "$TMP" && mv "$TMP" "$NFS_TAR"; then
-          echo "NFS warm guard: pushed $(stat -c %s "$NFS_TAR" 2>/dev/null || echo '?') bytes to $NFS_TAR"
-        else
-          rm -f "$TMP" 2>/dev/null || true
-          echo "WARNING: NFS warm guard copy failed (non-fatal); cross-builder sync may still miss"
-        fi
+        rm -f "$TMP" 2>/dev/null || true
+        echo "WARNING: NFS warm guard copy failed (non-fatal); cross-builder sync may still miss"
       fi
+    fi
   tags:
-    - public-runner-docker
-    - data-cache-storage
-    - fast
+  - public-runner-docker
+  - data-cache-storage
+  - fast
 
 # =============================================================================
 # SYNC — install schema + process to head against the pre-replayed datadir,
@@ -951,22 +951,22 @@ prepare_haf_data:
 # =============================================================================
 sync:
   extends:
-    - .docker_image_builder_job_template
-    - .haf_app_sync_variables
+  - .docker_image_builder_job_template
+  - .haf_app_sync_variables
   stage: sync
   image: "${HAF_APP_TEST_RUNNER_IMAGE}"
   timeout: 2h   # NFS cache push can take a while on busy days
   needs:
-    - job: detect_changes
-      artifacts: true
-      optional: true
-    - job: find_haf_image
-      artifacts: true
-    - job: prepare_haf_data
-      artifacts: true
-    - job: docker-build
+  - job: detect_changes
+    artifacts: true
+    optional: true
+  - job: find_haf_image
+    artifacts: true
+  - job: prepare_haf_data
+    artifacts: true
+  - job: docker-build
     # sync starts docker-compose.yml, which since #61 includes haf-stats-rewriter.
-    - job: docker-build-rewriter
+  - job: docker-build-rewriter
   variables:
     DOCKER_HOST: tcp://docker:2376
     DOCKER_CERT_PATH: /certs/client
@@ -994,130 +994,131 @@ sync:
     HAF_STATS_REWRITER_IMAGE: "${CI_REGISTRY_IMAGE}/postgrest-rewriter:${CI_COMMIT_SHORT_SHA}"
     POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
     POSTGRES_ACCESS: "postgresql://haf_admin@docker:5432/haf_block_log"
-    COMPOSE_OPTIONS_STRING: "--env-file ci.env --file docker-compose.yml --file overrides/ci.yml --ansi never"
+    COMPOSE_OPTIONS_STRING: "--env-file ci.env --file docker-compose.yml --file overrides/ci.yml
+      --ansi never"
     # process is an infinite loop, so the fast-healthcheck override targets it too.
     CI_FAST_HEALTHCHECK_SERVICES: "haf haf-stats-process"
   before_script:
     # Matches balance_tracker's sync: login + git safe.dir + CI healthcheck override
     # come from .haf_app_sync_setup; the dind daemon (services + DOCKER_HOST) is all
     # `docker compose up` needs — no buildkit/builder setup required here.
-    - !reference [.haf_app_sync_setup, script]
-    - !reference [.haf_app_smart_cache_lookup, script]
+  - !reference [.haf_app_sync_setup, script]
+  - !reference [.haf_app_smart_cache_lookup, script]
   script:
-    - |
-      CACHE_HIT=$(cat /tmp/cache_hit 2>/dev/null || echo "false")
-      if [[ "$CACHE_HIT" == "true" ]]; then
-        echo "App sync cache hit (${APP_SYNC_CACHE_TYPE}) - nothing to sync."
-        exit 0
-      fi
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting sync stack..."
-      # The smart cache lookup extracted the `haf` (pre-replayed) datadir to
-      # ${DATADIR}. HAF runs --skip-hived, but the compose bind-mounts
-      # ./blockchain, so seed it from the cache (deref symlinks) if present.
-      mkdir -p "${CI_PROJECT_DIR}/docker/blockchain"
-      if [[ -d "${DATADIR}/blockchain" ]] && [[ -n "$(ls -A "${DATADIR}/blockchain" 2>/dev/null)" ]]; then
-        cp -aL "${DATADIR}/blockchain"/* "${CI_PROJECT_DIR}/docker/blockchain/" 2>/dev/null || true
-        sudo rm -rf "${DATADIR}/blockchain"
-      fi
+  - |
+    CACHE_HIT=$(cat /tmp/cache_hit 2>/dev/null || echo "false")
+    if [[ "$CACHE_HIT" == "true" ]]; then
+      echo "App sync cache hit (${APP_SYNC_CACHE_TYPE}) - nothing to sync."
+      exit 0
+    fi
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting sync stack..."
+    # The smart cache lookup extracted the `haf` (pre-replayed) datadir to
+    # ${DATADIR}. HAF runs --skip-hived, but the compose bind-mounts
+    # ./blockchain, so seed it from the cache (deref symlinks) if present.
+    mkdir -p "${CI_PROJECT_DIR}/docker/blockchain"
+    if [[ -d "${DATADIR}/blockchain" ]] && [[ -n "$(ls -A "${DATADIR}/blockchain" 2>/dev/null)" ]]; then
+      cp -aL "${DATADIR}/blockchain"/* "${CI_PROJECT_DIR}/docker/blockchain/" 2>/dev/null || true
+      sudo rm -rf "${DATADIR}/blockchain"
+    fi
 
-      cd "${CI_PROJECT_DIR}/docker"
-      # PGRST_DB_URI below carries options=-c statement_timeout: it must be repeated on every
-      # path that DEFINES the variable, because the docker-compose.yml default is bypassed
-      # whenever it is set. Without it CI runs the endpoints against real data with no query
-      # timeout at all, which is exactly where a runaway would matter most. (#48)
-      cat > ci.env <<EOF
-      HAF_IMAGE_NAME=${HAF_IMAGE_NAME}
-      HAF_STATS_IMAGE=${HAF_STATS_IMAGE}
-      POSTGREST_IMAGE=${POSTGREST_IMAGE}
-      HAF_STATS_REWRITER_IMAGE=${HAF_STATS_REWRITER_IMAGE}
-      HAF_DATA_DIRECTORY=${HAF_DATA_DIRECTORY}
-      HAF_SHM_DIRECTORY=${HAF_SHM_DIRECTORY}
-      PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s
-      PGRST_DB_SCHEMA=haf_stats_endpoints
-      PGRST_DB_ANON_ROLE=haf_stats_user
-      PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app
-      EOF
-      cat ci.env
+    cd "${CI_PROJECT_DIR}/docker"
+    # PGRST_DB_URI below carries options=-c statement_timeout: it must be repeated on every
+    # path that DEFINES the variable, because the docker-compose.yml default is bypassed
+    # whenever it is set. Without it CI runs the endpoints against real data with no query
+    # timeout at all, which is exactly where a runaway would matter most. (#48)
+    cat > ci.env <<EOF
+    HAF_IMAGE_NAME=${HAF_IMAGE_NAME}
+    HAF_STATS_IMAGE=${HAF_STATS_IMAGE}
+    POSTGREST_IMAGE=${POSTGREST_IMAGE}
+    HAF_STATS_REWRITER_IMAGE=${HAF_STATS_REWRITER_IMAGE}
+    HAF_DATA_DIRECTORY=${HAF_DATA_DIRECTORY}
+    HAF_SHM_DIRECTORY=${HAF_SHM_DIRECTORY}
+    PGRST_DB_URI=postgresql://haf_stats_owner@haf:5432/haf_block_log?options=-c%20statement_timeout%3D30s
+    PGRST_DB_SCHEMA=haf_stats_endpoints
+    PGRST_DB_ANON_ROLE=haf_stats_user
+    PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app
+    EOF
+    cat ci.env
 
-      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
-      docker compose "${COMPOSE_OPTIONS[@]}" config
-      # Dump the one-shot containers' logs if `up` fails. Log collection lives in the
-      # shutdown step below, which never runs when `up` itself aborts -- so an install
-      # failure reported only as `service "haf-stats-setup" didn't complete
-      # successfully: exit 1` left NOTHING to diagnose from, and the artifact upload
-      # then failed too because no *.log had been written.
-      #
-      # --no-build: haf-stats-rewriter is the one service with a build: stanza, and
-      # without this flag a failed pull of HAF_STATS_REWRITER_IMAGE does not fail `up` --
-      # compose logs `manifest unknown`, builds the working tree, and the job goes green
-      # (job 3270294 did exactly that). This lane exists to run the PUBLISHED image, so a
-      # missing one must be an error. No service here needs building in CI; the
-      # before_script says so.
-      if ! docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull --no-build; then
-        echo "--- up failed; dumping one-shot container logs ---"
-        docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color haf-stats-setup || true
-        docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color --tail 100 haf || true
-        exit 1
-      fi
-      echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
-      "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
-      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
-      cd "${CI_PROJECT_DIR}/docker"
-      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
-      # #61: this is the only lane with a real HAF behind the whole stack, and until
-      # now it started the rewriter and never sent it a request -- so a rewriter that
-      # exited with `host not found in upstream` (the failure haf_api_node documents
-      # for this image) left this job green. Ask for a PUBLIC path, not /rpc/: the
-      # point is that the rewrite rules resolve, which is what `up -d` cannot show.
-      # In-container, so it does not depend on a published host port.
-      docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-rewriter \
-        wget -q -O- --timeout=10 127.0.0.1/version
-      echo
-      echo -e "\e[0Ksection_end:$(date +%s):rewriter\r\e[0K"
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
-      cd "${CI_PROJECT_DIR}/docker"
-      IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    docker compose "${COMPOSE_OPTIONS[@]}" config
+    # Dump the one-shot containers' logs if `up` fails. Log collection lives in the
+    # shutdown step below, which never runs when `up` itself aborts -- so an install
+    # failure reported only as `service "haf-stats-setup" didn't complete
+    # successfully: exit 1` left NOTHING to diagnose from, and the artifact upload
+    # then failed too because no *.log had been written.
+    #
+    # --no-build: haf-stats-rewriter is the one service with a build: stanza, and
+    # without this flag a failed pull of HAF_STATS_REWRITER_IMAGE does not fail `up` --
+    # compose logs `manifest unknown`, builds the working tree, and the job goes green
+    # (job 3270294 did exactly that). This lane exists to run the PUBLISHED image, so a
+    # missing one must be an error. No service here needs building in CI; the
+    # before_script says so.
+    if ! docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull --no-build; then
+      echo "--- up failed; dumping one-shot container logs ---"
+      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color haf-stats-setup || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color --tail 100 haf || true
+      exit 1
+    fi
+    echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
+    "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
+    echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
+    cd "${CI_PROJECT_DIR}/docker"
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    # #61: this is the only lane with a real HAF behind the whole stack, and until
+    # now it started the rewriter and never sent it a request -- so a rewriter that
+    # exited with `host not found in upstream` (the failure haf_api_node documents
+    # for this image) left this job green. Ask for a PUBLIC path, not /rpc/: the
+    # point is that the rewrite rules resolve, which is what `up -d` cannot show.
+    # In-container, so it does not depend on a published host port.
+    docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-rewriter \
+      wget -q -O- --timeout=10 127.0.0.1/version
+    echo
+    echo -e "\e[0Ksection_end:$(date +%s):rewriter\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
+    cd "${CI_PROJECT_DIR}/docker"
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
 
-      # A clean pg_ctl stop flushes WAL and writes a shutdown checkpoint so the
-      # cached datadir restarts cleanly. CHECKPOINT first (informational); the
-      # PG binary path varies by image version, so locate pg_ctl dynamically.
-      docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf psql -U haf_admin -d haf_block_log -c "CHECKPOINT;" 2>&1 || \
-        echo "WARNING: checkpoint failed - pg_ctl stop will still attempt a clean shutdown"
+    # A clean pg_ctl stop flushes WAL and writes a shutdown checkpoint so the
+    # cached datadir restarts cleanly. CHECKPOINT first (informational); the
+    # PG binary path varies by image version, so locate pg_ctl dynamically.
+    docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf psql -U haf_admin -d haf_block_log -c "CHECKPOINT;" 2>&1 || \
+      echo "WARNING: checkpoint failed - pg_ctl stop will still attempt a clean shutdown"
 
-      PG_CTL=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
-          bash -c 'find /usr/lib/postgresql -name pg_ctl -type f 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n')
-      echo "Found pg_ctl at: ${PG_CTL:-not found}"
-      if [[ -n "$PG_CTL" ]]; then
-        docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
-          "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m fast -t 60 2>&1 || \
-        docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
-          "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m immediate -t 30 2>&1 || true
-      else
-        echo "WARNING: pg_ctl not found, relying on docker compose down"
-      fi
+    PG_CTL=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+        bash -c 'find /usr/lib/postgresql -name pg_ctl -type f 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n')
+    echo "Found pg_ctl at: ${PG_CTL:-not found}"
+    if [[ -n "$PG_CTL" ]]; then
+      docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+        "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m fast -t 60 2>&1 || \
+      docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
+        "$PG_CTL" stop -D /home/hived/datadir/haf_db_store/pgdata -m immediate -t 30 2>&1 || true
+    else
+      echo "WARNING: pg_ctl not found, relying on docker compose down"
+    fi
 
-      docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log || true
-      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-setup > haf-stats-setup.log || true
-      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-process > haf-stats-process.log || true
-      docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-rewriter > haf-stats-rewriter.log || true
-      timeout 120 docker compose "${COMPOSE_OPTIONS[@]}" down --timeout "${COMPOSE_DOWN_TIMEOUT:-60}"
-      # cwd is ${CI_PROJECT_DIR}/docker, so this lands at docker/container-logs.tar.gz
-      # (the path .haf_app_sync_artifacts publishes).
-      tar -czvf container-logs.tar.gz ./*.log || true
-      echo -e "\e[0Ksection_end:$(date +%s):shutdown\r\e[0K"
-    - !reference [.haf_app_sync_save_cache_conditional, script]
+    docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-setup > haf-stats-setup.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-process > haf-stats-process.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs haf-stats-rewriter > haf-stats-rewriter.log || true
+    timeout 120 docker compose "${COMPOSE_OPTIONS[@]}" down --timeout "${COMPOSE_DOWN_TIMEOUT:-60}"
+    # cwd is ${CI_PROJECT_DIR}/docker, so this lands at docker/container-logs.tar.gz
+    # (the path .haf_app_sync_artifacts publishes).
+    tar -czvf container-logs.tar.gz ./*.log || true
+    echo -e "\e[0Ksection_end:$(date +%s):shutdown\r\e[0K"
+  - !reference [.haf_app_sync_save_cache_conditional, script]
   after_script: !reference [.haf_app_sync_cleanup, after_script]
   artifacts: !reference [.haf_app_sync_artifacts, artifacts]
   tags:
-    - public-runner-docker
-    - data-cache-storage
-    - fast
+  - public-runner-docker
+  - data-cache-storage
+  - fast
 
 # =============================================================================
 # TEST — extract the haf_haf_stats_sync cache, start HAF (--skip-hived) +
@@ -1134,17 +1135,17 @@ sync:
     COMPOSE_OPTIONS_STRING: "--file docker-compose-ci-test.yml --ansi never"
     POSTGREST_IMAGE: "registry.gitlab.syncad.com/hive/haf_api_node/postgrest:latest"
   needs:
-    - job: detect_changes
-      artifacts: true
-      optional: true
-    - job: find_haf_image
-      artifacts: true
-    - job: sync
-      artifacts: true
+  - job: detect_changes
+    artifacts: true
+    optional: true
+  - job: find_haf_image
+    artifacts: true
+  - job: sync
+    artifacts: true
   tags:
-    - public-runner-docker
-    - data-cache-storage
-    - fast
+  - public-runner-docker
+  - data-cache-storage
+  - fast
 
 # tavern .pat.json suite — exact 2016-04 values over the replayed chain
 # (negatives/synthetic edge cases run on the fast stub stack instead).
@@ -1154,38 +1155,38 @@ pattern-test:
   # ${CI_PROJECT_DIR}/docker/venv (compose_startup cd's into docker/) and installs
   # them. Re-reference the base before_script so it isn't clobbered by this override.
   before_script:
-    - !reference [.haf_app_dind_complete_test, before_script]
-    - !reference [.tavern_install_deps, script]
-    - |
-      # .tavern_install_deps installs pytest>=8 with no upper bound. pytest 9 dropped
-      # _pytest._code.code.FormattedExcinfo, which tavern imports, breaking collection
-      # at import time — the same reason the stub stack pins it (docker-compose-ci.yml).
-      # Cap it here too so a future pytest 9 resolve can't break this job.
-      . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
-      pip install --quiet 'pytest<9'
+  - !reference [.haf_app_dind_complete_test, before_script]
+  - !reference [.tavern_install_deps, script]
+  - |
+    # .tavern_install_deps installs pytest>=8 with no upper bound. pytest 9 dropped
+    # _pytest._code.code.FormattedExcinfo, which tavern imports, breaking collection
+    # at import time — the same reason the stub stack pins it (docker-compose-ci.yml).
+    # Cap it here too so a future pytest 9 resolve can't break this job.
+    . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
+    pip install --quiet 'pytest<9'
   script:
-    - |
-      . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
-      DOCKER_IP=$(getent hosts docker 2>/dev/null | awk '/^[0-9]+\./{print $1; exit}')
-      DOCKER_IP="${DOCKER_IP:-docker}"
-      echo "Running tavern pattern suite against http://${DOCKER_IP}:3000"
-      API_URL="http://${DOCKER_IP}:3000" \
-      PYTHONPATH="${CI_PROJECT_DIR}/tests/tavern" \
-      TAVERN_DIR="${CI_PROJECT_DIR}/tests/tavern" \
-        pytest "${CI_PROJECT_DIR}/tests/tavern" -m "not negative and not synthetic" --tb=short -v
+  - |
+    . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
+    DOCKER_IP=$(getent hosts docker 2>/dev/null | awk '/^[0-9]+\./{print $1; exit}')
+    DOCKER_IP="${DOCKER_IP:-docker}"
+    echo "Running tavern pattern suite against http://${DOCKER_IP}:3000"
+    API_URL="http://${DOCKER_IP}:3000" \
+    PYTHONPATH="${CI_PROJECT_DIR}/tests/tavern" \
+    TAVERN_DIR="${CI_PROJECT_DIR}/tests/tavern" \
+      pytest "${CI_PROJECT_DIR}/tests/tavern" -m "not negative and not synthetic" --tb=short -v
 
 # parity (independent in-DB re-derivation) + regression (vs external hived snapshot)
 regression-test:
   extends: .haf_stats_dind_test
   script:
-    - |
-      echo "Running correctness guards against the cached stack (docker:5432)"
-      cd "${CI_PROJECT_DIR}"
-      ./scripts/run_verification.sh --host=docker --port=5432 --user=haf_admin
+  - |
+    echo "Running correctness guards against the cached stack (docker:5432)"
+    cd "${CI_PROJECT_DIR}"
+    ./scripts/run_verification.sh --host=docker --port=5432 --user=haf_admin
   artifacts:
     when: always
     paths:
-      - docker/container-logs.tar.gz
+    - docker/container-logs.tar.gz
     expire_in: 1 week
 
 # =============================================================================
@@ -1248,14 +1249,14 @@ reinstall-test:
     # cached datadir without an app image. On a single-job retry of an old pipeline
     # after registry cleanup has reaped that tag, this job alone dies on the pull.
     # haf_stats#51 was this class against hive/haf's registry.
-    - job: detect_changes
-      artifacts: true
-      optional: true
-    - job: find_haf_image
-      artifacts: true
-    - job: sync
-      artifacts: true
-    - job: docker-build
+  - job: detect_changes
+    artifacts: true
+    optional: true
+  - job: find_haf_image
+    artifacts: true
+  - job: sync
+    artifacts: true
+  - job: docker-build
   # A red run here cannot block a merge (only_allow_merge_if_pipeline_succeeds is off),
   # so a flake is pure noise that people learn to ignore. Retry only infrastructure
   # classes -- never script_failure, which is the signal this lane exists to produce.
@@ -1265,98 +1266,98 @@ reinstall-test:
   retry:
     max: 1
     when:
-      - runner_system_failure
-      - stuck_or_timeout_failure
+    - runner_system_failure
+    - stuck_or_timeout_failure
   variables:
     # The other test jobs never need this (the ci-test stack has no haf_stats
     # service of its own), so it is set here rather than in .haf_stats_dind_test.
     # Same tag docker-build pushes and sync consumes.
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
   script:
-    - |
-      cd "${CI_PROJECT_DIR}/docker"
-      # Record WHAT WAS ACTUALLY INSTALLED. The compose default only protects against
-      # an unset/empty variable; a valid-but-wrong tag (:latest, a develop tag, a
-      # typo'd registry) sails past it and the lane goes green having installed a
-      # different commit. It cannot be recovered after the fact -- `compose config`
-      # filters inactive-profile services out of its output -- so print it.
-      echo "reinstall-test: image under test = ${HAF_STATS_IMAGE}"
-    - |
-      cd "${CI_PROJECT_DIR}/docker"
-      # The PG binaries are not reliably on PATH in the haf image -- `sync` already has
-      # to locate pg_ctl this way for the same reason -- so find pg_dump rather than
-      # assume it. Failing here with a clear message beats a bare "executable file not
-      # found" from docker exec. tr -d matches the idiom sync uses for pg_ctl.
-      PG_DUMP=$(docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf bash -c 'command -v pg_dump || find /usr/lib/postgresql -name pg_dump -type f 2>/dev/null | head -1' | tr -d '\r\n')
-      if [[ -z "$PG_DUMP" ]]; then
-        echo "FAIL: pg_dump not found inside the haf container; cannot take a schema snapshot."
-        exit 1
-      fi
-      echo "Using pg_dump at: ${PG_DUMP}"
-      echo "Capturing the installed schema before re-installing..."
-      # pg_dump 17 emits a RANDOM nonce in its restrict/unrestrict guard lines on every
-      # run (they exist to stop a dump smuggling psql meta-commands into a restore).
-      # They are not schema and they differ on every invocation, so they are stripped
-      # before comparing -- otherwise this assertion fails 100% of the time. Observed
-      # across three runs of this lane: 10875 lines, stable, with exactly the two nonce
-      # lines differing.
-      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-before.sql
-      # --strict-names above is what guarantees all three schemas are really present:
-      # without it `pg_dump -n a -n b -n c` errors only when NO pattern matches, so a
-      # renamed schema would silently narrow the dump to the survivors and a
-      # byte-comparison of two equally-narrowed dumps would still "pass". A grep for the
-      # schema NAMES cannot substitute for it -- db/op_type_registry.sql embeds all three
-      # as string literals inside a function body, so one dumped function satisfies the
-      # grep even when two schemas are missing entirely.
-      #
-      # The line floor is only a second line of defence against a TRUNCATED dump, and
-      # it deliberately avoids a constant pinned to today's schema size: such a
-      # constant decays, because nobody edits CI when the schema grows, and it
-      # eventually asserts nothing while looking like it asserts something. This is a
-      # catastrophic-empty check only; the after-dump is compared to the before-dump
-      # below, which self-calibrates and needs no maintenance.
-      LINES=$(wc -l < schema-before.sql)
-      echo "schema-before.sql: ${LINES} lines"
-      if [[ "${LINES}" -lt 1000 ]]; then
-        echo "FAIL: schema dump is only ${LINES} lines; the install cannot have succeeded."
-        exit 1
-      fi
-    - |
-      cd "${CI_PROJECT_DIR}/docker"
-      echo "Re-running install_app over the already-installed cache database..."
-      # --no-deps: haf is already running from the template's compose startup. Without
-      # it, compose would try to (re)create the dependency and disturb the very stack
-      # the assertions read.
-      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never run --rm --no-deps haf-stats-setup
-      echo "Second install exited 0."
-    - |
-      cd "${CI_PROJECT_DIR}/docker"
-      echo "Capturing the schema after..."
-      docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-after.sql
-      # Compare the two dumps to EACH OTHER rather than to a constant: this catches a
-      # truncation that hit only the second dump, and stays correct as the schema
-      # grows. An identical truncation of both would still pass, but that needs
-      # pipefail off AND both dumps failing the same way.
-      AFTER_LINES=$(wc -l < schema-after.sql)
-      echo "schema-after.sql: ${AFTER_LINES} lines (before: ${LINES})"
-      if [[ "${AFTER_LINES}" -lt $(( LINES * 95 / 100 )) ]]; then
-        echo "FAIL: after-dump is ${AFTER_LINES} lines against ${LINES} before -- that is"
-        echo "a truncated dump, not a schema change; the diff would be unreliable."
-        exit 1
-      fi
-      if diff -u schema-before.sql schema-after.sql > schema.diff; then
-        echo "OK: the second install left the schema byte-identical."
-        # Nothing to publish on success: the diff is empty and the dumps are identical.
-        # A failure exits before this line, so the evidence survives exactly when needed.
-        rm -f schema-before.sql schema-after.sql schema.diff
-      else
-        echo "FAIL: the second install changed the schema."
-        echo "A function recreated without its GRANT (DROP discards privileges where"
-        echo "CREATE OR REPLACE preserves them), or an object rebuilt with different"
-        echo "properties, appears below. See hive/haf_stats#73 and #74."
-        head -200 schema.diff
-        exit 1
-      fi
+  - |
+    cd "${CI_PROJECT_DIR}/docker"
+    # Record WHAT WAS ACTUALLY INSTALLED. The compose default only protects against
+    # an unset/empty variable; a valid-but-wrong tag (:latest, a develop tag, a
+    # typo'd registry) sails past it and the lane goes green having installed a
+    # different commit. It cannot be recovered after the fact -- `compose config`
+    # filters inactive-profile services out of its output -- so print it.
+    echo "reinstall-test: image under test = ${HAF_STATS_IMAGE}"
+  - |
+    cd "${CI_PROJECT_DIR}/docker"
+    # The PG binaries are not reliably on PATH in the haf image -- `sync` already has
+    # to locate pg_ctl this way for the same reason -- so find pg_dump rather than
+    # assume it. Failing here with a clear message beats a bare "executable file not
+    # found" from docker exec. tr -d matches the idiom sync uses for pg_ctl.
+    PG_DUMP=$(docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf bash -c 'command -v pg_dump || find /usr/lib/postgresql -name pg_dump -type f 2>/dev/null | head -1' | tr -d '\r\n')
+    if [[ -z "$PG_DUMP" ]]; then
+      echo "FAIL: pg_dump not found inside the haf container; cannot take a schema snapshot."
+      exit 1
+    fi
+    echo "Using pg_dump at: ${PG_DUMP}"
+    echo "Capturing the installed schema before re-installing..."
+    # pg_dump 17 emits a RANDOM nonce in its restrict/unrestrict guard lines on every
+    # run (they exist to stop a dump smuggling psql meta-commands into a restore).
+    # They are not schema and they differ on every invocation, so they are stripped
+    # before comparing -- otherwise this assertion fails 100% of the time. Observed
+    # across three runs of this lane: 10875 lines, stable, with exactly the two nonce
+    # lines differing.
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-before.sql
+    # --strict-names above is what guarantees all three schemas are really present:
+    # without it `pg_dump -n a -n b -n c` errors only when NO pattern matches, so a
+    # renamed schema would silently narrow the dump to the survivors and a
+    # byte-comparison of two equally-narrowed dumps would still "pass". A grep for the
+    # schema NAMES cannot substitute for it -- db/op_type_registry.sql embeds all three
+    # as string literals inside a function body, so one dumped function satisfies the
+    # grep even when two schemas are missing entirely.
+    #
+    # The line floor is only a second line of defence against a TRUNCATED dump, and
+    # it deliberately avoids a constant pinned to today's schema size: such a
+    # constant decays, because nobody edits CI when the schema grows, and it
+    # eventually asserts nothing while looking like it asserts something. This is a
+    # catastrophic-empty check only; the after-dump is compared to the before-dump
+    # below, which self-calibrates and needs no maintenance.
+    LINES=$(wc -l < schema-before.sql)
+    echo "schema-before.sql: ${LINES} lines"
+    if [[ "${LINES}" -lt 1000 ]]; then
+      echo "FAIL: schema dump is only ${LINES} lines; the install cannot have succeeded."
+      exit 1
+    fi
+  - |
+    cd "${CI_PROJECT_DIR}/docker"
+    echo "Re-running install_app over the already-installed cache database..."
+    # --no-deps: haf is already running from the template's compose startup. Without
+    # it, compose would try to (re)create the dependency and disturb the very stack
+    # the assertions read.
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never run --rm --no-deps haf-stats-setup
+    echo "Second install exited 0."
+  - |
+    cd "${CI_PROJECT_DIR}/docker"
+    echo "Capturing the schema after..."
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-after.sql
+    # Compare the two dumps to EACH OTHER rather than to a constant: this catches a
+    # truncation that hit only the second dump, and stays correct as the schema
+    # grows. An identical truncation of both would still pass, but that needs
+    # pipefail off AND both dumps failing the same way.
+    AFTER_LINES=$(wc -l < schema-after.sql)
+    echo "schema-after.sql: ${AFTER_LINES} lines (before: ${LINES})"
+    if [[ "${AFTER_LINES}" -lt $(( LINES * 95 / 100 )) ]]; then
+      echo "FAIL: after-dump is ${AFTER_LINES} lines against ${LINES} before -- that is"
+      echo "a truncated dump, not a schema change; the diff would be unreliable."
+      exit 1
+    fi
+    if diff -u schema-before.sql schema-after.sql > schema.diff; then
+      echo "OK: the second install left the schema byte-identical."
+      # Nothing to publish on success: the diff is empty and the dumps are identical.
+      # A failure exits before this line, so the evidence survives exactly when needed.
+      rm -f schema-before.sql schema-after.sql schema.diff
+    else
+      echo "FAIL: the second install changed the schema."
+      echo "A function recreated without its GRANT (DROP discards privileges where"
+      echo "CREATE OR REPLACE preserves them), or an object rebuilt with different"
+      echo "properties, appears below. See hive/haf_stats#73 and #74."
+      head -200 schema.diff
+      exit 1
+    fi
   artifacts:
     # `artifacts:` is a HASH, not a list -- one `when:` for the whole job, so the dumps
     # cannot be declared on_failure separately from the logs. Instead the success path
@@ -1367,10 +1368,10 @@ reinstall-test:
     # only schema-after.sql is absent there, and a missing path is a warning, not an error.
     when: always
     paths:
-      - docker/container-logs.tar.gz
-      - docker/schema.diff
-      - docker/schema-before.sql
-      - docker/schema-after.sql
+    - docker/container-logs.tar.gz
+    - docker/schema.diff
+    - docker/schema-before.sql
+    - docker/schema-after.sql
     expire_in: 1 week
 
 # =============================================================================
@@ -1382,7 +1383,7 @@ endpoint-tests:
   image: docker:24
   needs: []
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
@@ -1391,22 +1392,22 @@ endpoint-tests:
     # endpoints/rewrite_rules.conf would be silently ignored and the suite would
     # go green on the old rules -- exactly the failure this lane exists to catch.
     # In CI's ephemeral dind nothing is cached, so it changes nothing there.
-    - docker compose -f docker/docker-compose-ci.yml up --detach --build
-    - docker compose -f docker/docker-compose-ci.yml wait tavern
+  - docker compose -f docker/docker-compose-ci.yml up --detach --build
+  - docker compose -f docker/docker-compose-ci.yml wait tavern
   after_script:
-    - docker compose -f docker/docker-compose-ci.yml logs setup
-    - docker compose -f docker/docker-compose-ci.yml logs tavern
+  - docker compose -f docker/docker-compose-ci.yml logs setup
+  - docker compose -f docker/docker-compose-ci.yml logs tavern
     # With REWRITE_LOG=on this is what turns "some path 404'd" into "that rule
     # rewrote to X". `|| true` because after_script runs under set -e: if the build
     # failed the service has no container, and a non-zero here would skip the
     # `down -v` below.
-    - docker compose -f docker/docker-compose-ci.yml logs rewriter || true
-    - docker compose -f docker/docker-compose-ci.yml down -v
+  - docker compose -f docker/docker-compose-ci.yml logs rewriter || true
+  - docker compose -f docker/docker-compose-ci.yml down -v
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
     # the MR. Matches balance_tracker.
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 install-test:
   stage: test
@@ -1415,9 +1416,9 @@ install-test:
   # than a local rebuild. docker-build's rules are `if: $CI_COMMIT_BRANCH`, the same as
   # this job's, so there is no pipeline where this exists and that one is skipped.
   needs:
-    - job: docker-build
+  - job: docker-build
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
@@ -1427,7 +1428,7 @@ install-test:
     # project-level variable would apply to every pipeline.
     BASELINE_REF: "develop"
   before_script:
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
     # #84: the REAL install_app.sh against a REAL PostgreSQL, in ~23s. Before this, the
     # only lanes that ran the installer needed a replayed HAF -- `sync` (374.5-566.2s
@@ -1450,109 +1451,109 @@ install-test:
     # Extract the MERGE TARGET's app SQL and scripts, which the baseline install runs
     # from. (#78) See docker-compose-ci-install.yml's install-baseline for why this is a
     # git checkout rather than a registry image.
-    - |
-      set -e
-      # CI clones shallow and fetches only the ref under test, so origin/develop is not
-      # present; and this repo runs BRANCH pipelines, so CI_MERGE_REQUEST_TARGET_BRANCH_SHA
-      # does not exist either. depth=2 because when the pipeline IS develop the baseline
-      # has to be the commit before it, or install #1 and #2 are the same SQL again --
-      # which is precisely the defect #78 is about.
-      # BASELINE_REF is declared in this job's variables: the job cannot read the MR's
-      # real target (branch pipelines), so a branch aimed elsewhere must set it or it
-      # gets a baseline that is not its merge target, silently.
-      git fetch --depth=2 origin "$BASELINE_REF"
-      BASE_SHA=$(git rev-parse FETCH_HEAD)
-      if [ "$BASE_SHA" = "$CI_COMMIT_SHA" ]; then
-        BASE_SHA=$(git rev-parse FETCH_HEAD~1)
-        echo "install-test: pipeline IS $BASELINE_REF, so the baseline is the previous commit"
+  - |
+    set -e
+    # CI clones shallow and fetches only the ref under test, so origin/develop is not
+    # present; and this repo runs BRANCH pipelines, so CI_MERGE_REQUEST_TARGET_BRANCH_SHA
+    # does not exist either. depth=2 because when the pipeline IS develop the baseline
+    # has to be the commit before it, or install #1 and #2 are the same SQL again --
+    # which is precisely the defect #78 is about.
+    # BASELINE_REF is declared in this job's variables: the job cannot read the MR's
+    # real target (branch pipelines), so a branch aimed elsewhere must set it or it
+    # gets a baseline that is not its merge target, silently.
+    git fetch --depth=2 origin "$BASELINE_REF"
+    BASE_SHA=$(git rev-parse FETCH_HEAD)
+    if [ "$BASE_SHA" = "$CI_COMMIT_SHA" ]; then
+      BASE_SHA=$(git rev-parse FETCH_HEAD~1)
+      echo "install-test: pipeline IS $BASELINE_REF, so the baseline is the previous commit"
+    fi
+    # THE ONLY CASE THAT NEEDS GUARDING is "the target already contains this commit".
+    #
+    # An earlier revision of this block asked the opposite question -- is the target tip
+    # an ANCESTOR of HEAD -- and fell back to `git merge-base`. That was wrong twice
+    # over, and the review that caught it is worth recording because neither failure
+    # could show up in this MR's own pipeline (this branch sits exactly on the tip):
+    #
+    #   * `--is-ancestor` is FALSE for every branch that is not exactly on the target
+    #     tip -- i.e. the normal state of an MR mid-review, not a pathological one. So
+    #     the fallback fired constantly rather than rarely.
+    #   * `git merge-base` cannot answer across two shallow windows (the branch at
+    #     GitLab's default depth 20, the target fetched at depth 2). It exits 1 printing
+    #     NOTHING, and under `set -e` a failing command substitution kills the job. A
+    #     branch lagging by two commits died with no error text attributable to git.
+    #
+    # And the premise was wrong anyway: installing the target's TIP is the point. On
+    # merge, the node being upgraded is at that tip, whether or not it is an ancestor of
+    # this branch. A lagging branch is the normal case and wants the tip.
+    #
+    # The genuine downgrade is the reverse relation -- HEAD already merged, so the tip
+    # is NEWER than the code under test (a retried old pipeline, or a develop pipeline
+    # that queued behind another merge). Then the tip must not be installed first.
+    #
+    # `2>/dev/null` and a CONDITION, so a shallow clone that cannot answer reads as
+    # false and we keep the tip -- correct for the normal case.
+    #
+    # BE HONEST ABOUT THE LIMIT: the target is fetched at --depth=2, so --is-ancestor
+    # can only resolve when HEAD is the tip or its parent. A pipeline retried after the
+    # commit merged more than two commits ago therefore does NOT trigger the guard and
+    # installs the newer tip as its baseline. That is a spurious red on a retry, never a
+    # false green, so it is left rather than deepening the fetch on every run.
+    if git merge-base --is-ancestor "$CI_COMMIT_SHA" "$BASE_SHA" 2>/dev/null; then
+      echo "install-test: $BASELINE_REF already CONTAINS $CI_COMMIT_SHA -- this is a retry"
+      echo "              of an already-merged pipeline, so its tip is NEWER than the code"
+      echo "              under test and installing it first would be a downgrade."
+      BASE_SHA=$(git rev-parse "${CI_COMMIT_SHA}^" 2>/dev/null || echo "")
+      if [ -z "$BASE_SHA" ]; then
+        echo "FAIL: cannot resolve ${CI_COMMIT_SHA}^ to use as the baseline instead."
+        exit 1
       fi
-      # THE ONLY CASE THAT NEEDS GUARDING is "the target already contains this commit".
-      #
-      # An earlier revision of this block asked the opposite question -- is the target tip
-      # an ANCESTOR of HEAD -- and fell back to `git merge-base`. That was wrong twice
-      # over, and the review that caught it is worth recording because neither failure
-      # could show up in this MR's own pipeline (this branch sits exactly on the tip):
-      #
-      #   * `--is-ancestor` is FALSE for every branch that is not exactly on the target
-      #     tip -- i.e. the normal state of an MR mid-review, not a pathological one. So
-      #     the fallback fired constantly rather than rarely.
-      #   * `git merge-base` cannot answer across two shallow windows (the branch at
-      #     GitLab's default depth 20, the target fetched at depth 2). It exits 1 printing
-      #     NOTHING, and under `set -e` a failing command substitution kills the job. A
-      #     branch lagging by two commits died with no error text attributable to git.
-      #
-      # And the premise was wrong anyway: installing the target's TIP is the point. On
-      # merge, the node being upgraded is at that tip, whether or not it is an ancestor of
-      # this branch. A lagging branch is the normal case and wants the tip.
-      #
-      # The genuine downgrade is the reverse relation -- HEAD already merged, so the tip
-      # is NEWER than the code under test (a retried old pipeline, or a develop pipeline
-      # that queued behind another merge). Then the tip must not be installed first.
-      #
-      # `2>/dev/null` and a CONDITION, so a shallow clone that cannot answer reads as
-      # false and we keep the tip -- correct for the normal case.
-      #
-      # BE HONEST ABOUT THE LIMIT: the target is fetched at --depth=2, so --is-ancestor
-      # can only resolve when HEAD is the tip or its parent. A pipeline retried after the
-      # commit merged more than two commits ago therefore does NOT trigger the guard and
-      # installs the newer tip as its baseline. That is a spurious red on a retry, never a
-      # false green, so it is left rather than deepening the fetch on every run.
-      if git merge-base --is-ancestor "$CI_COMMIT_SHA" "$BASE_SHA" 2>/dev/null; then
-        echo "install-test: $BASELINE_REF already CONTAINS $CI_COMMIT_SHA -- this is a retry"
-        echo "              of an already-merged pipeline, so its tip is NEWER than the code"
-        echo "              under test and installing it first would be a downgrade."
-        BASE_SHA=$(git rev-parse "${CI_COMMIT_SHA}^" 2>/dev/null || echo "")
-        if [ -z "$BASE_SHA" ]; then
-          echo "FAIL: cannot resolve ${CI_COMMIT_SHA}^ to use as the baseline instead."
-          exit 1
-        fi
-        echo "              Using $BASE_SHA (this commit's parent)."
+      echo "              Using $BASE_SHA (this commit's parent)."
+    fi
+    echo "install-test: baseline = $BASE_SHA (upgrading to $CI_COMMIT_SHA)"
+    rm -rf .baseline && mkdir -p .baseline
+    git archive "$BASE_SHA" db endpoints scripts | tar -x -C .baseline
+    # A bind mount of a missing directory silently creates an EMPTY one, and an empty
+    # db/ would make the baseline install fail with a confusing "no such file" rather
+    # than saying the extraction is what broke. Refuse here instead.
+    for d in db endpoints scripts; do
+      if [ ! -d ".baseline/$d" ] || [ -z "$(ls -A ".baseline/$d")" ]; then
+        echo "FAIL: .baseline/$d is missing or empty after extracting $BASE_SHA."
+        echo "      The baseline install would have run against an empty directory and"
+        echo "      reported a missing file instead of the real cause."
+        exit 1
       fi
-      echo "install-test: baseline = $BASE_SHA (upgrading to $CI_COMMIT_SHA)"
-      rm -rf .baseline && mkdir -p .baseline
-      git archive "$BASE_SHA" db endpoints scripts | tar -x -C .baseline
-      # A bind mount of a missing directory silently creates an EMPTY one, and an empty
-      # db/ would make the baseline install fail with a confusing "no such file" rather
-      # than saying the extraction is what broke. Refuse here instead.
-      for d in db endpoints scripts; do
-        if [ ! -d ".baseline/$d" ] || [ -z "$(ls -A ".baseline/$d")" ]; then
-          echo "FAIL: .baseline/$d is missing or empty after extracting $BASE_SHA."
-          echo "      The baseline install would have run against an empty directory and"
-          echo "      reported a missing file instead of the real cause."
-          exit 1
-        fi
-      done
-      # The scripts are tracked 100644 -- the Dockerfile supplies the executable bit with
-      # `COPY --chmod=755 scripts/`, so a git checkout of them is NOT executable and the
-      # bind mount overrides the image's chmod'd copies. Without this the baseline
-      # install dies with exit 126, "found but not executable", which is how this was
-      # found: the lane failed loudly on its first run rather than skipping the install.
-      # find, not scripts/*.sh: the glob is top-level only, and a helper under
-      # scripts/ci-helpers/ would silently regress to the same exit 126 while looking
-      # like a new bug.
-      find .baseline/scripts -name '*.sh' -exec chmod +x {} +
-      echo "install-test: baseline SQL extracted ($(find .baseline -name '*.sql' | wc -l) .sql files, scripts made executable)"
-      # SAY SO when there is nothing to upgrade. A CI-only or docs-only commit has SQL
-      # identical to the baseline, so the upgrade phase is a no-op -- which is fine, but
-      # it must not read as "an upgrade was tested". This is the same quiet-degradation
-      # failure this lane rejected a baseline IMAGE to avoid.
-      # scripts/ is in the comparison because install-baseline MOUNTS it -- a commit that
-      # only changes install_app.sh is a live upgrade, and an earlier version of this
-      # check called that a no-op.
-      if diff -rq .baseline/db db >/dev/null 2>&1 \
-         && diff -rq .baseline/endpoints endpoints >/dev/null 2>&1 \
-         && diff -rq .baseline/scripts scripts >/dev/null 2>&1; then
-        echo "install-test: NOTE -- baseline db/, endpoints/ and scripts/ are IDENTICAL to"
-        echo "              this commit's. The upgrade phase is a no-op this run; it proves"
-        echo "              nothing beyond the plumbing. Expected for a CI-only change."
-      else
-        echo "install-test: baseline differs from this commit -- the upgrade phase is live"
-      fi
-    - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
+    done
+    # The scripts are tracked 100644 -- the Dockerfile supplies the executable bit with
+    # `COPY --chmod=755 scripts/`, so a git checkout of them is NOT executable and the
+    # bind mount overrides the image's chmod'd copies. Without this the baseline
+    # install dies with exit 126, "found but not executable", which is how this was
+    # found: the lane failed loudly on its first run rather than skipping the install.
+    # find, not scripts/*.sh: the glob is top-level only, and a helper under
+    # scripts/ci-helpers/ would silently regress to the same exit 126 while looking
+    # like a new bug.
+    find .baseline/scripts -name '*.sh' -exec chmod +x {} +
+    echo "install-test: baseline SQL extracted ($(find .baseline -name '*.sql' | wc -l) .sql files, scripts made executable)"
+    # SAY SO when there is nothing to upgrade. A CI-only or docs-only commit has SQL
+    # identical to the baseline, so the upgrade phase is a no-op -- which is fine, but
+    # it must not read as "an upgrade was tested". This is the same quiet-degradation
+    # failure this lane rejected a baseline IMAGE to avoid.
+    # scripts/ is in the comparison because install-baseline MOUNTS it -- a commit that
+    # only changes install_app.sh is a live upgrade, and an earlier version of this
+    # check called that a no-op.
+    if diff -rq .baseline/db db >/dev/null 2>&1 \
+       && diff -rq .baseline/endpoints endpoints >/dev/null 2>&1 \
+       && diff -rq .baseline/scripts scripts >/dev/null 2>&1; then
+      echo "install-test: NOTE -- baseline db/, endpoints/ and scripts/ are IDENTICAL to"
+      echo "              this commit's. The upgrade phase is a no-op this run; it proves"
+      echo "              nothing beyond the plumbing. Expected for a CI-only change."
+    else
+      echo "install-test: baseline differs from this commit -- the upgrade phase is live"
+    fi
+  - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
     # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> break-schema -> install-again -> lock-holder + install-under-lock
     # -> verify -> uninstall -> verify-gone), so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
-    - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
+  - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
   after_script:
     # All FIVE installs (baseline, upgrade, install, install-again, install-under-lock): the repeats are
     # where a non-idempotent step or a shim that quietly does nothing shows up, and
@@ -1564,26 +1565,29 @@ install-test:
     # would emit an empty section per service and a `down -v`, with the actual cause nowhere.
     # `ps -a` for the same reason: it shows exit codes for services that produced no
     # output at all.
-    - docker compose -f docker/docker-compose-ci-install.yml ps -a || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs postgres || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs db-setup || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs install-baseline || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs install-upgrade || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs reset-app || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs install || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs seed-repair || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs break-schema || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs install-again || true
+  - docker compose -f docker/docker-compose-ci-install.yml ps -a || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs postgres || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs db-setup || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install-baseline ||
+    true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install-upgrade ||
+    true
+  - docker compose -f docker/docker-compose-ci-install.yml logs reset-app || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs seed-repair || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs break-schema || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install-again || true
     # #96: the holder, and install-under-lock's no-upgrade check, write their verdicts to their
     # own logs. Without these two lines a red lane shows an exit code and no reason anywhere.
-    - docker compose -f docker/docker-compose-ci-install.yml logs lock-holder || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs install-under-lock || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
-    - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true
-    - docker compose -f docker/docker-compose-ci-install.yml down -v || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs lock-holder || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install-under-lock
+    || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true
+  - docker compose -f docker/docker-compose-ci-install.yml down -v || true
   rules:
-    - if: $CI_COMMIT_BRANCH
+  - if: $CI_COMMIT_BRANCH
 
 # =============================================================================
 # PUBLISH
@@ -1685,12 +1689,12 @@ publish_images:
   # settings where nothing in the repo records it, and it has to be remembered and
   # removed when the credentials land. Preferred the version that is visible in the diff.
   rules:
-    - if: $QUICK_TEST == "true"
-      when: never
-    - if: $SKIP_PRODUCTION_DEPLOY == "true"
-      when: never
-    - if: $SKIP_DOCKER_PUBLISH == "true"
-      when: never
+  - if: $QUICK_TEST == "true"
+    when: never
+  - if: $SKIP_PRODUCTION_DEPLOY == "true"
+    when: never
+  - if: $SKIP_DOCKER_PUBLISH == "true"
+    when: never
     # EVERY OPERAND IS AN EXPLICIT COMPARISON, and that is not verbosity.
     #
     # An earlier revision wrote `&& $BLOG_REGISTRY_USER && $BLOG_REGISTRY_PASSWORD` and
@@ -1715,9 +1719,11 @@ publish_images:
     # notice. That is deliberate: it matches the template's own `[[ -n ... ]]` test, so
     # the rule and the script it guards agree. Such a value still fails at the login --
     # which is the honest outcome for a credential that exists and is garbage.
-    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $BLOG_REGISTRY_USER != null && $BLOG_REGISTRY_USER != "" && $BLOG_REGISTRY_PASSWORD != null && $BLOG_REGISTRY_PASSWORD != ""
-      when: on_success
-    - when: never
+  - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && $BLOG_REGISTRY_USER
+      != null && $BLOG_REGISTRY_USER != "" && $BLOG_REGISTRY_PASSWORD != null && $BLOG_REGISTRY_PASSWORD
+      != ""
+    when: on_success
+  - when: never
 
 # The visible half of the gate above. Without this, a release tag pushed before the
 # credentials exist produces SILENCE -- publish_images is simply not created, and the
@@ -1739,20 +1745,22 @@ publish_images_skipped:
   script:
     # Quoted: an unquoted scalar containing ": " is a MAPPING to YAML, which is what
     # ci/lint rejected on the first attempt here.
-    - >-
-      echo "MIRROR SKIPPED - BLOG_REGISTRY_USER/BLOG_REGISTRY_PASSWORD are not set,
-      so ${CI_COMMIT_TAG} was NOT mirrored to registry-upload.hive.blog.
-      The GitLab registry images were published normally. See hive/haf_stats#93."
+  - >-
+    echo "MIRROR SKIPPED - BLOG_REGISTRY_USER/BLOG_REGISTRY_PASSWORD are not set,
+    so ${CI_COMMIT_TAG} was NOT mirrored to registry-upload.hive.blog.
+    The GitLab registry images were published normally. See hive/haf_stats#93."
   rules:
-    - if: $QUICK_TEST == "true"
-      when: never
-    - if: $SKIP_PRODUCTION_DEPLOY == "true"
-      when: never
-    - if: $SKIP_DOCKER_PUBLISH == "true"
-      when: never
-    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && ($BLOG_REGISTRY_USER == null || $BLOG_REGISTRY_USER == "" || $BLOG_REGISTRY_PASSWORD == null || $BLOG_REGISTRY_PASSWORD == "")
-      when: on_success
-    - when: never
+  - if: $QUICK_TEST == "true"
+    when: never
+  - if: $SKIP_PRODUCTION_DEPLOY == "true"
+    when: never
+  - if: $SKIP_DOCKER_PUBLISH == "true"
+    when: never
+  - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true" && ($BLOG_REGISTRY_USER
+      == null || $BLOG_REGISTRY_USER == "" || $BLOG_REGISTRY_PASSWORD == null || $BLOG_REGISTRY_PASSWORD
+      == "")
+    when: on_success
+  - when: never
 
 # THE RELEASE TAG, created from the image the pipeline actually tested.
 #
@@ -1796,7 +1804,7 @@ publish_tag:
   interruptible: false
   image: docker:24
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
     GIT_STRATEGY: none
@@ -1805,27 +1813,28 @@ publish_tag:
     max: 2
     when: runner_system_failure
   before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin
+    "$CI_REGISTRY"
   script:
-    - |
-      set -e
-      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
-        docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
-        docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:${CI_COMMIT_TAG}"
-      done
-      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
-        docker push "${repo}:${CI_COMMIT_TAG}"
-      done
+  - |
+    set -e
+    for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
+      docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
+      docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:${CI_COMMIT_TAG}"
+    done
+    for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
+      docker push "${repo}:${CI_COMMIT_TAG}"
+    done
   rules:
-    - if: $QUICK_TEST == "true"
-      when: never
-    - if: $SKIP_PRODUCTION_DEPLOY == "true"
-      when: never
-    - if: $SKIP_DOCKER_PUBLISH == "true"
-      when: never
-    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
-      when: on_success
-    - when: never
+  - if: $QUICK_TEST == "true"
+    when: never
+  - if: $SKIP_PRODUCTION_DEPLOY == "true"
+    when: never
+  - if: $SKIP_DOCKER_PUBLISH == "true"
+    when: never
+  - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"
+    when: on_success
+  - when: never
 
 # `latest` tracks develop, published HERE rather than from docker-build so that it only
 # ever names a commit whose test lanes went green.
@@ -1867,7 +1876,7 @@ publish_latest:
   resource_group: registry_latest
   image: docker:24
   services:
-    - docker:24-dind
+  - docker:24-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
     # Same as publish_tag, which does the identical thing: this job never reads the
@@ -1893,37 +1902,38 @@ publish_latest:
   # it the ONLY lane anywhere that exercises rewriter content. Excluding it gated
   # rewriter:latest on nothing that touches the rewriter.
   before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin
+    "$CI_REGISTRY"
   script:
-    - |
-      set -e
-      # Tag every name, THEN push them all -- the same shape publish_tag uses, and for the
-      # same reason its comment gives. An earlier revision pushed each repo in turn,
-      # so haf_stats:latest landed before the rewriter had even been pulled: a failure
-      # in between left `latest` half-moved, app on the new commit and rewriter on the
-      # old. docker/.env states the invariant that breaks -- "one registry and one
-      # version for the pair" -- and it binds harder here than on a release tag,
-      # because docker/.env ships HAF_STATS_VERSION=latest as the default.
-      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
-        docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
-        docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:latest"
-      done
-      for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
-        docker push "${repo}:latest"
-      done
+  - |
+    set -e
+    # Tag every name, THEN push them all -- the same shape publish_tag uses, and for the
+    # same reason its comment gives. An earlier revision pushed each repo in turn,
+    # so haf_stats:latest landed before the rewriter had even been pulled: a failure
+    # in between left `latest` half-moved, app on the new commit and rewriter on the
+    # old. docker/.env states the invariant that breaks -- "one registry and one
+    # version for the pair" -- and it binds harder here than on a release tag,
+    # because docker/.env ships HAF_STATS_VERSION=latest as the default.
+    for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
+      docker pull "${repo}:${CI_COMMIT_SHORT_SHA}"
+      docker tag  "${repo}:${CI_COMMIT_SHORT_SHA}" "${repo}:latest"
+    done
+    for repo in "$CI_REGISTRY_IMAGE" "$CI_REGISTRY_IMAGE/postgrest-rewriter"; do
+      docker push "${repo}:latest"
+    done
   # The same three switches the sibling publish jobs honour, via the template. An
   # earlier revision had only the develop condition, which meant SKIP_DOCKER_PUBLISH=true
   # -- presented a few lines above as "the template's own switch" for turning publishing
   # off -- did not turn THIS publishing off, and a QUICK_TEST develop run (which reuses a
   # cache and skips the replay entirely) still republished `latest`.
   rules:
-    - if: $QUICK_TEST == "true"
-      when: never
-    - if: $SKIP_PRODUCTION_DEPLOY == "true"
-      when: never
-    - if: $SKIP_DOCKER_PUBLISH == "true"
-      when: never
-    - if: $CI_COMMIT_BRANCH == "develop"
+  - if: $QUICK_TEST == "true"
+    when: never
+  - if: $SKIP_PRODUCTION_DEPLOY == "true"
+    when: never
+  - if: $SKIP_DOCKER_PUBLISH == "true"
+    when: never
+  - if: $CI_COMMIT_BRANCH == "develop"
 
 # =============================================================================
 # CLEANUP — manual NFS cache pruning.
@@ -1934,6 +1944,6 @@ cache_cleanup:
   variables:
     CLEANUP_PATH_PATTERN: "/cache/*haf_haf_stats_sync_*"
   tags:
-    - public-runner-docker
-    - data-cache-storage
-    - fast
+  - public-runner-docker
+  - data-cache-storage
+  - fast
