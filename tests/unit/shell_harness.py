@@ -58,8 +58,15 @@ def clean_env(bindir=None) -> dict:
     HAF_STATS_HEALTHCHECK_MAX_AGE_SECONDS exported gets failures unrelated to their
     change. Stripping the app's own variables makes each test state its own inputs.
     """
+    # PG* too, as of haf_stats#75: scripts/uninstall_app.sh now READS PGHOSTADDR,
+    # PGSERVICE and PGSERVICEFILE, and libpq itself reads PGHOST/PGUSER/PGDATABASE/
+    # PGOPTIONS. A developer with any of those exported would otherwise steer the scripts
+    # under test -- and, worse, would silently pass a negative control that asserts one of
+    # them is ABSENT. Tests that want one inject it explicitly through env_extra.
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("HAF_STATS_") and not k.startswith("POSTGRES_")}
+           if not k.startswith("HAF_STATS_")
+           and not k.startswith("POSTGRES_")
+           and not k.startswith("PG")}
     if "HAF_STATS_TEST_BASH" in os.environ:
         env["HAF_STATS_TEST_BASH"] = os.environ["HAF_STATS_TEST_BASH"]
     if bindir is not None:

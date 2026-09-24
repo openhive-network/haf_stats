@@ -45,9 +45,17 @@ def bash():
     return require_bash()
 
 
+# The section-0 target block asks the server what it is, and now REFUSES when it
+# cannot find out. Every stub in this file therefore has to answer it -- including the
+# bespoke ones below, which would otherwise exit 2 on the refusal rather than on the
+# defect each of them is named for.
+STUB_SERVER_IDENTITY = "10.1.1.7:5432/somedb as someone [cluster 1234]"
+
+
 def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
               context_left: str = "", cron_left: str = "", can_remove: str = "t",
-              log: str = "sql.log", fail_on: str | None = None) -> Path:
+              log: str = "sql.log", fail_on: str | None = None,
+              server: str = STUB_SERVER_IDENTITY) -> Path:
     """A stub psql that records what it was asked and answers each of the script's reads.
 
     Dispatch is on the statement text AND on any -f file, because the verification is a
@@ -83,6 +91,11 @@ def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
         + (f'  *"{fail_on}"*) echo "stub psql: simulated failure" >&2; exit 3 ;;\n' if fail_on else "")
         # pg_cron: `has the extension` and `which jobs are left`. Both must answer,
         # or the survivor branch is skipped and a leftover job goes unreported.
+        # The section-0 identity query, and the confirmation's current_database().
+        # Without these the whole suite runs the degraded path, which now exits 2 -- so
+        # every test would fail before reaching its own subject.
+        + f'  *inet_server_addr*)     printf "%s" {server!r} ;;\n'
+        + '  *"SELECT current_database()"*) printf "somedb" ;;\n'
         + f'  *pg_extension*)         printf "%s" {("t" if cron_left else "f")!r} ;;\n'
         f'  *cron.job*)             printf "%s" {cron_left!r} ;;\n'
         # The pre-flight probes. All three mention is_superuser, so one arm answers
@@ -128,6 +141,41 @@ def sql_of(logfile: Path) -> str:
 
 
 # --- the pre-flight, rewritten in round two ---------------------------------------
+
+# The whole expression, compared after comments are stripped -- the standard this module
+# already holds every other probe to (see _probe_sql). Mutation testing showed why it is
+# needed here: replacing inet_server_addr()/inet_server_port() with the REQUESTED
+# '${POSTGRES_HOST}'/'${POSTGRES_PORT}' -- which reinstates exactly the bug #75 exists to
+# fix -- left all 59 tests green, because the fixture dispatches on the token
+# `inet_server_addr` appearing anywhere in the statement, and a comment mentioning it
+# satisfies that.
+EXPECTED_SERVER_IDENTITY = (
+    "SELECT coalesce(host(inet_server_addr()), 'LOCAL SOCKET') "
+    "|| ':' || coalesce(inet_server_port()::text, '-') "
+    "|| '/' || current_database() "
+    "|| ' as ' || current_user "
+    "|| CASE WHEN current_user <> session_user "
+    "THEN ' (SET ROLE, session_user is ' || session_user || ')' "
+    "ELSE '' END "
+    "|| ' [cluster ' || (SELECT system_identifier FROM pg_control_system()) || ']'"
+)
+
+
+def _server_identity_sql() -> str:
+    """The SQL _server_identity() actually sends, comments stripped and whitespace flat."""
+    body = SCRIPT.read_text(encoding="utf-8")
+    start = body.index("_server_identity() {")
+    frag = body[start:body.index("\n}", start)]
+    sql = frag.split('-c "', 1)[1].rsplit('"', 1)[0]
+    lines = [l.split("--")[0] for l in sql.splitlines()]
+    return " ".join(" ".join(lines).split())
+
+
+def test_the_identity_query_asks_the_server_not_the_variables():
+    """A regression that keeps the psql call and changes WHAT it asks is otherwise
+    invisible: the stub answers on a token, and a comment carries the token."""
+    assert _server_identity_sql() == EXPECTED_SERVER_IDENTITY
+
 
 def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts="t",
                   group_member="t", admin_option="t", fail_on=None,
@@ -177,7 +225,12 @@ def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts
         # query here -- it is the whole point of that one: it describes the connection
         # that was MADE, where every other value the script could print describes what
         # was REQUESTED.
-        f'  *inet_server_addr*) printf "%s" {server!r} ;;\n'
+        # Derived from PGHOSTADDR when it is set, so a test that sets it is actually
+        # testing retargeting rather than two constants the author made match. The real
+        # libpq does exactly this: hostaddr wins, and -h applies only to auth and TLS.
+        '  *inet_server_addr*) if [ -n "${PGHOSTADDR:-}" ]; then\n'
+        '                          printf "%s:5432/somedb as someone [cluster 1234]" "$PGHOSTADDR"\n'
+        f'                      else printf "%s" {server!r}; fi ;;\n'
         '  *"current_user ||"*) printf "someone on somedb" ;;\n'
         "esac\n"
         "exit 0\n",
@@ -587,6 +640,7 @@ def test_a_non_haf_database_completes_instead_of_aborting(bash, tmp_path):
         f'printf "%s\\n---\\n" "$cmd" >> "{logfile.as_posix()}"\n'
         'case "$cmd" in\n'
         # pg_stat_activity FIRST: the guard query mentions neither of the others.
+        f'  *inet_server_addr*) printf "%s" {STUB_SERVER_IDENTITY!r} ;;\n'
         '  *is_superuser*)     printf "t" ;;\n'
         '  *pg_stat_activity*) printf "0" ;;\n'
         # The bare to_regclass probe is the ONLY statement that is just a probe; every
@@ -700,6 +754,7 @@ def test_a_failing_destructive_statement_does_not_abort_the_run(bash, tmp_path):
         "done\n"
         f'printf "%s\\n---\\n" "$cmd" >> "{logfile.as_posix()}"\n'
         'case "$cmd$files" in\n'
+        f'  *inet_server_addr*)     printf "%s" {STUB_SERVER_IDENTITY!r} ;;\n'
         '  *is_superuser*)         printf "t" ;;\n'
         '  *pg_stat_activity*)     printf "0" ;;\n'
         '  *uninstall_verify.sql*) printf "" ;;\n'
@@ -745,6 +800,7 @@ def test_a_failing_verification_probe_does_not_report_success(bash, tmp_path):
         '  prev="$a"\n'
         "done\n"
         'case "$cmd$files" in\n'
+        f'  *inet_server_addr*)      printf "%s" {STUB_SERVER_IDENTITY!r}; exit 0 ;;\n'
         '  *is_superuser*)          printf "t"; exit 0 ;;\n'
         '  *can_impersonate*)       printf "t"; exit 0 ;;\n'
         '  *rolcreaterole*)         printf "t"; exit 0 ;;\n'
@@ -1089,10 +1145,38 @@ def test_force_still_leaves_a_record_of_what_it_destroyed_and_where(bash, tmp_pa
 def test_pghostaddr_is_called_out_by_name(bash, tmp_path):
     """The one vector that needs explaining: nothing in the repo mentions PGHOSTADDR, and
     an operator reading `requested: haf:5432` has no reason to suspect it."""
-    _guarded_psql(tmp_path, server="10.9.9.9:5432/somedb as someone")
+    # The stub is NOT told the answer: it derives it from PGHOSTADDR the way libpq does,
+    # so this asserts retargeting rather than two constants the author made match. An
+    # earlier version passed even with the variable removed from the environment.
+    _guarded_psql(tmp_path, server="10.1.1.7:5432/somedb as someone [cluster 1234]")
     r = run(bash, tmp_path, "--force", env_extra={"PGHOSTADDR": "10.9.9.9"})
     assert "reached  : 10.9.9.9:5432/somedb as someone" in r.stdout, r.stdout
+    assert "10.1.1.7" not in r.stdout, "the -h value was reported instead of the hostaddr"
     assert "PGHOSTADDR=10.9.9.9 is set" in r.stdout, r.stdout
+
+
+def test_the_identity_query_runs_on_the_connection_being_torn_down(bash, tmp_path):
+    """Swapping psql_cmd for a bare psql inside _server_identity drops -h/-p/-U/-d, so the
+    banner would describe the LOCAL server while the teardown destroys the remote one --
+    #75's own failure mode, arriving through the fix for #75. Mutation testing showed the
+    suite could not see it: the stub is on PATH and ignores every flag."""
+    make_psql(tmp_path)
+    run(bash, tmp_path, "--force", "--host=elsewhere", "--port=6543", "--user=someadmin")
+    identity = [l for l in (tmp_path / "argv.log").read_text(encoding="utf-8").splitlines()
+                if "inet_server_addr" in l]
+    assert identity, "the identity query was never issued"
+    line = identity[0]
+    for flag in ("-h elsewhere", "-p 6543", "-U someadmin", "-Atq"):
+        assert flag in line, (flag, line)
+
+
+def test_the_note_is_absent_when_nothing_redirects_the_connection(bash, tmp_path):
+    """Negative control. Without it, `if [ -n "${PGHOSTADDR:-}" ]` becoming `if true`
+    would print a redirect NOTE on every run on every node, unfalsifiably."""
+    _guarded_psql(tmp_path)
+    r = run(bash, tmp_path, "--force")
+    assert "NOTE" not in r.stdout, r.stdout
+    assert "PGHOSTADDR" not in r.stdout, r.stdout
 
 
 def test_a_local_socket_is_reported_as_such(bash, tmp_path):
@@ -1104,8 +1188,19 @@ def test_a_local_socket_is_reported_as_such(bash, tmp_path):
     assert "reached  : LOCAL SOCKET" in r.stdout, r.stdout
 
 
-def test_a_server_that_cannot_be_asked_says_so_rather_than_guessing(bash, tmp_path):
-    """Silence here would read as agreement with the `requested` line."""
-    _guarded_psql(tmp_path, server="")
+def test_a_server_that_cannot_be_asked_refuses_rather_than_guessing(bash, tmp_path):
+    """Silence here would read as agreement with the `requested` line, and --force would
+    then destroy on nothing but the host that was typed.
+
+    fail_on, not server="": every operand of the identity expression is non-NULL by
+    construction, so a successful psql cannot return an empty row. The branch's real
+    trigger is psql FAILING, which is what the `|| true` exists for -- an earlier version
+    of this test modelled a state the query cannot produce.
+    """
+    _guarded_psql(tmp_path, fail_on="inet_server_addr")
     r = run(bash, tmp_path, "--force")
-    assert "could not ask the server" in r.stdout, r.stdout
+    assert "COULD NOT ASK THE SERVER" in r.stdout, r.stdout
+    assert "refusing to continue" in r.stdout, r.stdout
+    assert r.returncode == 2, r.returncode
+    # And nothing was dropped.
+    assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log")

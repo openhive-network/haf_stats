@@ -75,11 +75,15 @@ for arg in "$@"; do
         #
         # An earlier revision of this MR HONOURED it, handing the URI to psql as a
         # conninfo. That was worse than rejecting it, because only psql moved: every
-        # message, the confirmation banner and the typed-the-database-name gate still
-        # read ${POSTGRES_HOST}/${POSTGRES_DB}. So `uninstall_app --postgres-url=...`
-        # dropped schemas on the URI's host while printing the discrete host, and
-        # accepted the discrete database name as confirmation -- in the one gate whose
-        # stated purpose is catching "the right command against the wrong host".
+        # message read ${POSTGRES_HOST}/${POSTGRES_DB}, so `uninstall_app
+        # --postgres-url=...` dropped schemas on the URI's host while printing the
+        # discrete one.
+        #
+        # Section 0 now reports the server that ANSWERED, and the confirmation compares
+        # against the database the server names, so that particular blindness is gone
+        # (#75). The flag stays refused because honouring it still means the healthcheck's
+        # application_name tag, passing the conninfo through, and a redactor that survives
+        # ?password= -- none of which this script does.
         #
         # Honouring it properly means the banner, the healthcheck's application_name
         # tag (the uninstall session guard excludes the probe by that literal), passing
@@ -166,30 +170,77 @@ wait_for_postgres
 # matters: it describes the connection that was MADE. No amount of flag validation can
 # produce that, because none of these arrive through a flag.
 _server_identity() {
+    # host(), not ::text: the cast keeps a /32 that means nothing here, and on IPv6 the
+    # netmask makes the address/port separator ambiguous against the address's own colons.
+    #
+    # The cluster id is what actually identifies the server. Over a Unix socket
+    # inet_server_addr() is NULL, so without it the line degrades to
+    # "LOCAL SOCKET:-/haf_block_log" -- identical for two clusters on one box, which is
+    # exactly where #67's empty-host failure lands. pg_control_system() is executable by
+    # PUBLIC; verified on the live node as haf_admin, haf_stats_owner and haf_stats_user.
+    #
+    # tr, because a database named with an embedded newline would otherwise emit an
+    # unprefixed second line into the log.
     psql_cmd -Atq -c "
-        SELECT coalesce(inet_server_addr()::text, 'LOCAL SOCKET')
+        SELECT coalesce(host(inet_server_addr()), 'LOCAL SOCKET')
             || ':' || coalesce(inet_server_port()::text, '-')
             || '/' || current_database()
             || ' as ' || current_user
             || CASE WHEN current_user <> session_user
                     THEN ' (SET ROLE, session_user is ' || session_user || ')'
                     ELSE '' END
-    " 2>/dev/null || true
+            || ' [cluster ' || (SELECT system_identifier FROM pg_control_system()) || ']'
+    " | tr '\n' ' ' || true
 }
 
 # The reached target, plus a note when the environment is what redirected us. Printed on
 # both paths -- see the banner below.
-_report_target() {
+# Resolved ONCE, into _reached, and reused by every later line. An earlier revision
+# asked the server again from the refusal path, which issued the same query twice.
+_resolve_target() {
     _reached="$(_server_identity)"
+    _reached="${_reached% }"
+
+    log "  requested: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB} as ${POSTGRES_USER}"
     if [ -n "${_reached}" ]; then
         log "  reached  : ${_reached}"
     else
-        log "  reached  : (could not ask the server -- treat the line above as unverified)"
+        log "  reached  : COULD NOT ASK THE SERVER."
     fi
-    if [ -n "${PGHOSTADDR:-}" ]; then
-        log "  NOTE     : PGHOSTADDR=${PGHOSTADDR} is set, so libpq connected to THAT"
-        log "             address. --host / POSTGRES_HOST was used only for authentication"
-        log "             and TLS. The 'reached' line is the server being destroyed."
+
+    # ANY hostaddr channel, not just PGHOSTADDR. A pg_service.conf carrying `hostaddr=`
+    # beats an explicit -h and leaves no environment variable behind: measured on two
+    # servers, `PGSERVICE=decoy psql -h A` reached B with PGHOSTADDR unset. #75 said
+    # service files "lose to explicit parameters"; they do not -- `host` and `hostaddr`
+    # are different keywords and -h overrides only the former. Corrected on #75.
+    _redirect=""
+    [ -n "${PGHOSTADDR:-}" ]    && _redirect="${_redirect} PGHOSTADDR=${PGHOSTADDR}"
+    [ -n "${PGSERVICE:-}" ]     && _redirect="${_redirect} PGSERVICE=${PGSERVICE}"
+    [ -n "${PGSERVICEFILE:-}" ] && _redirect="${_redirect} PGSERVICEFILE=${PGSERVICEFILE}"
+    if [ -n "${_redirect}" ]; then
+        log "  NOTE     :${_redirect} is set in the environment. Any of these can carry a"
+        log "             hostaddr, which libpq connects to INSTEAD of --host /"
+        log "             POSTGRES_HOST -- those then apply only to authentication and TLS."
+    fi
+
+    # What the reached line is NOT. Measured: a pooler that reaches PostgreSQL over the
+    # Unix socket reports LOCAL SOCKET to a client that connected over TCP from another
+    # machine, so this describes the SERVER's end of the connection, not yours. PgBouncer
+    # sits in the haf_api_node stack this app ships a module for.
+    case "${_reached}" in
+        "LOCAL SOCKET"*)
+            log "             ('LOCAL SOCKET' is the server's own end. A pooler that"
+            log "              connects over the socket reports this to a remote client"
+            log "              too -- the cluster id above is the reliable identity.)" ;;
+    esac
+
+    # FAIL CLOSED, like every other probe in this script. If the server cannot say what it
+    # is, this run cannot name what it would destroy -- and --force would otherwise have
+    # gone ahead on nothing but the host that was typed.
+    if [ -z "${_reached}" ]; then
+        log "ERROR: refusing to continue without knowing which server answered."
+        log "       Every other probe here fails closed; so does this one."
+        exit 2
     fi
 }
 
@@ -199,11 +250,20 @@ _report_target() {
 # refusal that names the wrong role sends the operator to change the wrong thing -- and
 # now names the wrong SERVER too, which is worse.
 _report_connected_identity() {
-    _who="$(_server_identity)"
-    if [ -n "${_who}" ]; then
-        log "       (connected to ${_who})"
+    if [ -n "${_reached:-}" ]; then
+        log "       (connected to ${_reached})"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# 0. Which server actually answered.
+# ---------------------------------------------------------------------------
+# BEFORE every guard, because each of them sends the operator somewhere -- "stop these
+# containers", "grant this role" -- and under a redirected connection that is the wrong
+# machine, while the only host in the log is the one they typed. The session guard below
+# is the one an operator hits routinely, and it named nothing at all.
+log "Target:"
+_resolve_target
 
 # ---------------------------------------------------------------------------
 # 1. Refuse while anything is connected as a haf_stats role.
@@ -275,44 +335,8 @@ assert_no_active_sessions() {
 assert_no_active_sessions
 
 # ---------------------------------------------------------------------------
-# 2. Confirmation.
+# 2. Confirmation -- moved BELOW the read-only guards, see section 2 after GUARD 3.
 # ---------------------------------------------------------------------------
-# Typing the database name rather than 'yes': the mistake this guards against is the
-# right command against the wrong host.
-# THE RECORD IS PRINTED ON BOTH PATHS. --force skips the PROMPT, not the account of
-# what is about to be destroyed and where: docker-compose.yml ships --force, so the
-# unattended path was the one with no record at all, and it is the path most likely to be
-# pointed somewhere unexpected by the environment.
-log "About to PERMANENTLY remove haf_stats:"
-log "  requested: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
-_report_target
-log "  context  : ${HAF_STATS_CONTEXT}"
-log "  schemas  : ${HAF_STATS_SCHEMAS} (CASCADE -- all tables and all data)"
-log "  roles    : ${HAF_STATS_ROLES}"
-
-if [ "$FORCE" -ne 1 ]; then
-    if [ ! -t 0 ]; then
-        log "ERROR: refusing to run without a TTY and without --force."
-        log "       This drops schemas ${HAF_STATS_SCHEMAS} CASCADE and cannot be undone."
-        exit 2
-    fi
-    # Typing the database name cannot distinguish two servers -- POSTGRES_DB is
-    # haf_block_log on every HAF node and the prompt just echoes what was printed. The
-    # `reached` line above is what makes the wrong-host mistake visible; this gate only
-    # slows the hand down.
-    printf '[haf_stats] Type the database name to confirm: '
-    read -r _reply
-    if [ "${_reply}" != "${POSTGRES_DB}" ]; then
-        log "Aborted -- nothing was changed."
-        exit 1
-    fi
-    # Re-checked AFTER the prompt: an operator can start the stack from another shell
-    # while this one waits for input, and upstream module files carry restart policies
-    # on their app services. (This repo's own compose has no `restart:` key -- an
-    # earlier revision of this comment claimed haf-stats-process was
-    # `restart: unless-stopped`, which is the sibling app's compose, not this one.)
-    assert_no_active_sessions
-fi
 
 # ---------------------------------------------------------------------------
 # 3-5. Teardown.
@@ -503,6 +527,60 @@ if [ "${_can_drop_roles}" != "t" ]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# 2. Confirmation, and the record of what is about to go.
+# ---------------------------------------------------------------------------
+# BELOW the guards, which is a change from where this used to live. All three are
+# read-only, and printing "About to PERMANENTLY remove" above them meant the phrase --
+# the thing an operator greps a log for -- fired on runs that changed nothing: the
+# no-TTY refusal, and every guard refusal. The target block at section 0 already anchors
+# those to a server; this block means destruction is actually next.
+#
+# The TTY check comes FIRST for the same reason: no inventory ahead of a refusal.
+if [ "$FORCE" -ne 1 ] && [ ! -t 0 ]; then
+    log "ERROR: refusing to run without a TTY and without --force."
+    log "       This drops schemas ${HAF_STATS_SCHEMAS} CASCADE and cannot be undone."
+    exit 2
+fi
+
+log "About to PERMANENTLY remove haf_stats:"
+log "  server   : ${_reached}"
+log "  context  : ${HAF_STATS_CONTEXT}"
+log "  schemas  : ${HAF_STATS_SCHEMAS} (CASCADE -- all tables and all data)"
+log "  roles    : ${HAF_STATS_ROLES}"
+
+if [ "$FORCE" -ne 1 ]; then
+    # Typing the database name rather than 'yes': the mistake this guards against is the
+    # right command against the wrong host. Compared against what the SERVER answered,
+    # not against ${POSTGRES_DB} -- the old form compared the reply with this script's own
+    # variable, so it could only ever confirm that the operator can read. It still cannot
+    # distinguish two servers holding databases of the same name, which is what the
+    # `server` line above is for.
+    #
+    # haf_fyp's uninstall_app.sh has NOT taken this step: its !56 did, and was closed, so
+    # its develop still compares against ${POSTGRES_DB}. Filed there as haf_fyp#69.
+    _target_db="$(psql_cmd -Atq -c "SELECT current_database()" | tr -d '\n' || true)"
+    if [ -z "${_target_db}" ]; then
+        log "ERROR: could not ask the server which database this is; refusing to prompt."
+        exit 2
+    fi
+    printf '[haf_stats] Type the database name to confirm: '
+    read -r _reply
+    if [ "${_reply}" != "${_target_db}" ]; then
+        log "Aborted -- nothing was changed."
+        exit 1
+    fi
+    # Re-checked AFTER the prompt: an operator can start the stack from another shell
+    # while this one waits for input, and upstream module files carry restart policies
+    # on their app services. (This repo's own compose has no `restart:` key -- an
+    # earlier revision of this comment claimed haf-stats-process was
+    # `restart: unless-stopped`, which is the sibling app's compose, not this one.)
+    assert_no_active_sessions
+fi
+
+# ---------------------------------------------------------------------------
+# 3-5. Teardown.
+# ---------------------------------------------------------------------------
 # 3. The HAF context, FIRST -- while its schema still exists. hive.app_remove_context
 #    drops the context's own table and views, which live in the application schema, so
 #    doing this after DROP SCHEMA CASCADE would leave hafd.contexts pointing at objects
