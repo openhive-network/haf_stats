@@ -613,17 +613,22 @@ psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.assert_op_types(TRUE
 # What actually got recorded, echoed here so a wrong version is visible in the install
 # log rather than only through GET /version later -- which is how it was found (#76): a
 # hand-built image reported "unknown", and only a comparison against the pre-deploy value
-# caught it. GIT_HASH is baked at BUILD time, so a wrong value needs a rebuild, not a
-# re-install; the sooner an operator learns that, the cheaper it is.
+# caught it. GIT_HASH is baked at BUILD time AND copied into app_version by this script,
+# so correcting a wrong value takes both a rebuild and a re-install -- which is what the
+# warnings below say, and what an ordinary `docker compose up -d` does. An earlier
+# revision of this comment said "a rebuild, not a re-install", so the file stated both
+# positions at once.
 # LIMIT 1, because app_version is the one control table in db/haf_stats_app.sql WITHOUT a
 # singleton unique index -- app_status and app_config both have one. get_version() and
-# get_health compensate the same way. Without it a table that accumulated rows under a
+# get_health compensate the same way. Without it the guard does not go QUIET -- it takes
+# the wrong arm, warning about a width when the real fault is a duplicated row. A table
+# that accumulated rows under a
 # pre-TRUNCATE image returns a newline-joined string, which splits this log line AND makes
 # the comparison below false even when the placeholder IS what is recorded: the warning
 # would go quiet in precisely the case it was added for.
 #
 # The `if` distinguishes "no row" from "the query failed", which a `|| echo ""` conflated:
-# on the haf_api_node path version.sql is always present, so "(none recorded)" there could
+# on the haf_api_node path version.sql is always present, so "(no row in app_version)" could
 # only ever have meant a failed query, with nothing to tell the operator so.
 if _installed_version="$(psql_cmd -Atq -c "SELECT git_hash FROM haf_stats_app.app_version LIMIT 1")"; then
     log "Installation complete. Recorded version: ${_installed_version:-(no row in app_version)}"
@@ -633,24 +638,35 @@ else
 fi
 
 if [ "${_installed_version}" = "unspecified" ]; then
-    # "without a GIT_HASH value", not "without --build-arg GIT_HASH": an explicit
-    # --build-arg GIT_HASH="" bakes the same placeholder.
-    log "WARNING: this image was built without a GIT_HASH value, so GET /version and"
-    log "         get_health.version cannot identify the commit this node is running."
-    log "         Rebuild AND re-install -- the value is written to app_version by this"
-    log "         script, so a rebuild on its own changes nothing here. README.md,"
-    log "         \"Building the image\":"
-    log "           docker build --build-arg GIT_HASH=\"\$(git rev-parse --short=8 HEAD)\" ..."
+    # "without a usable GIT_HASH value" covers all three producers: unset, an explicit
+    # --build-arg GIT_HASH="", and a value carrying a character outside [A-Za-z0-9._-],
+    # which the Dockerfile REJECTS rather than scrubs. Telling an operator who passed
+    # $(git describe --dirty) that they "built without a value" sends them looking in
+    # the wrong place.
+    log "WARNING: this image was built without a usable GIT_HASH value -- unset, empty,"
+    log "         or carrying a character outside [A-Za-z0-9._-], which the build"
+    log "         rejects. GET /version and get_health.version cannot identify the"
+    log "         commit this node is running. Rebuild AND re-install -- the value is"
+    log "         written to app_version by this script, so a rebuild on its own"
+    log "         changes nothing here. README.md, \"Building the image\":"
+    log "           docker build --build-arg GIT_HASH=\"\$(git rev-parse HEAD | cut -c1-8)\" ..."
 elif [ -n "${_installed_version}" ] \
      && ! printf '%s' "${_installed_version}" | grep -Eq '^[0-9a-f]{8}$'; then
-    # The state every node hand-built before this landed is in, including one of ours.
+    # The state MOST nodes hand-built before this landed are in, including one of ours
+    # -- a hand-build that did pass the right width is 8-hex and warns about nothing.
     # CI bakes CI_COMMIT_SHORT_SHA, always eight hex characters, so anything else came
-    # from a hand-build -- most often `git rev-parse --short`, which is seven and matches
-    # no registry tag for the same commit. Without this arm the warning above would only
-    # ever have helped the NEXT operator, never the fleet that already exists.
+    # from a hand-build. Without this arm the warning above would only ever have helped
+    # the NEXT operator, never the fleet that already exists.
+    #
+    # Two ways to get here, and the message names both: `git rev-parse --short` (seven
+    # today), and `--short=8` in a clone where the eight-character prefix is ambiguous --
+    # --short=N is a MINIMUM, so git returns nine or more and this arm fires on a command
+    # the README itself used to document.
     log "WARNING: the recorded version ${_installed_version} is not an 8-character commit"
-    log "         hash, so it matches no registry tag for this commit. It was probably"
-    log "         built with \`git rev-parse --short\` (seven) rather than --short=8."
+    log "         hash, so it matches no registry tag for this commit. Either it was"
+    log "         built with \`git rev-parse --short\` (seven today), or with \`--short=8\`"
+    log "         in a clone where that prefix is ambiguous -- --short=N is a minimum,"
+    log "         not a width. \`git rev-parse HEAD | cut -c1-8\` is exact."
     log "         Rebuild AND re-install; see README.md, \"Building the image\"."
 fi
 

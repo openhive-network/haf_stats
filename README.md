@@ -572,7 +572,7 @@ From the **repository root** (the examples above `cd docker` first, and `docker/
 `Dockerfile`):
 
 ```bash
-docker build --build-arg GIT_HASH="$(git rev-parse --short=8 HEAD)" -t haf_stats:local .
+docker build --build-arg GIT_HASH="$(git rev-parse HEAD | cut -c1-8)" -t haf_stats:local .
 ```
 
 `GIT_HASH` is what `GET /version` and `get_health.version` report.
@@ -581,17 +581,29 @@ docker build --build-arg GIT_HASH="$(git rev-parse --short=8 HEAD)" -t haf_stats
   `install_app` warns about. It reads as unset on purpose: an earlier default of `unknown`
   looked like a value someone had chosen, so a node could claim a version it was not
   running. `hive/haf_fyp` uses the same placeholder for the same condition.
-- **`--short=8`, not plain `--short`.** CI passes `CI_COMMIT_SHORT_SHA`, a fixed **eight**
-  characters. git's `--short` follows `core.abbrev`, which is `auto`: seven for this
-  repository today, but it grows with the object count and a global setting overrides it.
-  Without the explicit width a hand-build of the same commit reports `ab66896` where CI's
-  image and its registry tag say `ab668960`, and the two cannot be matched.
+- **Pass something the build will accept.** Anything containing a character outside
+  `[A-Za-z0-9._-]` is **rejected**, not scrubbed, and bakes `unspecified` too — a space, a
+  quote, a semicolon. `$(git describe --tags --dirty)` can produce such a value, so it is
+  not a drop-in substitute for the command above.
+- **`cut -c1-8`, not `--short=8`.** `CI_COMMIT_SHORT_SHA` is unconditionally the first
+  **eight** characters of the SHA. `--short=N` is a *minimum*, not a width: git extends the
+  abbreviation until it is unambiguous in **your** clone, so `--short=3` returns `7b1f`
+  here — four characters. In a clone where the eight-character prefix collides, `--short=8`
+  bakes nine or more, which matches no registry tag **and** trips `install_app`'s width
+  warning while you followed this page exactly. Plain `--short` is worse again: it follows
+  `core.abbrev` (`auto` — seven for this repository today) and grows with the object
+  count, so a hand-build reports `ab66896` where CI's image and its registry tag say
+  `ab668960`.
 
 **Then point the stack at it, or nothing will use it.** `HAF_STATS_IMAGE` means different
 things in the two places it appears — the same inversion this file notes for the rewriter
 variable:
 
 ```bash
+# from docker/ -- this repository's compose file and its .env both live there, while the
+# build above ran from the repository root
+cd docker
+
 # here: HAF_STATS_IMAGE is the WHOLE reference
 HAF_STATS_IMAGE=haf_stats:local docker compose up -d
 
@@ -602,9 +614,19 @@ HAF_STATS_IMAGE=haf_stats HAF_STATS_VERSION=local
 
 Skip that and `docker compose up -d` resolves `HAF_STATS_VERSION` (`latest`, from
 `docker/.env`) against the registry and silently ignores the image you just built. The
-`postgrest-rewriter` is a second image, built from `Dockerfile.rewriter` and pinned by the
-same `HAF_STATS_VERSION`, so a local app image beside a registry rewriter is the mismatch
-this README warns about elsewhere — move both or neither.
+`postgrest-rewriter` is a second image, built from `Dockerfile.rewriter` and pinned by
+the same `HAF_STATS_VERSION` — move both or neither. Its own local build, again from the
+repository root, is:
+
+```bash
+docker build -f Dockerfile.rewriter -t haf_stats-rewriter:local .
+```
+
+and `HAF_STATS_REWRITER_IMAGE` points the stack at it. (With the shipped
+`HAF_STATS_VERSION=latest` there is no published `:latest` rewriter to skew against, and
+`docker/docker-compose.yml` gives that service a `build:` stanza, so Compose builds it from
+the working tree instead — the skew is real, but it is a *stale local build* rather than a
+registry image.)
 
 **A rebuild on its own changes nothing on a running node.** `GIT_HASH` is baked into
 `db/version.sql` at build time, but the value an endpoint serves is written to
@@ -613,9 +635,9 @@ rebuild **and** a re-install — which an ordinary `docker compose up -d` does f
 because `haf-stats-setup` starts unconditionally (see "Redeploying against a node under
 load").
 
-If a node already reports `unspecified`, or a 7-character hash, that is this defect
-rather than a mystery: it was built without the argument, or without the width.
-`install_app` says so on every install now.
+If a node already reports `unspecified`, or a hash that is not eight characters, that is
+this defect rather than a mystery: it was built without the argument, with a value the
+build rejected, or without the width. `install_app` says so on every install now.
 
 ## Redeploying against a node under load
 
