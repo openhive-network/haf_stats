@@ -73,77 +73,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap on_exit EXIT
 
-require_number() {
-    local name="$1" value="$2"
-    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-        echo "${name} must be a non-negative integer; got '${value}'." >&2
-        exit 2
-    fi
-}
-
-# Detect a live processor. Scoped to THIS database (pg_stat_activity is cluster-wide). Matching a
-# leading CALL keeps this from matching its own SELECT.
-# UNDER THE GENERIC HAF DRIVER (#85) THE OLD PREDICATE WAS FALSE IN BOTH HALVES
-# whenever the processor was live, so this refused nothing:
-#
-#   * the backend runs `CALL haf_stats_app.process_blocks(...)`, never
-#     `CALL haf_stats_app.main(...)`, so the query-text match could not fire;
-#   * it idles on the client between ranges BY DESIGN -- that is the point of the
-#     driver -- so `state <> 'idle'` skipped it for most of the wall clock.
-#
-# The result would have been this script reporting "no processor", TRUNCATEing, and
-# replaying from genesis through an additive upsert while the driver appended head
-# blocks: the #42 double-count corruption the guard exists to prevent, plus permanent
-# gaps where writes landed before the TRUNCATE. The post-reseal re-check below shares
-# this function, so it was blind for the same two reasons.
-#
-# Both loops now tag themselves `haf_stats_block_processing` -- the driver through its
-# connection URI, the legacy loop through PGAPPNAME (scripts/process_blocks.sh). The two
-# query-text arms are belt-and-braces for a processor container still running an image
-# from before that tag existed.
-#
-# The failure directions are NOT symmetric: a false positive costs an operator a retry,
-# a false negative truncates under a live writer. So this over-matches on purpose, and
-# there is no `state` filter -- scripts/uninstall_app.sh's session guard has always
-# keyed this way and is the reason it still catches an idle driver backend.
-_LIVE_PROCESSOR_MATCH="
-          AND (
-               application_name = 'haf_stats_block_processing'
-            OR BTRIM(query) ILIKE 'CALL%haf_stats_app.main%'
-            OR BTRIM(query) ILIKE 'CALL%haf_stats_app.process_blocks%'
-          )"
-
-count_live_processors() {
-    psql_cmd -Atc "
-        SELECT COUNT(*)
-        FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND datname = current_database()
-          ${_LIVE_PROCESSOR_MATCH}
-    "
-}
-
-# WHAT is holding it, printed on refusal. Dropping the `state` filter bought correctness
-# under the driver and cost this: a backend orphaned by an abrupt container loss stays in
-# pg_stat_activity, still tagged and idle, until TCP keepalive reaps it -- and with
-# postgres's default tcp_keepalives_idle = 0 that is the OS default, commonly two hours.
-# The old predicate excluded such a zombie; this one matches it. Without naming the
-# session, an operator who HAS stopped the container is told to stop the container.
-# scripts/uninstall_app.sh reports its blocking sessions for the same reason.
-report_live_processors() {
-    psql_cmd -Atc "
-        SELECT '  pid ' || pid
-               || '  user=' || coalesce(usename, '?')
-               || '  application_name=' || coalesce(nullif(application_name, ''), '(none)')
-               || '  state=' || coalesce(state, '(hidden from this role)')
-               || '  since ' || coalesce(to_char(backend_start, 'YYYY-MM-DD HH24:MI:SS'), '?')
-        FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND datname = current_database()
-          ${_LIVE_PROCESSOR_MATCH}
-    "
-}
-
 wait_for_postgres
 
 require_number "BATCH_SIZE" "${BATCH_SIZE}"
@@ -177,26 +106,7 @@ if (( TO_BLOCK != app_block )); then
     exit 2
 fi
 
-# Assign, then validate: `if (( $(cmd) > 0 ))` would FAIL OPEN if psql returned an empty string
-# (connection reset) — `(( > 0 ))` is a syntax error returning 1, and set -e is suppressed inside
-# an `if` condition, so the guard would silently conclude "no processor" and TRUNCATE while live.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor is still running; refusing to rebuild." >&2
-    report_live_processors >&2 || true
-    echo "Stop it first: stop the haf-stats-process container, then re-run." >&2
-    echo "  If the container is ALREADY stopped, the session above is an orphaned backend" >&2
-    echo "  left by an abrupt stop; it clears on TCP keepalive (often two hours) or at once" >&2
-    echo "  with SELECT pg_terminate_backend(<pid>);" >&2
-    echo "  Nothing else clears this check, and that is deliberate. It keys on the" >&2
-    echo "  processor's CONNECTION, not on what the connection is doing, because under the" >&2
-    echo "  HAF driver an idle connection is a working processor between ranges." >&2
-    echo "  So: haf_stats_app.stop_processing() stops only the legacy CALL main() loop, and" >&2
-    echo "  hive.app_pause('haf_stats') stops the driver taking new ranges but leaves it" >&2
-    echo "  connected -- this check still refuses on both." >&2
-    exit 2
-fi
+refuse_if_processor_live
 
 log "Rebuilding witness block counts through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
@@ -218,16 +128,7 @@ while (( first <= TO_BLOCK )); do
     first=$((last + 1))
 done
 
-# The pre-flight check is TOCTOU over a multi-minute replay, so re-check: a processor started
-# mid-rebuild would have been appending head blocks through the additive upsert onto the table we
-# rebuilt from block 1. Assign-then-validate for the same fail-open reason as the pre-flight check.
-live_procs="$(count_live_processors)"
-require_number "live_processor_count" "${live_procs}"
-if (( live_procs > 0 )); then
-    echo "The haf_stats processor STARTED DURING the rebuild; its head-block writes have" >&2
-    echo "double-counted onto the rebuilt table. Stop it and re-run this script." >&2
-    exit 2
-fi
+refuse_if_processor_started_during_rebuild "Its head-block writes have double-counted onto the rebuilt table."
 
 rebuild_started=0
 log "Witness blocks rebuild complete."

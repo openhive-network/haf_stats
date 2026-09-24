@@ -192,6 +192,26 @@ docker compose up -d
 > `haf_stats.yaml` appends `:${HAF_STATS_VERSION}` — so there the value is
 > `registry.gitlab.syncad.com/hive/haf_stats/rewriter`, without `:<old-sha>`.
 
+### Every rebuild refuses to run while the processor is connected
+
+All eight `rebuild_*.sh` scripts `TRUNCATE` their tables and replay them. Each one now
+refuses to start while a block processor is connected, names the session holding it, and
+re-checks after the replay in case one started mid-rebuild (#98). The check keys on the
+processor's CONNECTION — matched by its `haf_stats_block_processing` application name
+under either loop — not on what that connection is doing, because under the generic HAF
+driver an idle connection is a working processor between ranges.
+
+**Stop the `haf-stats-process` container** and restart it after the rebuild. Neither
+`SELECT haf_stats_app.stop_processing();` nor `SELECT hive.app_pause('haf_stats');`
+clears the check: the first stops only the legacy `CALL main()` loop, and the second
+leaves the driver connected.
+
+If the container is already stopped and a rebuild still refuses, the session it names is
+an orphaned backend left by an abrupt stop. It clears on TCP keepalive — commonly two
+hours — or at once with `SELECT pg_terminate_backend(<pid>);`.
+
+The predicate itself lives in `scripts/common.sh`, once, rather than in each script.
+
 ### Rebuilding account cohorts
 
 Changes to account-creation or retention definitions require rebuilding the
