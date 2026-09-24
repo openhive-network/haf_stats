@@ -85,7 +85,7 @@ for arg in "$@"; do
         # application_name tag, passing the conninfo through, and a redactor that survives
         # ?password= -- none of which this script does.
         #
-        # Honouring it properly means the banner, the healthcheck's application_name
+        # Honouring it properly means the healthcheck's application_name
         # tag (the uninstall session guard excludes the probe by that literal), passing
         # the conninfo through to the healthcheck, a redactor that survives
         # ?password= and keyword/value forms, and the other scripts. That is tracked
@@ -98,11 +98,11 @@ for arg in "$@"; do
         --postgres-url=*|--url=*)
             log "ERROR: --postgres-url is not supported yet."
             log "       Use --host=, --port= and --user= instead. Accepting the URI"
-            log "       would move only the psql connection: this script's messages,"
-            log "       and the teardown's confirmation prompt, still read POSTGRES_HOST"
-            log "       and POSTGRES_DB -- so it could act on one database while"
-            log "       reporting another. Refusing is the safe answer until that is"
-            log "       fixed throughout."
+            log "       would move only the psql connection: the healthcheck's"
+            log "       application_name tag, the conninfo passed through to it, and a"
+            log "       redactor that survives ?password= are all still missing, and the"
+            log "       other scripts read POSTGRES_HOST. Refusing is the safe answer"
+            log "       until that is fixed throughout."
             exit 2
             ;;
 
@@ -170,8 +170,12 @@ wait_for_postgres
 # matters: it describes the connection that was MADE. No amount of flag validation can
 # produce that, because none of these arrive through a flag.
 _server_identity() {
-    # host(), not ::text: the cast keeps a /32 that means nothing here, and on IPv6 the
-    # netmask makes the address/port separator ambiguous against the address's own colons.
+    # host(), not ::text: inet's CAST to text keeps a /32 that means nothing here (the
+    # type's own output suppresses it; text(inet) does not). That is the whole argument --
+    # an earlier revision also claimed ::text made IPv6 ambiguous, which is backwards:
+    # `::1/128:5432` marks where the address ends, while host() gives `::1:5432`, where
+    # `:5432` is indistinguishable from a hextet. IPv6 is the one case ::text reads
+    # better; the /32 noise on every IPv4 node is the case that actually occurs.
     #
     # The cluster id is what actually identifies the server. Over a Unix socket
     # inet_server_addr() is NULL, so without it the line degrades to
@@ -181,16 +185,21 @@ _server_identity() {
     #
     # tr, because a database named with an embedded newline would otherwise emit an
     # unprefixed second line into the log.
+    # No `|| true`: the caller tests the STATUS. An earlier revision swallowed it and
+    # made emptiness the only signal, which is not the same thing -- a failing psql still
+    # writes to stdout if anything already has, and a ~/.psqlrc `\echo` or `\timing` does
+    # exactly that at connection time. Nothing in this repo passes --no-psqlrc. The
+    # refusal then never fired and the `reached:` line printed that noise as an identity.
     psql_cmd -Atq -c "
         SELECT coalesce(host(inet_server_addr()), 'LOCAL SOCKET')
             || ':' || coalesce(inet_server_port()::text, '-')
             || '/' || current_database()
             || ' as ' || current_user
             || CASE WHEN current_user <> session_user
-                    THEN ' (SET ROLE, session_user is ' || session_user || ')'
+                    THEN ' (current_user differs from session_user ' || session_user || ')'
                     ELSE '' END
             || ' [cluster ' || (SELECT system_identifier FROM pg_control_system()) || ']'
-    " | tr '\n' ' ' || true
+    " | tr '\n' ' '
 }
 
 # The reached target, plus a note when the environment is what redirected us. Printed on
@@ -198,8 +207,15 @@ _server_identity() {
 # Resolved ONCE, into _reached, and reused by every later line. An earlier revision
 # asked the server again from the refusal path, which issued the same query twice.
 _resolve_target() {
-    _reached="$(_server_identity)"
+    # The STATUS, then the shape. psql failing is the branch the refusal exists for, and
+    # stdout noise on a SUCCESSFUL query corrupts the line just as badly -- so anything
+    # that does not end in the cluster id this query always appends is not an identity.
+    if ! _reached="$(_server_identity)"; then _reached=""; fi
     _reached="${_reached% }"
+    case "${_reached}" in
+        *"[cluster "*"]") : ;;
+        *) _reached="" ;;
+    esac
 
     log "  requested: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB} as ${POSTGRES_USER}"
     if [ -n "${_reached}" ]; then
@@ -213,14 +229,28 @@ _resolve_target() {
     # servers, `PGSERVICE=decoy psql -h A` reached B with PGHOSTADDR unset. #75 said
     # service files "lose to explicit parameters"; they do not -- `host` and `hostaddr`
     # are different keywords and -h overrides only the former. Corrected on #75.
+    # PGSERVICEFILE alone is inert: libpq reads a service file only when a service NAME
+    # is given, through PGSERVICE or `service=` in a conninfo. Warning on it by itself
+    # meant a destructive run printed a redirect warning for a variable that redirects
+    # nothing, so it is reported only alongside PGSERVICE -- where it says WHICH file to
+    # go and read.
     _redirect=""
-    [ -n "${PGHOSTADDR:-}" ]    && _redirect="${_redirect} PGHOSTADDR=${PGHOSTADDR}"
-    [ -n "${PGSERVICE:-}" ]     && _redirect="${_redirect} PGSERVICE=${PGSERVICE}"
-    [ -n "${PGSERVICEFILE:-}" ] && _redirect="${_redirect} PGSERVICEFILE=${PGSERVICEFILE}"
+    [ -n "${PGHOSTADDR:-}" ] && _redirect="${_redirect} PGHOSTADDR=${PGHOSTADDR}"
+    [ -n "${PGSERVICE:-}" ]  && _redirect="${_redirect} PGSERVICE=${PGSERVICE}"
+    if [ -n "${PGSERVICE:-}" ] && [ -n "${PGSERVICEFILE:-}" ]; then
+        _redirect="${_redirect} PGSERVICEFILE=${PGSERVICEFILE}"
+    fi
     if [ -n "${_redirect}" ]; then
-        log "  NOTE     :${_redirect} is set in the environment. Any of these can carry a"
-        log "             hostaddr, which libpq connects to INSTEAD of --host /"
-        log "             POSTGRES_HOST -- those then apply only to authentication and TLS."
+        # One per line. Run together they read as a single ungrammatical value, and with
+        # all of them set the first line ran ~140 columns while its own continuations
+        # wrapped at 85.
+        for _var in ${_redirect}; do
+            log "  NOTE     : ${_var}"
+        done
+        log "             Any of PGHOSTADDR, PGSERVICE or PGSERVICEFILE can carry a"
+        log "             hostaddr, which libpq connects to INSTEAD of the --host /"
+        log "             POSTGRES_HOST above; those then apply only to authentication"
+        log "             and TLS. The 'reached' line is the server being destroyed."
     fi
 
     # What the reached line is NOT. Measured: a pooler that reaches PostgreSQL over the
@@ -229,18 +259,25 @@ _resolve_target() {
     # sits in the haf_api_node stack this app ships a module for.
     case "${_reached}" in
         "LOCAL SOCKET"*)
-            log "             ('LOCAL SOCKET' is the server's own end. A pooler that"
-            log "              connects over the socket reports this to a remote client"
-            log "              too -- the cluster id above is the reliable identity.)" ;;
+            log "  NOTE     : 'LOCAL SOCKET' is the SERVER's end of the connection, not"
+            log "             yours. A pooler that reaches PostgreSQL over the socket"
+            log "             reports it to a remote client too, so the cluster id is the"
+            log "             reliable identity here." ;;
     esac
 
-    # FAIL CLOSED, like every other probe in this script. If the server cannot say what it
-    # is, this run cannot name what it would destroy -- and --force would otherwise have
-    # gone ahead on nothing but the host that was typed.
+    # FAIL CLOSED, like every other probe in this script. If the server cannot say what
+    # it is, this run cannot name what it would destroy -- and --force would otherwise
+    # have gone ahead on nothing but the host that was typed.
+    #
+    # exit 1, not 2. In this file 2 means "invoked wrong" (unknown flag, --postgres-url,
+    # an empty flag value, no TTY without --force) and 1 means "refused, or a probe could
+    # not answer" -- the session guard, the catalog probe and both privilege guards all
+    # exit 1. An earlier revision used 2 here and claimed it matched "every other probe",
+    # which was the opposite of what the file does.
     if [ -z "${_reached}" ]; then
         log "ERROR: refusing to continue without knowing which server answered."
         log "       Every other probe here fails closed; so does this one."
-        exit 2
+        exit 1
     fi
 }
 
@@ -532,8 +569,11 @@ fi
 # ---------------------------------------------------------------------------
 # BELOW the guards, which is a change from where this used to live. All three are
 # read-only, and printing "About to PERMANENTLY remove" above them meant the phrase --
-# the thing an operator greps a log for -- fired on runs that changed nothing: the
-# no-TTY refusal, and every guard refusal. The target block at section 0 already anchors
+# the thing an operator greps a log for -- fired on runs that changed nothing: both guard
+# refusals, and every probe that could not answer. (NOT the no-TTY refusal: on develop
+# that check sits inside `if [ "$FORCE" -ne 1 ]` and above the banner, so it never printed
+# it. An earlier revision of this comment said it did. Guard 1 has no refusal either -- a
+# non-HAF database completes.) The target block at section 0 already anchors
 # those to a server; this block means destruction is actually next.
 #
 # The TTY check comes FIRST for the same reason: no inventory ahead of a refusal.
@@ -562,7 +602,7 @@ if [ "$FORCE" -ne 1 ]; then
     _target_db="$(psql_cmd -Atq -c "SELECT current_database()" | tr -d '\n' || true)"
     if [ -z "${_target_db}" ]; then
         log "ERROR: could not ask the server which database this is; refusing to prompt."
-        exit 2
+        exit 1
     fi
     printf '[haf_stats] Type the database name to confirm: '
     read -r _reply

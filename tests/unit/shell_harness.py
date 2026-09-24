@@ -61,8 +61,11 @@ def clean_env(bindir=None) -> dict:
     # PG* too, as of haf_stats#75: scripts/uninstall_app.sh now READS PGHOSTADDR,
     # PGSERVICE and PGSERVICEFILE, and libpq itself reads PGHOST/PGUSER/PGDATABASE/
     # PGOPTIONS. A developer with any of those exported would otherwise steer the scripts
-    # under test -- and, worse, would silently pass a negative control that asserts one of
-    # them is ABSENT. Tests that want one inject it explicitly through env_extra.
+    # under test: the redirect NOTE would print on every run, so the negative control that
+    # asserts it is ABSENT would fail on their machine and pass in CI -- a test that
+    # depends on the developer's shell, which is the thing this helper exists to prevent.
+    # (An earlier revision of this comment had it backwards, saying such a control would
+    # "silently pass".) Tests that want one inject it explicitly through env_extra.
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("HAF_STATS_")
            and not k.startswith("POSTGRES_")
