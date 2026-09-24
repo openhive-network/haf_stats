@@ -145,6 +145,66 @@ done
 
 wait_for_postgres
 
+# WHICH SERVER THIS ACTUALLY REACHED, asked of the server rather than echoed back from
+# our own variables. This is the whole of #75: every message here used to name
+# ${POSTGRES_HOST}, which is what was REQUESTED, and three things make the requested and
+# the reached target diverge without any flag being wrong.
+#
+#   1. PGHOSTADDR. libpq connects to `hostaddr` when both are given and uses `host` only
+#      for authentication and TLS matching -- and -h sets `host`. REPRODUCED against two
+#      live servers: `PGHOSTADDR=<B> psql -h <A>` reached B, saw B's tables and reported
+#      B's inet_server_addr(), while every message this script prints said A. Both
+#      reviewers of !81 could only mark that PLAUSIBLE from the documentation; it is not
+#      plausible, it is what happens.
+#   2. PGOPTIONS can carry `-c role=...`, so current_user is not necessarily the role
+#      whose privileges the operator thinks apply. Measured: current_user became `decoy`
+#      while session_user stayed `postgres`, which is why both are reported below.
+#   3. A socket path is a legal --host value, so the flag guard added by !81 (#67) cannot
+#      tell "a network host" from "the local socket".
+#
+# inet_server_addr() returns NULL over a Unix socket, which is exactly the signal that
+# matters: it describes the connection that was MADE. No amount of flag validation can
+# produce that, because none of these arrive through a flag.
+_server_identity() {
+    psql_cmd -Atq -c "
+        SELECT coalesce(inet_server_addr()::text, 'LOCAL SOCKET')
+            || ':' || coalesce(inet_server_port()::text, '-')
+            || '/' || current_database()
+            || ' as ' || current_user
+            || CASE WHEN current_user <> session_user
+                    THEN ' (SET ROLE, session_user is ' || session_user || ')'
+                    ELSE '' END
+    " 2>/dev/null || true
+}
+
+# The reached target, plus a note when the environment is what redirected us. Printed on
+# both paths -- see the banner below.
+_report_target() {
+    _reached="$(_server_identity)"
+    if [ -n "${_reached}" ]; then
+        log "  reached  : ${_reached}"
+    else
+        log "  reached  : (could not ask the server -- treat the line above as unverified)"
+    fi
+    if [ -n "${PGHOSTADDR:-}" ]; then
+        log "  NOTE     : PGHOSTADDR=${PGHOSTADDR} is set, so libpq connected to THAT"
+        log "             address. --host / POSTGRES_HOST was used only for authentication"
+        log "             and TLS. The 'reached' line is the server being destroyed."
+    fi
+}
+
+# Report the role the database actually sees. ${POSTGRES_USER} is what was REQUESTED;
+# every probe above correctly asks about current_user, and the two can differ (a
+# PGUSER/PGSERVICE in the environment, a .pgpass-driven fallback, a service file). A
+# refusal that names the wrong role sends the operator to change the wrong thing -- and
+# now names the wrong SERVER too, which is worse.
+_report_connected_identity() {
+    _who="$(_server_identity)"
+    if [ -n "${_who}" ]; then
+        log "       (connected to ${_who})"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 1. Refuse while anything is connected as a haf_stats role.
 # ---------------------------------------------------------------------------
@@ -219,16 +279,27 @@ assert_no_active_sessions
 # ---------------------------------------------------------------------------
 # Typing the database name rather than 'yes': the mistake this guards against is the
 # right command against the wrong host.
+# THE RECORD IS PRINTED ON BOTH PATHS. --force skips the PROMPT, not the account of
+# what is about to be destroyed and where: docker-compose.yml ships --force, so the
+# unattended path was the one with no record at all, and it is the path most likely to be
+# pointed somewhere unexpected by the environment.
+log "About to PERMANENTLY remove haf_stats:"
+log "  requested: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+_report_target
+log "  context  : ${HAF_STATS_CONTEXT}"
+log "  schemas  : ${HAF_STATS_SCHEMAS} (CASCADE -- all tables and all data)"
+log "  roles    : ${HAF_STATS_ROLES}"
+
 if [ "$FORCE" -ne 1 ]; then
     if [ ! -t 0 ]; then
         log "ERROR: refusing to run without a TTY and without --force."
         log "       This drops schemas ${HAF_STATS_SCHEMAS} CASCADE and cannot be undone."
         exit 2
     fi
-    log "About to PERMANENTLY remove haf_stats from ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}:"
-    log "  context : ${HAF_STATS_CONTEXT}"
-    log "  schemas : ${HAF_STATS_SCHEMAS} (CASCADE -- all tables and all data)"
-    log "  roles   : ${HAF_STATS_ROLES}"
+    # Typing the database name cannot distinguish two servers -- POSTGRES_DB is
+    # haf_block_log on every HAF node and the prompt just echoes what was printed. The
+    # `reached` line above is what makes the wrong-host mistake visible; this gate only
+    # slows the hand down.
     printf '[haf_stats] Type the database name to confirm: '
     read -r _reply
     if [ "${_reply}" != "${POSTGRES_DB}" ]; then
@@ -300,16 +371,6 @@ _psql_destructive() {
 # 42704 on an unknown role, which mattered because this script advertises idempotent
 # re-runs) and covers the two other states in one predicate: no context row left, and
 # no hafd.contexts at all.
-# Report the role the database actually sees. ${POSTGRES_USER} is what was REQUESTED;
-# every probe above correctly asks about current_user, and the two can differ (a
-# PGUSER/PGSERVICE in the environment, a .pgpass-driven fallback, a service file). A
-# refusal that names the wrong role sends the operator to change the wrong thing.
-_report_connected_identity() {
-    _who="$(psql_cmd -Atq -c "SELECT current_user || ' on ' || current_database()" 2>/dev/null || echo "")"
-    if [ -n "${_who}" ]; then
-        log "       (connected as ${_who})"
-    fi
-}
 
 # GUARD 1 -- is this a HAF database at all?
 #

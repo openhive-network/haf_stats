@@ -107,10 +107,15 @@ def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
     return logfile
 
 
-def run(bash, tmp_path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+def run(bash, tmp_path, *args: str, stdin: str | None = None,
+        env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    env = clean_env(stub_bin(tmp_path))
+    # After clean_env, which strips the app's own variables on purpose. PGHOSTADDR is
+    # libpq's, not ours, and is the point of the #75 tests.
+    env.update(env_extra or {})
     return subprocess.run(
         [bash, str(SCRIPT), *args],
-        env=clean_env(stub_bin(tmp_path)),
+        env=env,
         input=stdin,
         capture_output=True,
         text=True,
@@ -125,7 +130,8 @@ def sql_of(logfile: Path) -> str:
 # --- the pre-flight, rewritten in round two ---------------------------------------
 
 def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts="t",
-                  group_member="t", admin_option="t", fail_on=None):
+                  group_member="t", admin_option="t", fail_on=None,
+                  server="10.1.1.7:5432/somedb as someone"):
     """A psql that answers the three pre-flight probes independently."""
     stub_bin(tmp_path)
     logfile = tmp_path / "sql.log"
@@ -167,6 +173,11 @@ def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts
         # distinctive text: the session-count query ALSO says current_database(),
         # and `case` takes the first match, so a *current_database* arm above it
         # fed this string to the session guard as a count.
+        # The #75 identity query. Keyed on inet_server_addr, which appears in no other
+        # query here -- it is the whole point of that one: it describes the connection
+        # that was MADE, where every other value the script could print describes what
+        # was REQUESTED.
+        f'  *inet_server_addr*) printf "%s" {server!r} ;;\n'
         '  *"current_user ||"*) printf "someone on somedb" ;;\n'
         "esac\n"
         "exit 0\n",
@@ -1026,7 +1037,9 @@ def test_a_refusal_names_the_role_the_database_actually_sees(bash, tmp_path):
     naming the wrong role sends the operator to change the wrong thing."""
     _guarded_psql(tmp_path, createrole="f")
     r = run(bash, tmp_path, "--force")
-    assert "connected as someone on somedb" in r.stdout
+    # Now also names the SERVER (#75). ${POSTGRES_HOST} is what was requested; this line
+    # is what answered.
+    assert "connected to 10.1.1.7:5432/somedb as someone" in r.stdout
 
 
 def test_the_cron_survivor_probe_looks_for_this_apps_jobs():
@@ -1042,3 +1055,57 @@ def test_the_cron_survivor_probe_looks_for_this_apps_jobs():
     # And the prefix really is this app's, not merely SOME prefix.
     assert "haf_stats" in EXPECTED_CRON_SURVIVORS
     assert "haf_fyp" not in _probe_sql('_cron_left="$(psql_cmd')
+
+
+# --- naming the server that answered, not the one we asked for (#75) ---------------
+#
+# The premise was REPRODUCED before these were written, against two live PostgreSQL
+# servers: `PGHOSTADDR=<B> psql -h <A>` connected to B -- B's inet_server_addr(), B's
+# tables, A's tables absent -- while every message this script prints said A. libpq uses
+# `hostaddr` for the connection and `host` only for authentication and TLS, and -h sets
+# `host`. No flag was wrong in that run, which is why flag validation cannot close it.
+
+
+def test_the_banner_names_the_server_that_answered(bash, tmp_path):
+    _guarded_psql(tmp_path)
+    r = run(bash, tmp_path, "--force")
+    assert "requested: haf:5432/haf_block_log" in r.stdout, r.stdout
+    assert "reached  : 10.1.1.7:5432/somedb as someone" in r.stdout, r.stdout
+
+
+def test_force_still_leaves_a_record_of_what_it_destroyed_and_where(bash, tmp_path):
+    """--force skips the PROMPT, not the account. docker-compose.yml ships --force, so
+    the unattended path was the one running with no record at all."""
+    _guarded_psql(tmp_path)
+    r = run(bash, tmp_path, "--force")
+    for expected in ("About to PERMANENTLY remove haf_stats:",
+                     "requested:", "reached  :",
+                     "context  : haf_stats",
+                     "schemas  : haf_stats_app haf_stats_backend haf_stats_endpoints",
+                     "roles    : haf_stats_user haf_stats_owner"):
+        assert expected in r.stdout, (expected, r.stdout)
+
+
+def test_pghostaddr_is_called_out_by_name(bash, tmp_path):
+    """The one vector that needs explaining: nothing in the repo mentions PGHOSTADDR, and
+    an operator reading `requested: haf:5432` has no reason to suspect it."""
+    _guarded_psql(tmp_path, server="10.9.9.9:5432/somedb as someone")
+    r = run(bash, tmp_path, "--force", env_extra={"PGHOSTADDR": "10.9.9.9"})
+    assert "reached  : 10.9.9.9:5432/somedb as someone" in r.stdout, r.stdout
+    assert "PGHOSTADDR=10.9.9.9 is set" in r.stdout, r.stdout
+
+
+def test_a_local_socket_is_reported_as_such(bash, tmp_path):
+    """inet_server_addr() is NULL over a Unix socket, which is exactly the case
+    --host=/var/run/postgresql lands on -- a legal host value that the flag guard added
+    by !81 cannot distinguish from a network host."""
+    _guarded_psql(tmp_path, server="LOCAL SOCKET:-/somedb as someone")
+    r = run(bash, tmp_path, "--force")
+    assert "reached  : LOCAL SOCKET" in r.stdout, r.stdout
+
+
+def test_a_server_that_cannot_be_asked_says_so_rather_than_guessing(bash, tmp_path):
+    """Silence here would read as agreement with the `requested` line."""
+    _guarded_psql(tmp_path, server="")
+    r = run(bash, tmp_path, "--force")
+    assert "could not ask the server" in r.stdout, r.stdout
