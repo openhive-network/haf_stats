@@ -66,10 +66,18 @@ def clean_env(bindir=None) -> dict:
     # depends on the developer's shell, which is the thing this helper exists to prevent.
     # (An earlier revision of this comment had it backwards, saying such a control would
     # "silently pass".) Tests that want one inject it explicitly through env_extra.
+    #
+    # And the unprefixed rebuild knobs (#98). These carry no prefix, and the scripts read
+    # them straight from the environment (`: "${BATCH_SIZE:=10000}"`). A developer with
+    # one of them exported got eleven unrelated failures in
+    # tests/unit/test_rebuild_guards.py. COMMUNITY_BACKFILL_BATCH (scripts/install_app.sh)
+    # is the same class and is stripped for the same reason.
+    _REBUILD_KNOBS = {"FROM_BLOCK", "TO_BLOCK", "BATCH_SIZE", "COMMUNITY_BACKFILL_BATCH"}
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("HAF_STATS_")
            and not k.startswith("POSTGRES_")
-           and not k.startswith("PG")}
+           and not k.startswith("PG")
+           and k not in _REBUILD_KNOBS}
     if "HAF_STATS_TEST_BASH" in os.environ:
         env["HAF_STATS_TEST_BASH"] = os.environ["HAF_STATS_TEST_BASH"]
     if bindir is not None:
