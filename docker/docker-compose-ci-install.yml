@@ -353,7 +353,7 @@ services:
         condition: service_healthy
 
   # Teardown, which no lane covered at all: NOTHING IN CI HAD EVER RUN uninstall_app.sh
-  # AGAINST A DATABASE. (tests/unit/test_uninstall_app.py has 51 tests, but they stub psql,
+  # AGAINST A DATABASE. (tests/unit/test_uninstall_app.py has ~75 tests, but they stub psql,
   # so none of them reaches a server.) It costs ~2s here, and it
   # is also what makes hive.app_remove_context in the shim live code rather than a
   # function whose only caller is the shim's own self-test.
