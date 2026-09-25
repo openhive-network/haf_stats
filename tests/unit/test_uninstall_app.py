@@ -52,11 +52,19 @@ def bash():
 STUB_SERVER_IDENTITY = "10.1.1.7:5432/somedb as someone [cluster 1234]"
 
 
-def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
+def make_psql(tmp_path, *, sessions: str = "0", listing: str = "",
+              remaining: str = "",
               context_left: str = "", cron_left: str = "", can_remove: str = "t",
               log: str = "sql.log", fail_on: str | None = None,
               server: str = STUB_SERVER_IDENTITY) -> Path:
     """A stub psql that records what it was asked and answers each of the script's reads.
+
+    Rows are answered with `printf "%s\\n"`, because `psql -Atq` terminates EVERY row --
+    including the last. An earlier revision used `printf "%s"`, and `report_active_sessions
+    | while read -r line` drops an unterminated final line, so the session listing was
+    silently empty in every test here: the refusal an operator hits most often ended in a
+    colon promising a list, and deleting the listing was green. A fixture that models
+    something the real tool does not do produces exactly this class of hole.
 
     Dispatch is on the statement text AND on any -f file, because the verification is a
     file now (scripts/uninstall_verify.sql) rather than an inline string. The reads are:
@@ -94,10 +102,10 @@ def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
         # The section-0 identity query, and the confirmation's current_database().
         # Without these the whole suite runs the degraded path, which now exits 2 -- so
         # every test would fail before reaching its own subject.
-        + f'  *inet_server_addr*)     printf "%s" {server!r} ;;\n'
+        + f'  *inet_server_addr*)     printf "%s\\n" {server!r} ;;\n'
         + '  *"SELECT current_database()"*) printf "somedb" ;;\n'
-        + f'  *pg_extension*)         printf "%s" {("t" if cron_left else "f")!r} ;;\n'
-        f'  *cron.job*)             printf "%s" {cron_left!r} ;;\n'
+        + f'  *pg_extension*)         printf "%s\\n" {("t" if cron_left else "f")!r} ;;\n'
+        f'  *cron.job*)             printf "%s\\n" {cron_left!r} ;;\n'
         # The pre-flight probes. All three mention is_superuser, so one arm answers
         # them all; _guarded_psql below separates them where a test needs to.
         # The script REFUSES rather than warns when this is not 't'. Be accurate about
@@ -105,15 +113,22 @@ def make_psql(tmp_path, *, sessions: str = "0", remaining: str = "",
         # context -- SELECT on hafd.contexts is a separate policy, USING (TRUE), and
         # only DELETE is filtered by can_impersonate. The refusal exists because the
         # alternative is a loud failure that arrives AFTER three DROP SCHEMA CASCADEs.
-        f'  *is_superuser*)         printf "%s" {can_remove!r} ;;\n'
-        f'  *pg_stat_activity*)     printf "%s" {sessions!r} ;;\n'
-        f'  *uninstall_verify.sql*) printf "%s" {remaining!r} ;;\n'
+        f'  *is_superuser*)         printf "%s\\n" {can_remove!r} ;;\n'
+        # BEFORE the count arm: both queries read pg_stat_activity, so a single arm
+        # answered both and the listing could only ever echo the count back.
+        # %b, not %s: the listing is multi-row and arrives as a Python repr, so its
+        # newlines are literal backslash-n. printf interprets escapes in the FORMAT,
+        # not in an argument, so %s would emit one line containing a literal "\n" --
+        # the same trap that made an earlier negative control pass for the wrong reason.
+        + f'  *string_agg*)           printf "%b" {listing!r} ;;\n'
+        + f'  *pg_stat_activity*)     printf "%s\\n" {sessions!r} ;;\n'
+        f'  *uninstall_verify.sql*) printf "%s\\n" {remaining!r} ;;\n'
         # Step 6's HAF probe is a pg_class/pg_namespace join (to_regclass raises
         # without USAGE on hafd). Both spellings answer, so a regression to the
         # old form fails the whole-expression test rather than silently passing.
         '  *pg_class*)             printf "t" ;;\n'
         '  *to_regclass*)          printf "t" ;;\n'
-        f'  *"hafd.contexts AS c"*) printf "%s" {context_left!r} ;;\n'
+        f'  *"hafd.contexts AS c"*) printf "%s\\n" {context_left!r} ;;\n'
         + "esac\n"
         "exit 0\n",
     )
@@ -212,7 +227,7 @@ def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts
         # the script loses the round-four token, the arm stops matching, the old arm
         # below answers "t", the teardown proceeds, and the test fails. That
         # fall-through IS the discrimination.
-        f'  *"MEMBER WITH ADMIN OPTION"*) printf "%s" {("t" if createrole == "t" and admin_option == "t" else "f")!r} ;;\n'
+        f'  *"MEMBER WITH ADMIN OPTION"*) printf "%s\\n" {("t" if createrole == "t" and admin_option == "t" else "f")!r} ;;\n'
         f'  *hive_applications_group*)   printf "%s" {("t" if group_member == "t" and can_impersonate == "t" else "f")!r} ;;\n'
         # Guard 1 is a pg_class/pg_namespace join now, NOT to_regclass -- to_regclass
         # raises `permission denied for schema hafd` without USAGE on it, verified on
@@ -236,7 +251,7 @@ def _guarded_psql(tmp_path, *, can_impersonate="t", createrole="t", has_contexts
         # libpq does exactly this: hostaddr wins, and -h applies only to auth and TLS.
         '  *inet_server_addr*) if [ -n "${PGHOSTADDR:-}" ]; then\n'
         '                          printf "%s:5432/somedb as someone [cluster 1234]" "$PGHOSTADDR"\n'
-        f'                      else printf "%s" {server!r}; fi ;;\n'
+        f'                      else printf "%s\\n" {server!r}; fi ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -262,6 +277,12 @@ def test_refuses_when_the_role_cannot_impersonate_the_context_owner(bash, tmp_pa
     assert "Nothing has been changed" in r.stdout
     assert "DROP SCHEMA" not in sql_of(log)
     assert "app_remove_context" not in sql_of(log)
+    # And it names the SERVER (#75), not just the role. Only guard 3's refusal was
+    # covered, so deleting _report_connected_identity from THIS one -- a call site this
+    # MR moved -- passed the whole module. "Re-run as haf_admin" sends the operator to a
+    # machine; under a redirected connection it is the wrong one.
+    assert "connected to 10.1.1.7:5432/somedb as someone" in r.stdout, r.stdout
+    assert "[cluster 7391424]" in r.stdout, r.stdout
 
 
 def test_refuses_a_role_that_cannot_drop_roles(bash, tmp_path):
@@ -378,7 +399,8 @@ def test_refuses_while_a_haf_stats_session_is_connected(bash, tmp_path):
     """The block processor and PostgREST all hold sessions on these schemas, and
     DROP SCHEMA CASCADE needs an AccessExclusiveLock -- so with one live the teardown
     would BLOCK rather than fail, after the context was already gone."""
-    log = make_psql(tmp_path, sessions="3")
+    log = make_psql(tmp_path, sessions="3",
+                    listing="haf_stats_user x2 (haf-stats-api)\nhaf_stats_owner x1\n")
     r = run(bash, tmp_path, "--force")
     assert r.returncode == 1
     assert "still connected" in r.stdout
@@ -389,6 +411,13 @@ def test_refuses_while_a_haf_stats_session_is_connected(bash, tmp_path):
     # stub with sessions="0" and reach the banner anyway.
     assert "reached  :" in r.stdout, r.stdout
     assert r.stdout.index("reached  :") < r.stdout.index("still connected"), r.stdout
+    # The LISTING, not just the count. This refusal ends in a colon promising one, and it
+    # was silently empty in every test: the stub answered without psql's row terminator,
+    # and `... | while read -r line` drops an unterminated final line -- so deleting the
+    # listing outright was green. Telling an operator "3 sessions" without saying WHICH
+    # leaves them the work this line exists to do.
+    assert "haf_stats_user x2 (haf-stats-api)" in r.stdout, r.stdout
+    assert "haf_stats_owner x1" in r.stdout, r.stdout
     # And the inventory must NOT have printed: nothing was destroyed.
     assert "PERMANENTLY" not in r.stdout, r.stdout
 
@@ -738,6 +767,16 @@ def test_both_roles_get_drop_owned_by_before_drop_role(bash, tmp_path):
     for role in ("haf_stats_user", "haf_stats_owner"):
         assert f"DROP OWNED BY {role} CASCADE;" in block
         assert block.index(f"DROP OWNED BY {role}") < block.index(f"DROP ROLE {role};")
+        # GUARDED by an existence test, and guarded BEFORE the drop. Without it a re-run
+        # raises 42704 on the first missing role, which aborts the whole DO block -- so
+        # the SECOND role is never dropped and every subsequent run reports INCOMPLETE.
+        # The idempotent re-run is what the file header advertises and what step 6 tells
+        # the operator to rely on.
+        guard = f"IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN"
+        assert guard in block, (
+            f"the {role} drop is no longer guarded by an existence test, so a re-run "
+            f"aborts the DO block on 42704: {block}")
+        assert block.index(guard) < block.index(f"DROP OWNED BY {role}")
 
 
 # --- the teardown must not die at the first failing statement -------------------------
@@ -792,8 +831,11 @@ def test_a_failing_destructive_statement_does_not_abort_the_run(bash, tmp_path):
     # It kept going: the SECOND schema and the roles were still attempted.
     assert "DROP SCHEMA IF EXISTS haf_stats_endpoints CASCADE;" in sql
     assert "DROP ROLE haf_stats_owner;" in sql
-    # And it said so rather than exiting silently.
-    assert "statement failed" in r.stdout or "errored during teardown" in r.stdout
+    # And it said so rather than exiting silently. BOTH, not either: the first always
+    # holds, so `or` meant the summary NOTE was never tested -- a teardown that errored on
+    # several statements could exit reporting nothing at all.
+    assert "statement failed" in r.stdout, r.stdout
+    assert "errored during teardown" in r.stdout, r.stdout
 
 
 def test_a_failing_verification_probe_does_not_report_success(bash, tmp_path):
@@ -1140,8 +1182,16 @@ def test_the_confirmation_probe_tests_its_own_status():
     stanza = live[live.rindex("\n", 0, start):start + 400]
     assert 'if ! _target_db="$(psql_cmd' in stanza, (
         "the confirmation probe no longer tests whether psql succeeded:\n" + stanza)
-    assert "-X" in stanza.split("psql_cmd", 1)[1].split("-c", 1)[0], (
-        "the confirmation probe no longer passes -X, so ~/.psqlrc can speak into it")
+    # NO CONNECTION FLAGS of its own. psql takes the last -h/-p/-d, so
+    # `psql_cmd -Atq -h 127.0.0.1 -c "SELECT current_database()"` asks a DIFFERENT server
+    # which database this is, and the typed-name gate -- this MR's headline improvement --
+    # then compares the operator's answer against a database on another host. The
+    # interactive branch has no behavioural test, so nothing else can see it.
+    flags = stanza.split("psql_cmd", 1)[1].split("-c", 1)[0]
+    for flag in ("-h", "-p", "-U", "-d", "-X"):
+        assert flag not in flags.split(), (
+            "the confirmation probe overrides its own connection or repeats psql_cmd's "
+            "flags; it must inherit them: " + stanza)
 
 
 def test_the_confirmation_compares_against_the_servers_answer():
@@ -1217,8 +1267,22 @@ def test_force_still_leaves_a_record_of_what_it_destroyed_and_where(bash, tmp_pa
     the unattended path was the one running with no record at all."""
     _guarded_psql(tmp_path)
     r = run(bash, tmp_path, "--force")
+    # The `server   :` line specifically, and that it carries what the SERVER said.
+    # `requested:`/`reached  :` come from section 0, which prints on every path including
+    # pure refusals -- so listing only those satisfied the "and where" half of this
+    # test's own name with output the banner does not produce, and the banner's line
+    # could be re-pointed at ${POSTGRES_HOST} or deleted outright with nothing red.
+    reached = [l.split("reached  : ", 1)[1] for l in r.stdout.splitlines()
+               if "reached  : " in l]
+    server = [l.split("server   : ", 1)[1] for l in r.stdout.splitlines()
+              if "server   : " in l]
+    assert len(reached) == 1 and len(server) == 1, (reached, server)
+    assert server[0] == reached[0], (
+        "the line printed immediately before DROP SCHEMA names something other than the "
+        "server that answered: %r vs %r" % (server[0], reached[0]))
+
     for expected in ("About to PERMANENTLY remove haf_stats:",
-                     "requested:", "reached  :",
+                     "requested:", "reached  :", "server   :",
                      "context  : haf_stats",
                      "schemas  : haf_stats_app haf_stats_backend haf_stats_endpoints",
                      "roles    : haf_stats_user haf_stats_owner"):
@@ -1239,6 +1303,37 @@ def test_pghostaddr_is_called_out_by_name(bash, tmp_path):
     # somewhere else in the output cannot satisfy it.
     assert "NOTE     : PGHOSTADDR=10.9.9.9" in r.stdout, r.stdout
     assert "Any of PGHOSTADDR, PGSERVICE or PGSERVICEFILE" in r.stdout, r.stdout
+
+
+def test_every_psql_invocation_runs_on_the_connection_being_torn_down(bash, tmp_path):
+    """Not just the identity query -- EVERY call, including the ones that destroy.
+
+    The test below explains why a bare `psql` inside _server_identity matters: it drops
+    -h/-p/-U/-d, so the banner describes the LOCAL server while the teardown destroys the
+    remote one. Mutation testing found that exact escape unguarded one function over, on
+    `_psql_destructive` itself, and on the session guard and the verification file --
+    #75's own failure mode, on the statements that actually drop schemas, reachable on
+    the `--force` path production uses.
+
+    Counting rather than membership, because psql takes the LAST -h/-p/-d: a second one
+    retargets the call while every flag a membership test looks for is still present.
+    """
+    make_psql(tmp_path)
+    run(bash, tmp_path, "--force", "--host=elsewhere", "--port=6543", "--user=someadmin")
+    lines = [l for l in (tmp_path / "argv.log").read_text(encoding="utf-8").splitlines()
+             if l.strip()]
+    assert len(lines) > 5, lines
+    for line in lines:
+        argv = line.split(" -c ", 1)[0].split(" -f ", 1)[0].split()
+        for flag, value in (("-h", "elsewhere"), ("-p", "6543"), ("-U", "someadmin"),
+                            ("-d", "haf_block_log")):
+            assert argv.count(flag) == 1, (
+                "%s appears %d times, so a later one wins and this call runs somewhere "
+                "other than the target being destroyed: %s" % (flag, argv.count(flag), line))
+            assert argv[argv.index(flag) + 1] == value, (flag, value, line)
+        # psql_cmd carries -X for every caller: these scripts parse psql's stdout, and an
+        # interactive ~/.psqlrc writes to it.
+        assert "-X" in argv, ("this call can be polluted by ~/.psqlrc: " + line)
 
 
 def test_the_identity_query_runs_on_the_connection_being_torn_down(bash, tmp_path):
@@ -1397,6 +1492,41 @@ def test_a_failed_query_that_still_printed_something_is_not_an_identity(bash, tm
     assert "COULD NOT ASK THE SERVER" in r.stdout, r.stdout
     assert r.returncode == 1, r.returncode
     assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log")
+
+
+# pg_namespace / pg_extension, NOT to_regclass / cron.job: the DECISION probes use the
+# catalog joins (to_regclass RAISES rather than returning NULL without USAGE on the
+# schema, which is why they were rewritten). to_regclass and cron.job survive only inside
+# the destructive DO blocks, where an error is tolerated by design -- so failing on those
+# token names would test the error tolerance, not the guards.
+@pytest.mark.parametrize("probe", [
+    "is_superuser",      # pre-flight: can this role impersonate at all
+    "pg_stat_activity",  # guard 1: is anything still connected
+    "can_impersonate",   # guard 2: may it remove the context
+    "rolcreaterole",     # guard 3: may it drop the roles
+    "pg_namespace",      # is this a HAF database
+])
+def test_a_gate_that_cannot_answer_drops_nothing(bash, tmp_path, probe):
+    """Five probes decide whether the teardown may START, and only two of their failure
+    paths were exercised -- so the others could be turned fail-OPEN with the module green.
+    A catalog error becoming "not a HAF database" skips the context-owner guard entirely.
+    Whatever the refusal says, nothing may be dropped."""
+    _guarded_psql(tmp_path, fail_on=probe)
+    r = run(bash, tmp_path, "--force")
+    assert r.returncode != 0, r.stdout
+    assert "DROP SCHEMA" not in sql_of(tmp_path / "sql.log"), r.stdout
+    assert "DROP ROLE" not in sql_of(tmp_path / "sql.log"), r.stdout
+
+
+def test_a_verification_probe_that_cannot_answer_does_not_claim_success(bash, tmp_path):
+    """The cron-survivor probe runs at step 6, AFTER the teardown -- it decides whether
+    the run may claim success, not whether it may start, so "drops nothing" is the wrong
+    property for it. The right one: a run whose verification could not answer must not
+    report `haf_stats removed`, because an operator reading that stops looking."""
+    _guarded_psql(tmp_path, fail_on="pg_extension")
+    r = run(bash, tmp_path, "--force")
+    assert r.returncode != 0, r.stdout
+    assert "haf_stats removed" not in r.stdout, r.stdout
 
 
 def test_a_well_formed_answer_from_a_FAILED_query_is_not_an_identity(bash, tmp_path):

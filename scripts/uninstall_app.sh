@@ -189,10 +189,9 @@ _server_identity() {
     # writes to stdout if anything already has, and a ~/.psqlrc `\echo` or `\timing` does
     # exactly that at connection time. Nothing in this repo passes --no-psqlrc. The
     # refusal then never fired and the `reached:` line printed that noise as an identity.
-    # -X: do not read ~/.psqlrc. An `\\echo` there writes at CONNECTION time and a
-    # `\\timing` after every command, both to stdout, so an operator's own dotfile could
-    # put arbitrary text into the line this script uses to name what it is destroying.
-    psql_cmd -X -Atq -c "
+    # psql_cmd passes -X, so ~/.psqlrc cannot write into this answer. The checks in
+    # _resolve_target stay anyway: -X is the fix, they are the proof it worked.
+    psql_cmd -Atq -c "
         SELECT coalesce(host(inet_server_addr()), 'LOCAL SOCKET')
             || ':' || coalesce(inet_server_port()::text, '-')
             || '/' || current_database()
@@ -621,11 +620,11 @@ if [ "$FORCE" -ne 1 ]; then
     #
     # haf_fyp's uninstall_app.sh has NOT taken this step: its !56 did, and was closed, so
     # its develop still compares against ${POSTGRES_DB}. Filed there as haf_fyp#69.
-    # -X and the status, for the reasons at _server_identity. `|| true` here discarded
+    # The status, for the reasons at _server_identity. `|| true` here discarded
     # psql's exit code, so a failed query reached the operator as "Aborted -- nothing was
     # changed" (their typed name not matching noise) rather than as "could not ask the
     # server", which is a different fault and sends them somewhere else.
-    if ! _target_db="$(psql_cmd -X -Atq -c "SELECT current_database()")"; then
+    if ! _target_db="$(psql_cmd -Atq -c "SELECT current_database()")"; then
         _target_db=""
     fi
     case "${_target_db}" in

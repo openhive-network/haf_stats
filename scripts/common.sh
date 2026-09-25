@@ -43,7 +43,15 @@ wait_for_postgres() {
 }
 
 psql_cmd() {
+    # -X: never read ~/.psqlrc. These scripts parse psql's stdout, and an interactive
+    # dotfile writes to it -- `\echo` at connection time, `\timing` after every command.
+    # haf_stats#75 put -X on two call sites and claimed it removed the class at source;
+    # it did not, because this function is the source. With a `\timing` in ~/.psqlrc the
+    # session count read as "Timing is on.\n0" and the teardown died on a message naming
+    # neither psqlrc nor the fix. A scripted psql has no business reading an interactive
+    # dotfile, so it belongs here rather than on whichever call site was noticed last.
     psql \
+        -X \
         -h "${POSTGRES_HOST}" \
         -p "${POSTGRES_PORT}" \
         -U "${POSTGRES_USER}" \
