@@ -66,14 +66,14 @@ $$;
 
 -- Direct schema access for the API role, which cannot rely on group-inherited
 -- privileges. Do NOT restate this node's role flags as a property of haf_stats: the
--- CREATE ROLE above is guarded by IF NOT EXISTS and has no repair branch, while HAF's
--- own scripts/create_haf_app_role.sh creates app roles as
--- "LOGIN INHERIT IN ROLE <base-group>" - so whoever provisions the role first decides
--- its flags and memberships, and this file never changes them. haf_stats_user is
--- NOINHERIT and group-less where this file created it, and INHERIT and a member of
--- hive_applications_owner_group where HAF did. These direct grants hold either way,
--- which is the point of stating them explicitly. Granted to the owner too for
--- explicitness.
+-- CREATE ROLE above is guarded by IF NOT EXISTS and has no repair branch, so whoever
+-- created the role first decided its flags. Where this file created it, haf_stats_user
+-- is NOINHERIT. testapi's was created INHERIT, and IN hive_applications_group, by an
+-- unmerged revision of this file (9a77508); the block after these grants takes it out of
+-- that group again (#88), and leaves the flag as found. These direct grants hold either
+-- way, which is the point of stating them explicitly; granted to the owner too. (HAF's
+-- own create_haf_app_role.sh does not grant that edge: its default group is
+-- hive_applications_owner_group, the OWNER's. An earlier revision said otherwise.)
 GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
 GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
 GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
@@ -85,15 +85,70 @@ GRANT USAGE ON SCHEMA hive TO haf_stats_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_user;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO haf_stats_user;
 
+-- Take the API role OUT of the HAF application groups. (#88)
+--
+-- haf_stats_user is the role PostgREST connects as for unauthenticated requests, and
+-- hive_applications_group carries TRUNCATE on hafd.contexts -- which row-level security
+-- does not cover -- plus CREATE on schema hafd. Nothing haf_stats serves needs it: every
+-- read the API role makes is granted directly above, and GET /sync-status goes through the
+-- SECURITY DEFINER haf_stats_app.sync_status().
+--
+-- This file has never granted that membership -- except once. 9a77508 (2026-05-30, on the
+-- unmerged ci/endpoint-tests branch) created the role "LOGIN INHERIT IN ROLE
+-- hive_applications_group", and because the CREATE is IF NOT EXISTS with no repair branch,
+-- a node that ran it kept the edge. testapi's role matches it exactly -- INHERIT, with that
+-- direct edge -- and nothing else creates the role that way (develop's CREATE is NOINHERIT,
+-- HAF's create_haf_app_role.sh defaults to the owner group), so that is almost certainly
+-- where testapi's edge came from; the grantor alone cannot tell. Other apps put their own API roles in this
+-- group on purpose (balance_tracker's btracker_user, for one); the TABLE grant that makes
+-- the group dangerous is HAF's, and closing it there is hive/haf#348.
+--
+-- Removes a DIRECT edge to either group, whoever granted it. GRANTED BY the recorded
+-- grantor because on PostgreSQL 16+ a REVOKE removes only the grant made by the named
+-- grantor, and refuses (with a warning) one that does not match; PostgreSQL 14/15 parse
+-- the clause, ignore it, and remove the edge regardless. CI runs 14, so the 16+ grantor
+-- path is exercised on nodes (testapi runs 17), not in the install lane. Idempotent: with
+-- no edge the loop does nothing. Never fatal: a REVOKE this login may not make becomes a
+-- WARNING, and the probe below still reports whatever is left.
+--
+-- testapi's haf_stats health check had to stop connecting as haf_stats_user first:
+-- hive.get_app_current_block_age() is SECURITY INVOKER, and outside the group RLS hides the
+-- context row -- measured, the check's own query then returned 1790500864 s. It connects as
+-- haf_stats_owner now, which is what haf_fyp's check already did after haf_fyp!41.
+DO $$
+DECLARE
+    _edge record;
+BEGIN
+    IF to_regrole('hive_applications_group') IS NULL THEN
+        RETURN;
+    END IF;
+    FOR _edge IN
+        SELECT g.rolname AS grp, gr.rolname AS grantor
+        FROM pg_auth_members AS a
+        INNER JOIN pg_roles AS g ON a.roleid = g.oid
+        INNER JOIN pg_roles AS gr ON a.grantor = gr.oid
+        WHERE a.member = 'haf_stats_user'::regrole
+          AND g.rolname IN ('hive_applications_group', 'hive_applications_owner_group')
+    LOOP
+        BEGIN
+            EXECUTE format('REVOKE %I FROM haf_stats_user GRANTED BY %I', _edge.grp, _edge.grantor);
+            RAISE NOTICE 'haf_stats_user removed from % (granted by %): the PostgREST anon role does not need it', _edge.grp, _edge.grantor;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'could not remove haf_stats_user from % (granted by %): %', _edge.grp, _edge.grantor, SQLERRM;
+        END;
+    END LOOP;
+END
+$$;
+
 -- Install-time assertions for GET /sync-status (#55).
 --
 -- The asymmetry is deliberate. The owner side is a hard failure: without that
 -- membership, RLS on hafd.contexts hides every row from haf_stats_app.sync_status()
 -- with no error at all, so /sync-status answers 503 on a healthy node and the block
--- processor cannot advance the context. The user side is a warning: a hard failure
--- there would break installs on any node HAF provisioned (see the comment above), and
--- the SECURITY DEFINER is correct either way - group membership on the anon role is a
--- security-posture problem, not a correctness one.
+-- processor cannot advance the context. The user side is a warning: the block above has
+-- just removed any direct membership, so reaching it means a REVOKE was refused or the
+-- privilege arrives some other way -- and the SECURITY DEFINER is correct either way, so
+-- this is a security-posture problem, not a correctness one, and must not stop an install.
 DO $$
 BEGIN
     -- to_regrole() first: pg_has_role() RAISES 42704 on an unknown role, which would abort
@@ -104,27 +159,29 @@ BEGIN
         RAISE EXCEPTION 'haf_stats_owner does not INHERIT hive_applications_group. Row-level security on hafd.contexts will silently hide every row from haf_stats_app.sync_status() (GET /sync-status answers 503 on a healthy node), and the block processor cannot UPDATE the context. Check pg_auth_members.inherit_option for haf_stats_owner -> hive_applications_owner_group.';
     END IF;
 
-    -- MEMBER, not USAGE. Both are transitive, so either catches the
-    -- hive_applications_owner_group path HAF's create_haf_app_role.sh grants by default -
-    -- but USAGE asks "do the privileges arrive by inheritance", and for a NOINHERIT role
-    -- the answer is no even when it IS a member. Measured here after granting the group
-    -- directly to haf_stats_user: USAGE false, has_table_privilege(...,'TRUNCATE') false,
-    -- MEMBER true. The role can still SET ROLE into the group and take every privilege,
+    -- MEMBER, not USAGE. Both are transitive, but USAGE asks "do the privileges arrive by
+    -- inheritance", and for a NOINHERIT role -- which is what this file creates -- the
+    -- answer is no even when it IS a member. Measured with a NOINHERIT haf_stats_user after
+    -- granting it the group directly: USAGE false, has_table_privilege(...,'TRUNCATE')
+    -- false, MEMBER true. The role can still SET ROLE into the group and take every privilege,
     -- so the USAGE form reported "contained" for exactly the leak it exists to find.
     -- (Same trap found independently in haf_fyp!42, measured on PG14.) has_table_privilege
     -- is kept as a second, independent probe: it catches a direct grant on the table that
     -- bypasses the group entirely, which no membership check would see.
-    -- A bare "REVOKE hive_applications_group FROM haf_stats_user" is a measured no-op on a
-    -- HAF-provisioned node - it warns, changes nothing - because the real edge is the
-    -- owner_group one. So report the leak rather than silently mutating a membership the
-    -- node's own provisioning granted.
+    --
+    -- This fires only if the block above could not do its job: a REVOKE was refused (it
+    -- warned), or the privilege arrives some other way -- a direct grant on the table, or a
+    -- group other than the two it removes. (#88) An earlier revision of this comment called
+    -- REVOKE hive_applications_group "a measured no-op ... because the real edge is the
+    -- owner_group one", and told operators to revoke hive_applications_owner_group instead.
+    -- On testapi it was the other way round, and the edge came from this repo, not from HAF.
     -- Same guard on both probes: has_table_privilege() RAISES on an absent relation, which
     -- would turn this deliberately-a-warning branch into a hard install failure.
     IF to_regrole('hive_applications_group') IS NOT NULL
        AND (pg_has_role('haf_stats_user', 'hive_applications_group', 'MEMBER')
             OR (to_regclass('hafd.contexts') IS NOT NULL
                 AND has_table_privilege('haf_stats_user', 'hafd.contexts', 'TRUNCATE'))) THEN
-        RAISE WARNING 'haf_stats_user (the PostgREST anon role) can reach hive_applications_group, which grants TRUNCATE/INSERT/UPDATE on hafd.contexts and CREATE on schema hafd - enough to wipe every co-located HAF app''s context registration, from a role reachable without a credential under HAF''s default trust pg_hba. haf_stats does not need it: GET /sync-status goes through the SECURITY DEFINER haf_stats_app.sync_status(). To close it, revoke the edge that pg_auth_members actually shows, e.g. REVOKE hive_applications_owner_group FROM haf_stats_user.';
+        RAISE WARNING 'haf_stats_user (the PostgREST anon role) can still reach hive_applications_group, or TRUNCATE hafd.contexts directly, after the installer removed its direct memberships of the HAF application groups. Row-level security does not cover TRUNCATE, so that is enough to wipe every co-located HAF app''s context registration. Check pg_auth_members for a remaining path to the group, and has_table_privilege for a direct grant on the table: haf_stats needs neither, because GET /sync-status goes through the SECURITY DEFINER haf_stats_app.sync_status(). The group''s TRUNCATE grant itself is HAF''s: hive/haf#348.';
     END IF;
 END
 $$;

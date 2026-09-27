@@ -575,7 +575,8 @@ nothing about whether `haf_stats_app.main()` was still running — and which con
 `haf_stats_user`, a role that cannot see `hafd.contexts` rows. The mechanism is RLS on a
 role outside `hive_applications_group`, not the `NOINHERIT` flag: `db/builtin_roles.sql`
 grants `SELECT` on `hafd` directly, and sets `NOINHERIT` only where it creates the role
-itself — on a HAF-provisioned node the role is `INHERIT` and in the group.
+itself. The installer keeps the role out of the group, removing a membership an earlier
+install left behind ([#88](https://gitlab.syncad.com/hive/haf_stats/-/issues/88)).
 
 The signal is `hafd.contexts.last_active_at`, HAF's own column, written once per
 `hive.app_next_iteration`. Healthy when it is fresher than
@@ -856,9 +857,21 @@ warning the function itself emits names that procedure). `tests/parity/context_v
 `/sync-status` reads through the SECURITY DEFINER `haf_stats_app.sync_status()`
 (`db/sync_status.sql`), because `hafd.contexts` is protected by row-level security that
 admits only `hive_applications_group` — a group carrying `TRUNCATE` on that table, which
-the unauthenticated PostgREST role must not hold. It answers **503** rather than 200 when
-the HAF instance is in massive sync or the context is not visible; a 200 there would hide a
-privilege misconfiguration behind a healthy-looking body.
+the unauthenticated PostgREST role must not hold. `/sync-status` answers **503** rather than
+200 when the HAF instance is in massive sync or the context is not visible; a 200 there
+would hide a privilege misconfiguration behind a healthy-looking body.
+
+The installer keeps the PostgREST role out of that group: it removes any direct membership
+`haf_stats_user` has in `hive_applications_group` or `hive_applications_owner_group`, and
+logs `haf_stats_user removed from …` when it does
+([#88](https://gitlab.syncad.com/hive/haf_stats/-/issues/88)). On upgrade that affects any
+health check that connects as `haf_stats_user` and reads `hafd.contexts` through a
+`SECURITY INVOKER` function such as `hive.get_app_current_block_age()`: outside the group
+it sees no context row, and the app looks decades behind. Point such a check at
+`haf_stats_owner` — which also needs a `pg_hba` rule trusting `haf_stats_owner` from the
+check's container. haf_api_node's own haf_stats check calls `/sync-status` over HTTP and is
+unaffected. The group's `TRUNCATE` grant itself is HAF's —
+[hive/haf#348](https://gitlab.syncad.com/hive/haf/-/work_items/348).
 
 ## Community Attribution
 

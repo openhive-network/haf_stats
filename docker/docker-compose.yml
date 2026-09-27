@@ -86,12 +86,12 @@ services:
     #
     # What it replaces: `psql -U haf_stats_user ... -c 'SELECT 1'`, which proved
     # PostgreSQL answers and said nothing about whether haf_stats_app.main() was still
-    # advancing. It also connected as haf_stats_user, which db/builtin_roles.sql creates
-    # NOINHERIT *where it creates the role at all* -- on a HAF-provisioned node the role
-    # is INHERIT and in hive_applications_owner_group. What actually hides hafd.contexts
-    # from it is RLS, not inheritance: builtin_roles.sql grants SELECT on hafd directly.
-    # (An earlier revision of this comment gave the mechanism as NOINHERIT.) So
-    # cannot read hafd.contexts at all -- harmless for SELECT 1, fatal for any real check.
+    # advancing. It also connected as haf_stats_user, which cannot read hafd.contexts at
+    # all: row-level security admits only hive_applications_group, and
+    # db/builtin_roles.sql keeps the API role out of it (#88). The NOINHERIT flag is not the
+    # mechanism -- builtin_roles.sql grants SELECT on hafd directly, and sets that flag only
+    # where it creates the role. (An earlier revision gave the mechanism as NOINHERIT.)
+    # Harmless for SELECT 1, fatal for any real check.
     #
     # start_period covers a first run against a fresh HAF, which replays in MASSIVE
     # iterations; the heartbeat does not move until an iteration finishes, so a long batch
