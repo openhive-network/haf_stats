@@ -15,14 +15,17 @@
 -- `host haf_block_log all 0.0.0.0/0 trust`) and only appends the image's narrower default
 -- as a fallback - so the trust rule is the deployment's choice, not a HAF image default.
 -- haf_stats_user is the unauthenticated role PostgREST connects as, so it stays out of
--- that group (db/builtin_roles.sql).
+-- that group: db/builtin_roles.sql never grants it, and removes it where an earlier
+-- install left it -- an unmerged revision (9a77508) created the role IN that group, and
+-- testapi keeps the edge until an installer carrying #88 runs there. The table grant that makes the group dangerous is
+-- HAF's, and closing it there is hive/haf#348.
 --
--- Membership is checked there with pg_has_role(..., 'MEMBER'), not 'USAGE': haf_stats_user
--- is NOINHERIT, and a NOINHERIT member reports USAGE false while still being able to
--- SET ROLE into the group and take every privilege above.
+-- Membership is checked there with pg_has_role(..., 'MEMBER'), not 'USAGE': where this
+-- installer created haf_stats_user it is NOINHERIT, and a NOINHERIT member reports USAGE
+-- false while still being able to SET ROLE into the group and take every privilege above.
 --
 -- The failure mode this protects against is silent: a non-member does not get an error
--- from hafd.contexts, it gets ZERO ROWS. Confirmed as haf_stats_user on a live node -
+-- from hafd.contexts, it gets ZERO ROWS. Confirmed as haf_stats_user outside the group -
 -- SELECT count(*) FROM hafd.contexts returns 0, and hive.app_get_current_block_num()
 -- (SECURITY INVOKER) fails with "Contexts {haf_stats} are not synchronized".
 --

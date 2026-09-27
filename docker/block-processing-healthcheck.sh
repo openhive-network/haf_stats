@@ -74,11 +74,11 @@ trap 'trap - 2 15 && kill -- -$$' 2 15
 #
 # haf_stats_owner works because db/builtin_roles.sql puts it in
 # hive_applications_owner_group -> hive_applications_group, which holds both the
-# hafd.contexts RLS SELECT policy and EXECUTE on hive.*. haf_stats_user does NOT inherit
-# it. Note the mechanism: db/builtin_roles.sql grants SELECT on hafd DIRECTLY, so what
-# hides the rows is RLS on a role outside hive_applications_group, not the NOINHERIT flag
-# -- and that flag is only set where builtin_roles.sql creates the role, not on a
-# HAF-provisioned node. A deployment that points this at haf_stats_user
+# hafd.contexts RLS SELECT policy and EXECUTE on hive.*. haf_stats_user is kept out of
+# that group (builtin_roles.sql removes it where an earlier install left it, #88). Note
+# the mechanism: db/builtin_roles.sql grants SELECT on hafd DIRECTLY, so what hides the
+# rows is RLS on a role outside hive_applications_group, not the NOINHERIT flag -- which
+# is only set where builtin_roles.sql creates the role. A deployment that points this at haf_stats_user
 # gets an empty result and a permanently unhealthy container with no error. The compose
 # healthcheck this replaces did exactly that (`psql -U haf_stats_user -c 'SELECT 1'`),
 # so it is a live foot-gun rather than a hypothetical one.

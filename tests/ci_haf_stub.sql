@@ -235,9 +235,9 @@ ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
 -- policy is FOR SELECT -- so the install failed with `permission denied for table
 -- contexts` until this existed.
 --
--- Modelled on the real node rather than waved through. db/builtin_roles.sql's own warning
--- states the production topology: hive_applications_group "grants TRUNCATE/INSERT/UPDATE
--- on hafd.contexts and CREATE on schema hafd". The grants, the column revokes, the policy
+-- Modelled on the real node rather than waved through. The production topology:
+-- hive_applications_group holds ALL on hafd.contexts (TRUNCATE, INSERT, UPDATE...) and
+-- CREATE on schema hafd. The grants, the column revokes, the policy
 -- names and the policy bodies below are transcribed from the source of truth --
 -- hive/haf src/hive_fork_manager/authorization.sql -- not inferred from call sites.
 --
@@ -613,22 +613,28 @@ $$;
 -- and nothing on a node either, where HAF issues the same group grant. :81 is
 -- belt-and-braces, and no assertion can defend a grant that nothing needs.
 --
--- AND THE ROLE TOPOLOGY HERE IS NOT THE NODE'S. Measured on testapi:
+-- AND THE ROLE TOPOLOGY HERE IS NOT THE NODE'S. Measured on testapi, before an installer
+-- carrying #88 has run there:
 --   haf_stats_user  rolinherit = t, LOGIN, and a DIRECT member of hive_applications_group
+-- That installer removes the group edge, after which only the INHERIT flag still differs.
 -- db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group, so this
--- lane models a FRESH install while the node carries a role HAF's own
--- create_haf_app_role.sh provisioned first -- builtin_roles' CREATE arm never ran there.
--- Consequence for :86: load-bearing in the state this lane models, redundant on that node,
--- where the group supplies EXECUTE anyway.
+-- lane models a FRESH install, while the node carries a role an UNMERGED revision of that
+-- file created (9a77508: "LOGIN INHERIT IN ROLE hive_applications_group"). An earlier
+-- revision of this comment blamed HAF's create_haf_app_role.sh; its default group is the
+-- owner one.
+-- Consequence for :86: load-bearing in the state this lane models -- and on that node too,
+-- once the group edge is gone. It was redundant there only while the group supplied EXECUTE.
 --
--- The same divergence means this lane never reaches db/builtin_roles.sql's LEAK PROBE
--- (its WARNING arm at :123-127). That arm FIRES on testapi today -- measured:
+-- The same divergence meant this lane never reached db/builtin_roles.sql's LEAK PROBE or,
+-- since #88, the revoke before it. tests/ci_break_schema.sql now grants the group to
+-- haf_stats_user before install-again, so the revoke runs on every pipeline and
+-- ci_install_verify.sql asserts it worked. Before #88, on testapi -- measured:
 -- pg_has_role(haf_stats_user, hive_applications_group, MEMBER) = t, and
 -- has_table_privilege(haf_stats_user, hafd.contexts, TRUNCATE/DELETE/INSERT) = t, t, t.
 -- So the anon PostgREST role can write hafd.contexts there, gated for UPDATE/DELETE by
 -- RLS (can_impersonate(haf_stats_user, haf_stats_owner) = f) but NOT for TRUNCATE, which
--- row-level security does not cover. haf_fyp_user was taken out of that group; haf_stats_user
--- was not. Reported by the installer on every run, unremediated, and out of scope here.
+-- row-level security does not cover. haf_fyp_user was taken out of that group in haf_fyp!41;
+-- the installer takes haf_stats_user out too (#88), the next time it runs there.
 --
 -- What the revoke is really for: without it PostgreSQL's default PUBLIC grant lets EVERY
 -- role call EVERY hive.* function, including haf_stats_user, which backs the

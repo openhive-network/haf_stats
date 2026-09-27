@@ -146,7 +146,7 @@ DO $$
 BEGIN
     -- MEMBER, not USAGE: haf_stats_user is NOINHERIT, and USAGE asks whether privileges
     -- arrive by inheritance - which is false for a NOINHERIT member even though it can
-    -- SET ROLE into the group and take them all. Measured on the live node: after
+    -- SET ROLE into the group and take them all. Measured with a NOINHERIT role: after
     -- GRANT hive_applications_group TO haf_stats_user, USAGE is false and
     -- has_table_privilege(...,'TRUNCATE') is false, while MEMBER is true. A USAGE probe
     -- therefore passes on precisely the leak it exists to catch, which is why this

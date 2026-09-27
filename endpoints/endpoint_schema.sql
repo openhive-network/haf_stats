@@ -3194,9 +3194,9 @@ BEGIN
 
     -- haf_stats_app.sync_status() is SECURITY DEFINER (db/sync_status.sql): hafd.contexts
     -- has RLS whose only application SELECT policy is granted TO hive_applications_group,
-    -- and haf_stats_user deliberately stays out of that group because it also carries
-    -- TRUNCATE on hafd.contexts and CREATE on hafd - to a role PostgREST connects as
-    -- unauthenticated, over trust auth. The definer also owns the massive-sync guard and
+    -- and haf_stats_user is kept out of that group (db/builtin_roles.sql removes it where
+    -- an earlier install left it, #88) because it also carries TRUNCATE on hafd.contexts
+    -- and CREATE on hafd - to a role PostgREST connects as unauthenticated. The definer also owns the massive-sync guard and
     -- the context name; this function owns only the wire format.
     SELECT * INTO _s FROM haf_stats_app.sync_status();
 

@@ -18,8 +18,24 @@
 --                       canonical ('incoming') it must keep. Nothing else writes this table in this
 --                       lane, so without them the DELETE would run and prove nothing.
 --
+-- Plus two ROLE edges (#88): haf_stats_user is put into hive_applications_group, which is how
+-- testapi's role looked -- an unmerged revision of db/builtin_roles.sql (9a77508) created it
+-- that way -- and into hive_applications_owner_group, so BOTH arms of the revoke have work.
+-- install-again must remove both, and ci_install_verify.sql asserts it did: its MEMBER check
+-- is transitive, and tests/ci_setup.sql makes owner_group a member of the group, so a revoke
+-- that dropped either arm leaves haf_stats_user a member and fails there. On a fresh install
+-- the revoke finds no edge to remove, because builtin_roles.sql's CREATE ROLE never grants
+-- either group; without these edges the revoke would ship untested.
+--
+-- NOT covered here: the GRANTED BY path. This lane runs PostgreSQL 14, which parses that
+-- clause and ignores it, and both grants below are made by the bootstrap superuser anyway.
+-- The grantor-specific behaviour of PostgreSQL 16+ is exercised only on nodes.
+--
 -- No IF [NOT] EXISTS anywhere: if a column is renamed, this should fail rather than quietly break
 -- less than it claims. The DO block at the end checks the result for the same reason.
+
+GRANT hive_applications_group TO haf_stats_user;
+GRANT hive_applications_owner_group TO haf_stats_user;
 
 ALTER TABLE haf_stats_backend.active_users_daily DROP COLUMN ops;
 ALTER TABLE haf_stats_backend.comment_registry DROP COLUMN community;
@@ -88,6 +104,17 @@ BEGIN
         WHERE account_id = 900901 AND direction IN ('income', 'incoming')
     ) <> 2 THEN
         RAISE EXCEPTION 'break-schema: the two account_financial_daily rows the DELETE is judged by are not there';
+    END IF;
+
+    IF NOT pg_has_role('haf_stats_user', 'hive_applications_group', 'MEMBER') THEN
+        RAISE EXCEPTION 'break-schema: haf_stats_user is not in hive_applications_group, so install-again has no membership to remove';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_auth_members AS a
+        INNER JOIN pg_roles AS g ON a.roleid = g.oid
+        WHERE a.member = 'haf_stats_user'::regrole AND g.rolname = 'hive_applications_owner_group'
+    ) THEN
+        RAISE EXCEPTION 'break-schema: haf_stats_user has no direct hive_applications_owner_group edge, so that arm of the revoke goes untested';
     END IF;
 
     RAISE NOTICE 'break-schema: all 14 guarded upgrades have work to do again (9 columns dropped, rc_estimated back, income/expense CHECK NOT VALID, one income and one incoming row)';

@@ -393,6 +393,26 @@ BEGIN
 END
 $upgraded$;
 
+-- install-again removed the group memberships break-schema gave haf_stats_user. (#88)
+--
+-- One MEMBER check covers both arms: it is transitive, and hive_applications_owner_group is
+-- itself a member of hive_applications_group here, so an edge left to either group fails it.
+--
+-- Both membership AND the privilege: MEMBER catches a NOINHERIT member that could still
+-- SET ROLE into the group; has_table_privilege catches the TRUNCATE itself arriving some
+-- other way. Without the revoke in db/builtin_roles.sql, the first check fails here.
+DO $anon$
+BEGIN
+    IF pg_has_role('haf_stats_user', 'hive_applications_group', 'MEMBER') THEN
+        RAISE EXCEPTION 'install: haf_stats_user is still a member of hive_applications_group - db/builtin_roles.sql did not remove the edge break-schema gave it, so the PostgREST anon role keeps TRUNCATE on hafd.contexts';
+    END IF;
+    IF has_table_privilege('haf_stats_user', 'hafd.contexts', 'TRUNCATE') THEN
+        RAISE EXCEPTION 'install: haf_stats_user can still TRUNCATE hafd.contexts';
+    END IF;
+    RAISE NOTICE 'install verified: the installer removed haf_stats_user from hive_applications_group';
+END
+$anon$;
+
 -- apply_schema_migration hands back the caller's lock_timeout. (#96)
 --
 -- It sets 3 s for each attempt with set_config(..., TRUE), which would otherwise last until the
