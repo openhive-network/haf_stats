@@ -170,8 +170,8 @@ log "Starting block processing loop..."
 # against the file we wrote.
 #
 # HAF_STATS_USE_LEGACY_LOOP=true forces the eternal CALL main() loop. The same fallback
-# is taken automatically when the driver is absent from PATH, or when this HAF has no
-# application registry.
+# is taken automatically when the driver is absent from PATH, when this HAF has no
+# application registry, or when the registered entry procedure no longer exists.
 #
 # THE REGISTRY PROBE IS NOT OPTIONAL. `command -v` alone is not a sufficient guard: the
 # psql base image has shipped the driver since 14-3, so the test would be permanently
@@ -196,7 +196,21 @@ registry_has_haf_stats() {
     # procedure registered)". A row registered without an entry procedure (app_register's
     # third argument defaults to NULL) satisfies a bare EXISTS and then reproduces exactly
     # the crash loop this probe exists to prevent.
-    [ "$(psql_cmd -Atq -c "SELECT EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats' AND process_procedure IS NOT NULL)" 2>/dev/null || true)" = "t" ]
+    #
+    # And the procedure must still EXIST (#97): a row outlives its schema when an
+    # uninstall's context removal fails and DROP SCHEMA runs anyway, and the driver then
+    # calls a procedure that is gone. This is hive.app_register's own resolution check,
+    # to_regprocedure(<proc> || '( hive.blocks_range )'); NULL for a NULL procedure, so it
+    # does not depend on the order the ANDs are evaluated in. Where it RAISES instead of
+    # returning NULL -- on PostgreSQL <= 15 an unresolvable argument type does, and any
+    # version raises for a schema the caller has no USAGE on -- the `|| true` below turns
+    # that into "not ready", the same answer.
+    #
+    # This keeps the DRIVER away from a dropped schema; it does not make such a node
+    # healthy. The legacy CALL below fails against the same missing schema, as it always
+    # has on an uninstalled node. The fix for the stale row is scripts/uninstall_app.sh
+    # step 3a; this is the second line of defence.
+    [ "$(psql_cmd -Atq -c "SELECT EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats' AND process_procedure IS NOT NULL AND to_regprocedure(process_procedure || '( hive.blocks_range )') IS NOT NULL)" 2>/dev/null || true)" = "t" ]
 }
 
 # Accepts the spellings install_app.sh's own flags accept. A bare `!= "true"` test made
@@ -222,8 +236,9 @@ if command -v haf_app_driver.py >/dev/null 2>&1 \
     # swallowed, so "not registered" and "could not reach PostgreSQL" are indistinguishable
     # here, and an earlier wording asserted the former.
     log "WARNING: haf_app_driver.py is on PATH, but the HAF application registry does not"
-    log "         list haf_stats with an entry procedure -- HAF older than haf#341,"
-    log "         registration skipped, or the probe could not query the database;"
+    log "         list haf_stats with an entry procedure that exists -- HAF older than"
+    log "         haf#341, registration skipped, the registered procedure is gone (e.g."
+    log "         after an uninstall), or the probe could not query the database;"
     log "         falling back to the legacy CALL main() loop"
 fi
 
