@@ -670,6 +670,57 @@ BEGIN
     END IF;
 END\$\$;"
 
+# 3a. The HAF application registry row (haf#341), BEFORE the schemas go (#97).
+#     On the happy path step 3 already did this: hive.context_remove calls
+#     hive.app_registry_context_removed, which unregisters an application when it loses
+#     its last context. But step 3 is allowed to fail and be pushed past, and there is no
+#     FK from hafd.applications to hafd.contexts -- so a failed context removal leaves a
+#     row whose process_procedure names haf_stats_app.process_blocks, and step 4 then
+#     drops that schema. scripts/process_blocks.sh reads this row to decide whether to
+#     exec haf_app_driver.py; a stale one starts a driver that calls a procedure that no
+#     longer exists, as PID 1, under a restart policy. Removing the row is what makes
+#     "uninstalled" mean "cannot start the driver".
+#
+#     Guarded the way db/register_app.sql guards registration, so a registry-less HAF
+#     (every 1.28.x) is a no-op. to_regnamespace first, as register_app.sql does: which
+#     inputs make to_regprocedure RAISE rather than return NULL varies by PostgreSQL
+#     version (on <= 15 an unresolvable argument type raises), and asking about the schema
+#     first keeps this block's answer independent of that. SEQUENCED statements, each
+#     returning early, because PostgreSQL does not promise the evaluation order of an
+#     AND. The EXISTS comes only after those RETURNs for the reason step 5 gives: plpgsql
+#     plans statements lazily, so hafd.applications is never resolved on a HAF without it.
+#     The EXISTS is needed at all because hive.app_unregister RAISES 'Application % is
+#     not registered' when there is no row -- the normal case after step 3 succeeded.
+#
+#     Not wrapped in an EXCEPTION block, so a failure is counted like any other step and
+#     step 6 names the surviving row. One failure reads misleadingly: app_unregister is
+#     not SECURITY DEFINER, and hafd.applications' DELETE policy is
+#     hive.can_impersonate(current_user, owner). A caller that cannot impersonate the
+#     row's owner is not refused -- its DELETE is filtered to zero rows, and HAF then
+#     raises "Application haf_stats is not registered" about a row that IS registered.
+#     Step 3's context removal hits the same policy through the same function. The
+#     pre-flight checks the CONTEXT's owner, and register_app.sql registers as that same
+#     role (SET ROLE haf_stats_owner), so this needs a row someone re-registered by hand.
+log "Removing the HAF application registry entry (if any)..."
+_psql_destructive "
+DO \$\$
+BEGIN
+    IF to_regnamespace('hive') IS NULL THEN
+        RAISE NOTICE 'no hive schema - no application registry to clean up';
+        RETURN;
+    END IF;
+    IF to_regprocedure('hive.app_unregister(text)') IS NULL THEN
+        RAISE NOTICE 'HAF has no application registry (pre-haf#341) - nothing to unregister';
+        RETURN;
+    END IF;
+    IF EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats') THEN
+        PERFORM hive.app_unregister('haf_stats');
+        RAISE NOTICE 'unregistered application haf_stats';
+    ELSE
+        RAISE NOTICE 'haf_stats is not in the application registry - nothing to unregister';
+    END IF;
+END\$\$;"
+
 # 3b. pg_cron jobs. These live in cron.job -- the `cron` schema, OUTSIDE the three
 #     schemas step 4 drops -- so dropping the schemas leaves them behind, firing nightly
 #     against haf_stats_app functions that no longer exist and logging an error every
@@ -775,6 +826,23 @@ if [ "${_has_contexts}" = "t" ]; then
         || _probe_failed=1
     if [ -n "${_context_left}" ]; then
         _remaining="${_context_left}${_remaining:+, }${_remaining}"
+    fi
+fi
+
+# A surviving registry row (#97), probed like the context and for the same reasons: the
+# table exists only on a haf#341 HAF, a WHERE cannot protect a FROM, and the catalog join
+# needs no USAGE on hafd. SELECT on hafd.applications is USING (TRUE) for the application
+# group and haf_maintainer, so a row the teardown could not delete is still seen here.
+_has_registry="$(psql_cmd -Atq -c "
+    SELECT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                   WHERE n.nspname = 'hafd' AND c.relname = 'applications')")" || _probe_failed=1
+if [ "${_has_registry}" = "t" ]; then
+    _app_left="$(psql_cmd -Atq -c \
+        "SELECT 'application registry entry ' || a.name FROM hafd.applications AS a WHERE a.name = 'haf_stats'")" \
+        || _probe_failed=1
+    if [ -n "${_app_left}" ]; then
+        _remaining="${_app_left}${_remaining:+, }${_remaining}"
     fi
 fi
 

@@ -55,6 +55,7 @@ STUB_SERVER_IDENTITY = "10.1.1.7:5432/somedb as someone [cluster 1234]"
 def make_psql(tmp_path, *, sessions: str = "0", listing: str = "",
               remaining: str = "",
               context_left: str = "", cron_left: str = "", can_remove: str = "t",
+              app_left: str = "",
               log: str = "sql.log", fail_on: str | None = None,
               server: str = STUB_SERVER_IDENTITY) -> Path:
     """A stub psql that records what it was asked and answers each of the script's reads.
@@ -129,6 +130,9 @@ def make_psql(tmp_path, *, sessions: str = "0", listing: str = "",
         '  *pg_class*)             printf "t" ;;\n'
         '  *to_regclass*)          printf "t" ;;\n'
         f'  *"hafd.contexts AS c"*) printf "%s\\n" {context_left!r} ;;\n'
+        # Step 6's registry-survivor query (#97). Its own arm, and a parameter no default
+        # sets, for the reason test_a_surviving_context_is_reported gives.
+        f'  *"hafd.applications AS a"*) printf "%s\\n" {app_left!r} ;;\n'
         + "esac\n"
         "exit 0\n",
     )
@@ -531,6 +535,139 @@ def test_a_surviving_context_is_reported(bash, tmp_path):
     assert r.returncode == 1
     assert "INCOMPLETE" in r.stdout
     assert "context haf_stats" in r.stdout
+
+
+# --- the application registry row (#97) ---------------------------------------------
+
+def _registry_block(sql: str) -> str:
+    """The step-3a DO block, as sent."""
+    start = sql.index("hive.app_unregister(text)")
+    return sql[sql.rindex("DO $$", 0, start):sql.index("END$$;", start)]
+
+
+def test_unregisters_the_app_before_dropping_the_schemas(bash, tmp_path):
+    """Step 3's context removal normally unregisters the app as a side effect, but step 3
+    may fail and be pushed past, and then the row outlives the schema its
+    process_procedure names. scripts/process_blocks.sh reads that row to decide whether to
+    exec the driver."""
+    log = make_psql(tmp_path)
+    run(bash, tmp_path, "--force")
+    sql = sql_of(log)
+    assert "PERFORM hive.app_unregister('haf_stats');" in sql
+    assert sql.index("hive.app_unregister('haf_stats')") < sql.index("DROP SCHEMA IF EXISTS haf_stats_app")
+
+
+def test_the_unregister_is_guarded_in_sequence(bash, tmp_path):
+    """No-op on a registry-less HAF. to_regnamespace before to_regprocedure, because the
+    latter RAISES on a missing schema on PostgreSQL <= 15; the EXISTS before the call,
+    because hive.app_unregister RAISES when there is no row -- the normal state once step
+    3 has succeeded, so an unguarded call would count an error on every clean uninstall."""
+    log = make_psql(tmp_path)
+    run(bash, tmp_path, "--force")
+    block = _registry_block(sql_of(log))
+    steps = [
+        "to_regnamespace('hive') IS NULL",
+        "to_regprocedure('hive.app_unregister(text)') IS NULL",
+        "EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats')",
+        "PERFORM hive.app_unregister('haf_stats');",
+    ]
+    positions = [block.index(s) for s in steps]
+    assert positions == sorted(positions), block
+    # Separate statements, each returning early -- not one AND chain, whose evaluation
+    # order PostgreSQL does not promise.
+    assert block.count("RETURN;") == 2
+    assert " AND " not in block
+
+
+def test_a_surviving_registry_row_is_reported(bash, tmp_path):
+    make_psql(tmp_path, app_left="application registry entry haf_stats")
+    r = run(bash, tmp_path, "--force")
+    assert r.returncode == 1
+    assert "INCOMPLETE" in r.stdout
+    assert "application registry entry haf_stats" in r.stdout
+
+
+def test_a_failing_registry_probe_does_not_report_a_clean_teardown(bash, tmp_path):
+    make_psql(tmp_path, fail_on="hafd.applications AS a")
+    r = run(bash, tmp_path, "--force")
+    assert r.returncode != 0
+    assert "haf_stats removed" not in r.stdout
+    assert "could not verify" in r.stdout
+
+
+def test_a_failing_registry_table_probe_does_not_report_a_clean_teardown(bash, tmp_path):
+    """The EARLIER of the two registry probes. Its failure yields "" -- not "t" -- so
+    without its own `|| _probe_failed=1` the survivor query is skipped silently and a
+    surviving row goes unreported. Negative control: deleting that capture left every
+    other registry test green."""
+    make_psql(tmp_path, fail_on="c.relname = 'applications'")
+    r = run(bash, tmp_path, "--force")
+    assert r.returncode != 0
+    assert "haf_stats removed" not in r.stdout
+    assert "could not verify" in r.stdout
+
+
+# The step-3a block and both step-6 registry probes, compared WHOLE (whitespace
+# normalised), as this module does for every other probe. The substring tests above cannot
+# tell `IF EXISTS (...)` from `IF TRUE THEN -- EXISTS (...)`, a deleted RETURN, a
+# survivor query that matches any application, or a pg_class probe pointed at the wrong
+# schema -- reviewer mutation testing found this class of change passing them.
+EXPECTED_REGISTRY_BLOCK = " ".join("""
+DO $$
+BEGIN
+    IF to_regnamespace('hive') IS NULL THEN
+        RAISE NOTICE 'no hive schema - no application registry to clean up';
+        RETURN;
+    END IF;
+    IF to_regprocedure('hive.app_unregister(text)') IS NULL THEN
+        RAISE NOTICE 'HAF has no application registry (pre-haf#341) - nothing to unregister';
+        RETURN;
+    END IF;
+    IF EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats') THEN
+        PERFORM hive.app_unregister('haf_stats');
+        RAISE NOTICE 'unregistered application haf_stats';
+    ELSE
+        RAISE NOTICE 'haf_stats is not in the application registry - nothing to unregister';
+    END IF;
+END$$;
+""".split())
+
+EXPECTED_HAS_REGISTRY = (
+    "SELECT EXISTS (SELECT 1 FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'hafd' AND c.relname = 'applications')"
+)
+
+EXPECTED_APP_LEFT = (
+    "SELECT 'application registry entry ' || a.name "
+    "FROM hafd.applications AS a WHERE a.name = 'haf_stats'"
+)
+
+
+def _statements(logfile: Path) -> list[str]:
+    """Every -c statement the stub received, whitespace-normalised, in order."""
+    return [" ".join(c.split()) for c in sql_of(logfile).split("---\n") if c.strip()]
+
+
+def test_the_registry_statements_are_exactly_what_is_expected(bash, tmp_path):
+    log = make_psql(tmp_path)
+    run(bash, tmp_path, "--force")
+    stmts = _statements(log)
+
+    blocks = [s for s in stmts if "app_unregister" in s]
+    assert blocks == ["SET lock_timeout = '30s'; " + EXPECTED_REGISTRY_BLOCK]
+    assert [s for s in stmts if "relname = 'applications'" in s] == [EXPECTED_HAS_REGISTRY]
+    assert [s for s in stmts if "hafd.applications AS a" in s] == [EXPECTED_APP_LEFT]
+
+
+def test_the_registry_survivor_probe_needs_no_usage_on_hafd(bash, tmp_path):
+    """Asked through pg_class, like the context probe: to_regclass('hafd.applications')
+    raises for a caller without USAGE on hafd, and that would read as a failed probe."""
+    log = make_psql(tmp_path)
+    run(bash, tmp_path, "--force")
+    sql = sql_of(log)
+    assert "c.relname = 'applications'" in sql
+    assert "to_regclass('hafd.applications')" not in sql
 
 
 def test_the_lock_timeout_has_a_real_value(bash, tmp_path):

@@ -268,7 +268,13 @@ def test_a_failed_startup_query_leaves_no_truncated_file(bash, tmp_path):
 # driver, and on a registry-less HAF the driver exits before its first range as PID 1.
 
 
-def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_fails=False):
+# hive.app_register's own resolution check, verbatim: the driver calls the entry procedure
+# with a hive.blocks_range, so that is the signature that has to resolve (#97).
+PROCEDURE_RESOLVES = "to_regprocedure(process_procedure || '( hive.blocks_range )') IS NOT NULL"
+
+
+def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_fails=False,
+                            procedure_dropped=False):
     """A stub psql that also answers the two registry-probe queries.
 
     Records $PGAPPNAME per invocation so a test can prove the legacy loop tags its own
@@ -292,7 +298,13 @@ def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_
         'case "$cmd" in\n'
         f'  *"now()"*) printf "%s" {STUB_NOW!r} ;;\n'
         f'  *to_regclass*) {probe_exit}; printf "%s" {("t" if has_table else "f")!r} ;;\n'
-        f'  *"FROM hafd.applications"*) {probe_exit}; printf "%s" {("t" if registered else "f")!r} ;;\n'
+        # procedure_dropped: the row is there but its schema is gone (#97). Only a probe
+        # that ASKS whether the procedure still resolves is told so -- with the
+        # to_regprocedure clause deleted, the probe falls through to the arm below and gets
+        # "t", which is what the real registry says about a stale row.
+        + (f'  *"FROM hafd.applications"*"{PROCEDURE_RESOLVES}"*) printf "f" ;;\n'
+           if procedure_dropped else "")
+        + f'  *"FROM hafd.applications"*) {probe_exit}; printf "%s" {("t" if registered else "f")!r} ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -358,6 +370,41 @@ def test_a_row_without_an_entry_procedure_is_not_enough(bash, tmp_path):
     assert not driver.exists()
     assert "process_procedure IS NOT NULL" in sql.read_text(encoding="utf-8")
     assert "CALL haf_stats_app.main" in sql.read_text(encoding="utf-8")
+
+
+def test_a_row_whose_procedure_was_dropped_is_not_enough(bash, tmp_path):
+    """#97. An uninstall whose context removal failed still drops haf_stats_app, and no FK
+    takes the hafd.applications row with it. The row then says "registered, with an entry
+    procedure" about a procedure that no longer exists, and the driver's first call to it
+    is an uncaught error as PID 1."""
+    sql, _ = make_psql_with_registry(tmp_path, procedure_dropped=True)
+    driver = make_driver(tmp_path)
+    run(bash, tmp_path, startup_file=tmp_path / "startup.txt")
+
+    assert not driver.exists(), "the driver was exec'd for a procedure that does not exist"
+    assert PROCEDURE_RESOLVES in sql.read_text(encoding="utf-8")
+    assert "CALL haf_stats_app.main" in sql.read_text(encoding="utf-8")
+
+
+# The whole registry probe, compared exactly. The fixture dispatches on SUBSTRINGS, so a
+# probe whose resolution clause was negated, OR-ed away or commented out still contains
+# PROCEDURE_RESOLVES and is answered as if it asked the question -- reviewer mutation
+# testing found all three, and a wrong app-name literal, green against the tests above.
+EXPECTED_REGISTRY_PROBE = (
+    "SELECT EXISTS (SELECT 1 FROM hafd.applications WHERE name = 'haf_stats' "
+    "AND process_procedure IS NOT NULL "
+    "AND " + PROCEDURE_RESOLVES + ")"
+)
+
+
+def test_the_registry_probe_is_exactly_the_question_the_driver_needs(bash, tmp_path):
+    sql, _ = make_psql_with_registry(tmp_path)
+    make_driver(tmp_path)
+    run(bash, tmp_path, startup_file=tmp_path / "startup.txt")
+
+    probes = [c.strip() for c in sql.read_text(encoding="utf-8").split("---\n")
+              if "hafd.applications" in c and "to_regclass" not in c]
+    assert probes == [EXPECTED_REGISTRY_PROBE]
 
 
 def test_a_probe_that_errors_falls_back(bash, tmp_path):

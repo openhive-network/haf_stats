@@ -744,8 +744,9 @@ and retry on their own.
 
 ## Uninstalling
 
-**Destructive and irreversible.** Drops the HAF context, all three schemas `CASCADE`
-— including `haf_stats_backend`, which holds the rollups — and both roles.
+**Destructive and irreversible.** Drops the HAF context, the HAF application-registry
+entry (on a HAF that has the registry), all three schemas `CASCADE` — including
+`haf_stats_backend`, which holds the rollups — and both roles.
 
 ```bash
 docker compose -f docker/docker-compose.yml stop haf-stats-process haf-stats-api
