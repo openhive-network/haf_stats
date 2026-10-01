@@ -143,7 +143,7 @@ find_haf_image:
   extends: .find_haf_image
   stage: detect
   variables:
-    UPSTREAM_BRANCH: "1.28.8-rc2"
+    UPSTREAM_BRANCH: "1.28.8-rc3"
     HAF_PATTERNS_REF: "develop"
     # A registry miss must not take the whole pipeline down (haf_stats#51, upstream
     # hive/haf#335). The template's 25-commit develop walk stays the preferred path; the
