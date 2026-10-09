@@ -162,11 +162,6 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.block_range_for_dates(DATE, DATE) TO haf_stats_user;
 
--- Superseded by the count-based truncation detection inside get_account_interactions: the old
--- helper compared block numbers, which cannot distinguish "cap held everything" from "cap
--- boundary landed inside the earliest block". Dropped here so no deployed node keeps it.
-DROP FUNCTION IF EXISTS haf_stats_app.interaction_covered_from(INT, BIGINT, BIGINT, INT[], INT, DATE);
-
 -- ---------------------------------------------------------------------------
 -- custom_json id -> DApp name resolution (single source of truth).
 -- Longest registered app_id_pattern that is a prefix of the id wins; a secondary

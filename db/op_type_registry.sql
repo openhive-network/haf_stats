@@ -41,8 +41,9 @@ SET ROLE haf_stats_owner;
 --   arm 6  code hardcodes an op id the registry does not declare
 --
 -- Arms 3, 5 and 6 are deliberately NOT fatal, and that is a correctness decision rather than a
--- soft one. This app only drops the exact signatures it immediately recreates (34
--- DROP FUNCTION IF EXISTS statements across db/ and endpoints/, each paired with its CREATE) -
+-- soft one. This app only drops exact signatures: the ones it immediately recreates, plus a
+-- few commented tombstones for retired signatures (in db/process_rc.sql,
+-- db/process_content_stats.sql and this file) -
 -- it never sweeps a schema - so a RENAMED or RE-SIGNATURED function's body persists in pg_proc,
 -- and the schemas themselves are CREATE SCHEMA IF NOT EXISTS. If a later release renames a
 -- processor and deletes its now-unused registry row, the ORPHANED body is still there carrying
@@ -55,10 +56,8 @@ SET ROLE haf_stats_owner;
 --
 -- ---------------------------------------------------------------------------
 -- KNOWN LIMITS of the scans. They read INSTALLED FUNCTION BODIES, so they do not see:
---   * a db/*.sql that install_app.sh does not load. The only such file is
---     db/process_network_stats.sql, which calls hive.get_op_type_id() - a function that does not
---     exist on HAF 1.28.x at all, so it would fail loudly with 42883 rather than silently if that
---     file were ever wired in;
+--   * a db/*.sql that install_app.sh does not load. There is none today (the last one,
+--     db/process_network_stats.sql, was deleted in #81);
 --   * op-type literals in non-function objects (view definitions, column defaults, constraints).
 --     Checked: the views in the three app schemas carry none today;
 --   * a name or id assembled at runtime by concatenation or format() rather than written out.
