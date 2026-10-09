@@ -469,7 +469,7 @@ echo
 echo "block_views_for_head_block.sql -- the hive.* views endpoint-tests stubs"
 if fetch "block_views_for_head_block.sql"; then
     need "${C0}VIEW${S}hive\.operations_view${B}" \
-        "Six db/process_*.sql files and endpoints/endpoint_schema.sql select from it; tests/ci_setup.sql transcribes it over hafd.operations, so a renamed view leaves endpoint-tests green."
+        "Five db/process_*.sql files and endpoints/endpoint_schema.sql select from it; tests/ci_setup.sql transcribes it over hafd.operations, so a renamed view leaves endpoint-tests green."
     need "${C0}VIEW${S}hive\.account_operations_view${B}" \
         "endpoints/endpoint_schema.sql and db/process_rc.sql's account_op_seq_range() read it."
     need "${C0}VIEW${S}hive\.accounts_view${B}" \
@@ -488,11 +488,11 @@ if fetch "block_views_for_head_block.sql"; then
     need_col "${C0}VIEW${S}hive\.operations_view${B}" "body_value" \
         "The raw operation body every processor parses: db/process_content_stats.sql, db/process_community_registry.sql, db/process_content_cohorts.sql, db/process_block_range.sql and endpoints/endpoint_schema.sql."
     need_col "${C0}VIEW${S}hive\.operations_view${B}" "block_num" \
-        "Six db/process_*.sql files filter on it. Upstream computes it as hafd.operation_id_to_block_num(t.id) AS block_num -- an explicit alias, so this is the output name."
+        "Five db/process_*.sql files filter on it. Upstream computes it as hafd.operation_id_to_block_num(t.id) AS block_num -- an explicit alias, so this is the output name."
     need_col "${C0}VIEW${S}hive\.operations_view${B}" "op_type_id" \
-        "Six db/process_*.sql files use it; every op-type filter in the repo goes through it."
+        "Five db/process_*.sql files use it; every op-type filter in the repo goes through it."
     need_col "${C0}VIEW${S}hive\.operations_view${B}" "body" \
-        "endpoints/endpoint_schema.sql, db/process_network_stats.sql, db/process_account_cohorts.sql and db/process_block_range.sql. Upstream builds it with jsonb_build_object(...) AS body -- an explicit alias."
+        "endpoints/endpoint_schema.sql, db/process_account_cohorts.sql and db/process_block_range.sql. Upstream builds it with jsonb_build_object(...) AS body -- an explicit alias."
 
     need_col "${C0}VIEW${S}hive\.account_operations_view${B}" "account_id" \
         "endpoints/endpoint_schema.sql, plus the four unaliased probes in db/process_rc.sql's account_op_seq_range() (:215, :217, :227, :236)."

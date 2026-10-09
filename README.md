@@ -81,7 +81,6 @@ db/
                             custom_json ops (owner/admin gated)
   process_witness_blocks.sql
                             ✓ Per-witness blocks produced + scheduled slots missed, per day
-  process_network_stats.sql Supply snapshots from hafd.blocks (DAU/tx stats → hafbe-api)
 
 Dockerfile                  App image (one image, three services, dispatched by verb)
 Dockerfile.rewriter         The public REST surface: nginx + endpoints/rewrite_rules.conf
@@ -1181,9 +1180,9 @@ Submit additions via MR to `db/seed_data.sql` (the registry upserts on install, 
 
 ### 1. Verify `hafd.blocks` supply column names
 
-**File:** `db/process_network_stats.sql` — `process_supply_snapshot()` function
+**Applies to:** a supply-snapshot processor, which does not exist yet. An early draft, `db/process_network_stats.sql`, was deleted in #81: it was never installed, wrote to two tables nothing creates, and called `hive.get_op_type_id()`, which is not on either node this app runs on. It is in the git history if the work is picked up.
 
-`process_network_stats.sql` reads supply figures directly from `hafd.blocks`. The exact column names vary by HAF version and are currently marked as placeholders. Before enabling supply snapshots, run:
+A supply snapshot reads supply figures directly from `hafd.blocks`. The column names below are confirmed on a live node (see the status note above); they can differ on another HAF version. To check one, run:
 
 ```sql
 SELECT column_name FROM information_schema.columns
@@ -1191,9 +1190,9 @@ WHERE table_schema = 'hafd' AND table_name = 'blocks'
 ORDER BY ordinal_position;
 ```
 
-Expected columns (names may differ): `current_supply`, `virtual_supply`, `current_hbd_supply`,
+Columns found: `current_supply`, `virtual_supply`, `current_hbd_supply`,
 `total_vesting_fund_hive`, `total_vesting_shares`, `total_reward_fund_hive`.
-Update the `SELECT` list in `process_supply_snapshot()` to match what the query returns.
+Write the processor's `SELECT` list to match what the query returns.
 
 ---
 
@@ -1274,7 +1273,7 @@ The following are in scope but not yet added to `endpoint_schema.sql`:
 
 | Endpoint | Processor needed | Notes |
 |---|---|---|
-| `get_network_supply` | `process_network_stats.sql` | Blocked on TODO #1 (hafd.blocks column names) |
+| `get_network_supply` | none yet (a supply-snapshot processor and its table) | Not started. TODO #1 (the `hafd.blocks` column names) is resolved; what is missing is the processor |
 
 Shelved (valid ideas, no concrete consumer identified yet):
 

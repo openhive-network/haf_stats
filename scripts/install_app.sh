@@ -357,7 +357,7 @@ SQL
 # commit, so concurrent callers keep resolving the OLD definition and then see the new
 # one. Callers do not block, and the reason matters because it is easy to get wrong:
 # NOT because "functions take no lock" -- DROP FUNCTION takes an AccessExclusive lock on
-# the pg_proc entry, and this file has 34 of them -- but because function LOOKUP and
+# the pg_proc entry, and this file has dozens of them -- but because function LOOKUP and
 # EXECUTION take no lock at all. That is why PostgreSQL lets you drop a function while
 # it is running, and it is what makes the swap invisible to a reader.
 #
