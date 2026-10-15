@@ -63,7 +63,24 @@ $$;
 CREATE TABLE IF NOT EXISTS hafd.operations (
     id BIGINT PRIMARY KEY,
     op_type_id INT NOT NULL,
-    body_value JSONB NOT NULL
+    body_value JSONB NOT NULL,
+    -- #44: the operation's transaction within its block. NOT NULL in real HAF (-1 for a
+    -- block-level virtual op); NULLABLE here on purpose, so the many fixture rows that never
+    -- set it belong to no transaction and are priced with the estimate, exactly as before,
+    -- instead of all landing in a transaction 0 of their block.
+    trx_in_block SMALLINT
+);
+
+-- #44: the per-transaction RC cost haf_stats_app.exact_rc_for_ops splits across a
+-- transaction's operations. Real HAF has more columns (trx_hash is its primary key); these
+-- are the ones read. rc_cost is NULL for a transaction with no recorded cost, as before
+-- hardfork 20. Created before the GRANT ... ON ALL TABLES IN SCHEMA hafd further down, which
+-- is what lets haf_stats_user read it, as on a node.
+CREATE TABLE IF NOT EXISTS hafd.transactions (
+    block_num INT NOT NULL,
+    trx_in_block SMALLINT NOT NULL,
+    rc_cost BIGINT,
+    PRIMARY KEY (block_num, trx_in_block)
 );
 
 CREATE OR REPLACE VIEW hive.operations_view AS
@@ -187,6 +204,68 @@ INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
 (5000000003, 18, '{"id": "sm_claim_daily"}'),
 (5000000004, 18, '{"id": "sm_claim_daily"}')
 ON CONFLICT (id) DO NOTHING;
+
+-- #44: rcexact (3101) exercises the EXACT path of get_account_rc_footprint and its timeline:
+-- ops whose transaction has a recorded rc_cost (hafd.transactions) get their share of it, the
+-- rest keep the op-count estimate. Blocks 6500-6502 (2021-03-20) sit between rctester's 6000 and
+-- the witness fixture's 7000+, so no other fixture's date window or "latest block" moves. Rates
+-- on/before that day (the 2020-06-08 rows below): vote (op 1) 97,278,897, custom_json (op 18)
+-- 167,828,015. Each multi-op split is floor(rc * w / W) per op, the remainder to the
+-- transaction's highest op id, so the shares add up to rc_cost exactly.
+--
+--   block 6500 tx 0  vote (seq 1)                                rc 100,000,000 -> 100,000,000
+--   block 6500 tx 1  custom_json (seq 2) + custom_json (seq 3) + vote (seq 4), rc 400,000,001,
+--                    W = 2*167828015 + 97278897 = 432,934,927
+--                    -> 155,060,730 + 155,060,730 + 89,878,541 (the vote is the highest id)
+--   block 6501 tx 0  rcexact's vote (seq 5) + rcother's custom_json, rc 200,000,000
+--                    -> vote 73,388,427 (the other account's op counts towards the split)
+--   block 6502 tx 0  vote (seq 6), rc_cost NULL -> the estimate, 97,278,897
+--   block 6502 tx 1  vote (seq 7) + a VIRTUAL op 64 (seq 8), rc 50,000,000
+--                    -> the vote takes all of it: a virtual op takes no share
+--
+-- Totals: votes 100000000 + 89878541 + 73388427 + 97278897 + 50000000 = 410,545,865 (5 ops);
+-- custom_json 155060730 * 2 = 310,121,460 (2 ops).
+INSERT INTO hafd.accounts (id, name) VALUES (3101, 'rcexact'), (3102, 'rcother') ON CONFLICT DO NOTHING;
+
+INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive) VALUES
+(6500, '2021-03-20 00:00:00', 1000000000, 1000000000),
+(6501, '2021-03-20 00:00:03', 1000000000, 1000000000),
+(6502, '2021-03-20 00:00:06', 1000000000, 1000000000)
+ON CONFLICT (num) DO NOTHING;
+
+INSERT INTO hafd.transactions (block_num, trx_in_block, rc_cost) VALUES
+(6500, 0, 100000000),
+(6500, 1, 400000001),
+(6501, 0, 200000000),
+(6502, 0, NULL),
+(6502, 1, 50000000)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
+(6500000001, 1, '{}', 0),
+(6500000011, 18, '{"id": "sm_claim_daily"}', 1),
+(6500000012, 18, '{"id": "sm_claim_daily"}', 1),
+(6500000013, 1, '{}', 1),
+(6501000001, 1, '{}', 0),
+(6501000002, 18, '{"id": "follow"}', 0),
+(6502000001, 1, '{}', 0),
+(6502000011, 1, '{}', 1),
+(6502000012, 64, '{}', 1)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO hive.account_operations_view
+(account_id, transacting_account_id, block_num, op_type_id, account_op_seq_no, operation_id)
+VALUES
+(3101, 3101, 6500, 1, 1, 6500000001),
+(3101, 3101, 6500, 18, 2, 6500000011),
+(3101, 3101, 6500, 18, 3, 6500000012),
+(3101, 3101, 6500, 1, 4, 6500000013),
+(3101, 3101, 6501, 1, 5, 6501000001),
+(3101, 3101, 6502, 1, 6, 6502000001),
+(3101, 3101, 6502, 1, 7, 6502000011),
+(3101, 3101, 6502, 64, 8, 6502000012),
+(3102, 3102, 6501, 18, 1, 6501000002)
+ON CONFLICT DO NOTHING;
 
 -- dapptester (2001) needs a valid signed-op window or get_account_rc_footprint short-circuits
 -- to [] (it RETURNs early when the account has no ops in account_operations_view). Two op-18
@@ -1047,6 +1126,14 @@ ON CONFLICT DO NOTHING;
 -- priced by the op-18 base+byte rate effective then (2020-06-08: 1000/100) = 2*1000+200*100 = 22000.
 INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
 VALUES (3001, '2021-03-01', 'sm_claim_daily', 2, 200)
+ON CONFLICT DO NOTHING;
+
+-- #44: rcexact's two sm_claim_daily ops on 2021-03-20, so the timeline's app_filter branch (which
+-- finds candidate ids in this rollup) reaches the raw ops and prices them exactly. The rollup's own
+-- group_by=app figure stays the byte-aware ESTIMATE, 2*1000 + 200*100 = 22000, until the rollups
+-- carry exact RC too.
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
+VALUES (3101, '2021-03-20', 'sm_claim_daily', 2, 200)
 ON CONFLICT DO NOTHING;
 
 -- cattester (4001) custom_json rollup: the per-json_id candidate set the timeline's

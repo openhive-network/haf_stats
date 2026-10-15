@@ -163,3 +163,54 @@ stages:
           rc_consumed: 6000
           op_count: 30
           pct: 5.31
+
+  # #44: rcexact's ops sit in transactions with a recorded rc_cost (ci_setup.sql), so each is
+  # priced with its EXACT share of its transaction's cost, not the op-count estimate. The one
+  # vote whose transaction has no rc_cost keeps the estimate (97,278,897). Shares, from
+  # ci_setup.sql: votes 100000000 + 89878541 + 73388427 + 97278897 + 50000000 = 410,545,865;
+  # custom_json 2 * 155060730 = 310,121,460. The received op and the virtual op are excluded
+  # as for rctester.
+  - name: group_by=op_type prices ops exactly where the transaction records its RC cost
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-20"
+        to_date: "2021-03-20"
+        group_by: "op_type"
+    response:
+      status_code: 200
+      json:
+        - label: "vote_operation"
+          rc_consumed: 410545865
+          op_count: 5
+          pct: 56.97
+        - label: "custom_json_operation"
+          rc_consumed: 310121460
+          op_count: 2
+          pct: 43.03
+
+  # The non-custom_json bucket of group_by=app takes the same exact path (the 5 votes,
+  # 410,545,865). The custom_json bucket still comes from the per-account rollup, which carries
+  # only the byte-aware estimate (2*1000 + 200*100 = 22000) until the rollups record exact RC.
+  - name: group_by=app prices the non-custom_json bucket exactly
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-20"
+        to_date: "2021-03-20"
+        group_by: "app"
+    response:
+      status_code: 200
+      json:
+        - label: "non-custom_json"
+          rc_consumed: 410545865
+          op_count: 5
+          pct: 99.99
+        - label: "Splinterlands"
+          rc_consumed: 22000
+          op_count: 2
+          pct: 0.01

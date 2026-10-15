@@ -1110,7 +1110,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of estimated Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer) and prices them from the calibrated rc_op_stats_daily rates; RC is an ESTIMATE (op_type uses op_count * average rc_api cost), as real per-op RC cost is unavailable on this node.",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). For group_by=app and group_by=category the custom_json buckets are still the byte-aware estimate from the per-account daily rollup; only their non-custom_json bucket is exact.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -1157,7 +1157,7 @@ DECLARE
                 "category"
               ]
             },
-            "description": "Group results by operation type, DApp, or registry category (the custom_json_app_registry category each DApp belongs to, unmatched ids -> Uncategorized). app and category are byte-aware for custom_json (aggregations of the same daily buckets), so category totals reconcile with app rolled up by category - NOT with the timeline category_filter sum, which stays the op-count model."
+            "description": "Group results by operation type, DApp, or registry category (the custom_json_app_registry category each DApp belongs to, unmatched ids -> Uncategorized). app and category are byte-aware for custom_json (aggregations of the same daily buckets), so category totals reconcile with app rolled up by category - NOT with the timeline category_filter sum, which is priced per op as in op_type."
           }
         ],
         "responses": {
@@ -1206,7 +1206,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable on this node; summing rc_consumed over a window reconciles with the rc-footprint group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -1271,7 +1271,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Only return custom_json events whose registry category equals this value, e.g. Gaming (matches the rc-footprint group_by=category label; see /custom-json-app-registry for the category set, or Uncategorized for ids matching no registered app). Combinable with app_filter (intersection). Each event's rc_consumed stays the op-count estimate, so a category_filter sum reconciles with the group_by=op_type custom_json total, NOT the byte-aware group_by=category figure."
+            "description": "Only return custom_json events whose registry category equals this value, e.g. Gaming (matches the rc-footprint group_by=category label; see /custom-json-app-registry for the category set, or Uncategorized for ids matching no registered app). Combinable with app_filter (intersection). Each event is priced per op as in group_by=op_type, so a category_filter sum reconciles with the group_by=op_type custom_json total, NOT the byte-aware group_by=category figure."
           },
           {
             "in": "query",
@@ -4222,11 +4222,15 @@ $$;
       - Account
     summary: Account RC footprint
     description: >-
-      Breakdown of estimated Resource Credit consumption for an account over a time range,
-      grouped by operation type or DApp. Counts the ops the account itself signed (the RC
-      payer) and prices them from the calibrated rc_op_stats_daily rates; RC is an ESTIMATE
-      (op_type uses op_count * average rc_api cost), as real per-op RC cost is unavailable on
-      this node.
+      Breakdown of Resource Credit consumption for an account over a time range, grouped by
+      operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the
+      node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op
+      is priced with its EXACT share of that cost: the whole cost for a single-op transaction,
+      and for a multi-op transaction a share in proportion to the op-count estimate of each op.
+      Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the
+      calibrated rc_op_stats_daily rates). For group_by=app and group_by=category the
+      custom_json buckets are still the byte-aware estimate from the per-account daily rollup;
+      only their non-custom_json bucket is exact.
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
@@ -4263,7 +4267,7 @@ $$;
           custom_json_app_registry category each DApp belongs to, unmatched ids ->
           Uncategorized). app and category are byte-aware for custom_json (aggregations of
           the same daily buckets), so category totals reconcile with app rolled up by
-          category - NOT with the timeline category_filter sum, which stays the op-count model.
+          category - NOT with the timeline category_filter sum, which is priced per op as in op_type.
     responses:
       '200':
         description: RC consumption ranked by usage
@@ -4353,12 +4357,14 @@ BEGIN
     END IF;
 
     IF group_by = 'op_type' THEN
-        -- RC = op_count * avg_cost_rc per op type (op-count model). avg_cost_rc is the rc_api
-        -- average for the type, applied at the rate effective on/before each op's day - this
-        -- avoids a per-op hafd.operations body join (the on-demand cost driver).
+        -- RC per op is EXACT where the node records the transaction's RC cost
+        -- (haf_stats_app.exact_rc_for_ops, issue #44: the op's share of hafd.transactions.rc_cost)
+        -- and otherwise the op-count estimate avg_cost_rc, the rc_api average for the type at the
+        -- rate effective on/before the op's day. The estimate still needs no per-op body join;
+        -- the exact path reads only the ops' transactions.
         RETURN QUERY
-        WITH acct_ops AS (
-            SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
+        WITH signed AS MATERIALIZED (
+            SELECT ao.operation_id, ao.op_type_id, bv.created_at::DATE AS day
             FROM hive.account_operations_view ao
             JOIN hafd.blocks bv ON bv.num = ao.block_num
             JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
@@ -4366,14 +4372,31 @@ BEGIN
               AND ao.transacting_account_id = ao.account_id
               AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
               AND ao.block_num BETWEEN _from_block AND _to_block
-            GROUP BY ao.op_type_id, bv.created_at::DATE
+        ),
+        ex AS MATERIALIZED (
+            SELECT e.operation_id, e.rc_exact
+            FROM haf_stats_app.exact_rc_for_ops(
+                ARRAY(SELECT s.operation_id FROM signed s WHERE s.operation_id IS NOT NULL)) e
+        ),
+        acct_ops AS (
+            -- Per (op type, day): how many ops, how many of them were priced exactly, and the
+            -- exact RC of those. The rest are priced with the estimate below.
+            SELECT s.op_type_id, s.day,
+                   COUNT(*)::BIGINT                    AS op_count,
+                   COUNT(ex.rc_exact)::BIGINT          AS exact_count,
+                   COALESCE(SUM(ex.rc_exact), 0)::NUMERIC AS exact_rc
+            FROM signed s
+            LEFT JOIN ex ON ex.operation_id = s.operation_id
+            GROUP BY s.op_type_id, s.day
         ),
         priced AS (
             SELECT
                 COALESCE(replace(ot.name, 'hive::protocol::', ''),
                          'op_type_' || ao.op_type_id)                          AS label,
                 ao.op_count,
-                (ao.op_count * haf_stats_app.rc_avg_cost(ao.op_type_id, ao.day))::BIGINT AS rc
+                (ao.exact_rc
+                 + (ao.op_count - ao.exact_count)
+                   * haf_stats_app.rc_avg_cost(ao.op_type_id, ao.day))::BIGINT AS rc
             FROM acct_ops ao
             LEFT JOIN hafd.operation_types ot ON ot.id = ao.op_type_id
         ),
@@ -4414,21 +4437,38 @@ BEGIN
                           THEN haf_stats_app.resolve_dapp_category(acj.json_id)
                           ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END
         ),
+        noncj_signed AS MATERIALIZED (
+            SELECT ao.operation_id, ao.op_type_id, bv.created_at::DATE AS day
+            FROM hive.account_operations_view ao
+            JOIN hafd.blocks bv ON bv.num = ao.block_num
+            JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
+            WHERE ao.account_id = _account_id
+              AND ao.transacting_account_id = ao.account_id
+              AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
+              AND ao.block_num BETWEEN _from_block AND _to_block
+              AND ao.op_type_id <> 18
+        ),
+        noncj_ex AS MATERIALIZED (
+            SELECT e.operation_id, e.rc_exact
+            FROM haf_stats_app.exact_rc_for_ops(
+                ARRAY(SELECT s.operation_id FROM noncj_signed s WHERE s.operation_id IS NOT NULL)) e
+        ),
         noncj AS (
+            -- Exact where the node records the transaction's RC cost, the op-count estimate
+            -- otherwise (same rule as group_by=op_type, issue #44).
             SELECT 'non-custom_json'::TEXT       AS label,
                    SUM(t.op_count)::BIGINT        AS op_count,
-                   SUM(t.op_count * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed
+                   SUM(t.exact_rc
+                       + (t.op_count - t.exact_count)
+                         * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed
             FROM (
-                SELECT ao.op_type_id, bv.created_at::DATE AS day, COUNT(*)::BIGINT AS op_count
-                FROM hive.account_operations_view ao
-                JOIN hafd.blocks bv ON bv.num = ao.block_num
-                JOIN hafd.operation_types ot ON ot.id = ao.op_type_id AND ot.is_virtual = FALSE
-                WHERE ao.account_id = _account_id
-                  AND ao.transacting_account_id = ao.account_id
-                  AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
-                  AND ao.block_num BETWEEN _from_block AND _to_block
-                  AND ao.op_type_id <> 18
-                GROUP BY ao.op_type_id, bv.created_at::DATE
+                SELECT s.op_type_id, s.day,
+                       COUNT(*)::BIGINT                       AS op_count,
+                       COUNT(x.rc_exact)::BIGINT              AS exact_count,
+                       COALESCE(SUM(x.rc_exact), 0)::NUMERIC  AS exact_rc
+                FROM noncj_signed s
+                LEFT JOIN noncj_ex x ON x.operation_id = s.operation_id
+                GROUP BY s.op_type_id, s.day
             ) t
         ),
         combined AS (
@@ -4458,13 +4498,14 @@ $$;
     description: >-
       Per-event drill-down companion to rc-footprint: one row per RC-spending operation the
       account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json
-      id), block, timestamp and estimated RC consumed. rc_consumed is an ESTIMATE (op_count model
-      priced from the calibrated rc_op_stats_daily rates), as real per-op RC cost is unavailable
-      on this node; summing rc_consumed over a window reconciles with the rc-footprint
-      group_by=op_type total (the op-count model). Optional op_type_filter / app_filter narrow the
+      id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its
+      transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and
+      otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each
+      event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed
+      over a window reconciles with that total. Optional op_type_filter / app_filter narrow the
       timeline to the events of one op type or DApp (the same events as the matching rc-footprint
-      bucket; per-event rc_consumed stays the op-count estimate, so an app_filter sum matches the
-      op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start,
+      bucket; each event is still priced per op, so an app_filter sum matches the op_type total,
+      not the byte-aware group_by=app figure). Pages via limit_count/offset_start,
       or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
     parameters:
@@ -4521,7 +4562,7 @@ $$;
           Only return custom_json events whose registry category equals this value, e.g. Gaming
           (matches the rc-footprint group_by=category label; see /custom-json-app-registry for the
           category set, or Uncategorized for ids matching no registered app). Combinable with
-          app_filter (intersection). Each event's rc_consumed stays the op-count estimate, so a
+          app_filter (intersection). Each event is priced per op as in group_by=op_type, so a
           category_filter sum reconciles with the group_by=op_type custom_json total, NOT the
           byte-aware group_by=category figure.
       - in: query
@@ -4689,9 +4730,10 @@ BEGIN
     END IF;
 
     -- One row per signed op (account_id = transacting_account_id = the RC payer). rc_consumed is
-    -- the read-time ESTIMATE rc_avg_cost(op_type, day) (issue #33: no per-op RC log exists), so
-    -- SUM(rc_consumed) over a window reconciles with the aggregate's group_by=op_type total (the
-    -- op-count model). Order by account_op_seq_no DESC alone: within an account it is dense and
+    -- the op's EXACT share of its transaction's recorded RC cost where there is one
+    -- (haf_stats_app.exact_rc_for_ops, issue #44), else the read-time ESTIMATE
+    -- rc_avg_cost(op_type, day) - the same per-op rule as the aggregate's group_by=op_type, so
+    -- SUM(rc_consumed) over a window reconciles with that total. Order by account_op_seq_no DESC alone: within an account it is dense and
     -- MONOTONIC with block_num (the invariant account_op_seq_range relies on), so it equals
     -- timestamp DESC while being served by the (account_id, seq) index - an Index Scan Backward
     -- that stops at OFFSET+LIMIT. Adding the computed block_num to the ORDER BY would instead force
@@ -4699,8 +4741,8 @@ BEGIN
     -- SAME resolver group_by=app uses, so the labels match by construction); custom_json_id keeps
     -- the raw id.
     -- NOTE on app_filter/category_filter reconciliation: each selects the SET of events in a
-    -- group_by=app / group_by=category bucket, but each event's rc_consumed stays the op-count
-    -- estimate, so SUM over such a drill-down reconciles with the group_by=op_type custom_json
+    -- group_by=app / group_by=category bucket, but each event is priced per op (exact or the
+    -- op-count estimate), so SUM over such a drill-down reconciles with the group_by=op_type custom_json
     -- total, NOT the byte-aware group_by=app / group_by=category bucket figure (the aggregate
     -- prices custom_json two ways - flat for op_type, size-aware for app/category; the timeline
     -- follows the op_type model end to end).
@@ -4726,6 +4768,13 @@ BEGIN
               AND ("before_seq" IS NULL OR ao.account_op_seq_no < "before_seq")
             ORDER BY ao.account_op_seq_no DESC
             LIMIT "limit_count" OFFSET "offset_start"
+        ),
+        ex AS MATERIALIZED (
+            -- Exact RC for the returned page only (issue #44); an event without one is priced
+            -- with the estimate, as before.
+            SELECT e.operation_id, e.rc_exact
+            FROM haf_stats_app.exact_rc_for_ops(
+                ARRAY(SELECT p.operation_id FROM page p WHERE p.operation_id IS NOT NULL)) e
         )
         SELECT
             bv.created_at::TIMESTAMP,
@@ -4734,12 +4783,14 @@ BEGIN
             CASE WHEN page.op_type_id = 18
                  THEN haf_stats_app.resolve_dapp_name(ov.body -> 'value' ->> 'id') END,
             CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END,
-            haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT,
+            COALESCE(ex.rc_exact,
+                     haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT),
             page.account_op_seq_no::BIGINT
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
         JOIN hafd.operation_types ot ON ot.id = page.op_type_id
         LEFT JOIN hive.operations_view ov ON page.op_type_id = 18 AND ov.id = page.operation_id
+        LEFT JOIN ex ON ex.operation_id = page.operation_id
         ORDER BY page.account_op_seq_no DESC;
     ELSE
         -- app_filter and/or category_filter set. The resolved DApp name/category is a body-derived
@@ -4755,8 +4806,8 @@ BEGIN
         -- app label is resolved only on the returned page), which the (account_id, seq) index
         -- still serves backward and early-terminates at OFFSET+LIMIT / before_seq. Passing both
         -- filters intersects them (an app must also be in the category). NOTE: this ties the
-        -- filters to the rollup's freshness the same way group_by=app already is; per-event
-        -- rc_consumed stays the op-count estimate.
+        -- filters to the rollup's freshness the same way group_by=app already is; each event is
+        -- priced per op, exact or the op-count estimate, as in the branch above.
         SELECT ARRAY(
             SELECT acj.json_id
             FROM haf_stats_backend.account_custom_json_daily acj
@@ -4774,6 +4825,7 @@ BEGIN
         WITH page AS (
             SELECT ao.block_num,
                    ao.account_op_seq_no,
+                   ao.operation_id,
                    ov.body -> 'value' ->> 'id' AS json_id
             FROM hive.account_operations_view ao
             JOIN hive.operations_view ov ON ov.id = ao.operation_id
@@ -4786,6 +4838,11 @@ BEGIN
               AND ("before_seq" IS NULL OR ao.account_op_seq_no < "before_seq")
             ORDER BY ao.account_op_seq_no DESC
             LIMIT "limit_count" OFFSET "offset_start"
+        ),
+        ex AS MATERIALIZED (
+            SELECT e.operation_id, e.rc_exact
+            FROM haf_stats_app.exact_rc_for_ops(
+                ARRAY(SELECT p.operation_id FROM page p WHERE p.operation_id IS NOT NULL)) e
         )
         SELECT
             bv.created_at::TIMESTAMP,
@@ -4793,10 +4850,12 @@ BEGIN
             'custom_json_operation'::TEXT,
             haf_stats_app.resolve_dapp_name(page.json_id),
             page.json_id,
-            haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT,
+            COALESCE(ex.rc_exact,
+                     haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT),
             page.account_op_seq_no::BIGINT
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
+        LEFT JOIN ex ON ex.operation_id = page.operation_id
         ORDER BY page.account_op_seq_no DESC;
     END IF;
 END;
