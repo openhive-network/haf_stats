@@ -3,11 +3,16 @@ SET ROLE haf_stats_owner;
 -- Exact per-operation RC, from the per-transaction RC cost HAF records (issue #44).
 --
 -- HAF 1.28.8 serializes the RC a transaction actually cost into hafd.transactions.rc_cost
--- (hive/haf!972). A node replayed on such a build has it for every transaction from hardfork
--- 20 (block 26,256,744, when RC began); earlier transactions have NULL, and so does every
--- transaction on a node whose HAF predates the column (1.28.6 and older have no column at all).
+-- (hive/haf!972). On a node replayed on such a build it is filled in every block window sampled
+-- from hardfork 20 (block 26,256,744, when RC began) to the head; earlier transactions have
+-- NULL. A HAF older than 1.28.8 (1.28.6 and before) has no such column at all.
 --
--- The cost belongs to the TRANSACTION, while haf_stats reports per OPERATION. Most
+-- The cost belongs to the TRANSACTION, and hived charges all of it to ONE account: the first
+-- required authority (active, else owner, else posting) of the first operation that has one
+-- (hive/hive libraries/chain/rc/resource_user.cpp). haf_stats reports per OPERATION and
+-- attributes each operation to the account that signed it. So a per-account total built from
+-- these shares is the RC of the operations that account signed, not what it was charged: the
+-- two differ only for transactions carrying operations of more than one signer. Most
 -- transactions carry one operation, and that operation gets the whole cost. A transaction
 -- with several user operations has its cost split across them in proportion to the
 -- op-count estimate each would have been priced at (haf_stats_app.rc_avg_cost for its op
@@ -47,11 +52,14 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.rc_cost_available() TO haf_stats_user;
 --
 -- Takes ids rather than an account or a range so each endpoint keeps its own way of choosing
 -- operations (and its own index), and only hands over what it already selected.
-DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_ops(BIGINT[]);
-CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_for_ops(_op_ids BIGINT[])
+DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_ops(BIGINT []);
+CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_for_ops(_op_ids BIGINT [])
 RETURNS TABLE (operation_id BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
 STABLE
+-- The statement below is planned with _op_ids as a parameter. A cached GENERIC plan would
+-- estimate the array at a handful of rows whatever its size; plan each call for its real array.
+SET plan_cache_mode = force_custom_plan
 AS $$
 BEGIN
     IF _op_ids IS NULL OR cardinality(_op_ids) = 0 OR NOT haf_stats_app.rc_cost_available() THEN
@@ -135,6 +143,6 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_ops(BIGINT[]) TO haf_stats_user;
+GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_ops(BIGINT []) TO haf_stats_user;
 
 RESET ROLE;

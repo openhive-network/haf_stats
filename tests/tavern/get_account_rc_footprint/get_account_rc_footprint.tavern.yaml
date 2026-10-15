@@ -214,3 +214,57 @@ stages:
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
+
+  # #44, rcexact's second day (ci_setup.sql, block 6503): the vote's weight is the vote rate of
+  # THAT day (300,000,000), and the two transfers have a zero rate, clamped to weight 1 each.
+  - name: a split weighs each op at its own day's rate, and a zero rate does not divide by zero
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-21"
+        to_date: "2021-03-21"
+        group_by: "op_type"
+    response:
+      status_code: 200
+      json:
+        - label: "vote_operation"
+          rc_consumed: 384756778
+          op_count: 1
+          pct: 64.02
+        - label: "custom_json_operation"
+          rc_consumed: 215243222
+          op_count: 1
+          pct: 35.81
+        - label: "transfer_operation"
+          rc_consumed: 1000001
+          op_count: 2
+          pct: 0.17
+
+  # Both days in one call: each transaction is still split at its own day's rates, so the figures
+  # are the two single-day results added up.
+  - name: a window over two days adds up the per-day exact figures
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-20"
+        to_date: "2021-03-21"
+        group_by: "op_type"
+    response:
+      status_code: 200
+      json:
+        - label: "vote_operation"
+          rc_consumed: 795302643
+          op_count: 6
+          pct: 60.17
+        - label: "custom_json_operation"
+          rc_consumed: 525364682
+          op_count: 3
+          pct: 39.75
+        - label: "transfer_operation"
+          rc_consumed: 1000001
+          op_count: 2
+          pct: 0.08

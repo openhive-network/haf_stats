@@ -1136,19 +1136,23 @@ unqualified absence is a real zero.
 ## Exact RC
 
 HAF 1.28.8 records the RC each transaction actually cost, in `hafd.transactions.rc_cost`
-(hive/haf!972). A node replayed on 1.28.8 or later has it for every transaction from hardfork 20
-(block 26,256,744, when RC began); earlier blocks have no RC at all, and a HAF older than 1.28.8
-has no such column.
+(hive/haf!972). On a node replayed on 1.28.8 it is filled in every block window sampled from
+hardfork 20 (block 26,256,744, when RC began) to the head, and NULL before it (measured on
+2026-10-16; see #44). A HAF older than 1.28.8 has no such column.
 
 `db/exact_rc.sql` turns that into a per-operation figure (#44). The cost belongs to the
 transaction, while the endpoints report per operation, so:
 
-- a transaction with one user operation gives that operation its whole cost (about 98% of RC
-  spent on mainnet, measured on 2026-10-16);
+- a transaction with one user operation gives that operation its whole cost. Near the chain head
+  that is about 98% of RC spent (measured on 2026-10-16); some historical windows have far more
+  in multi-operation transactions (half of it in one sampled window, see #44);
 - a transaction with several splits its cost in proportion to the op-count estimate each
   operation would have been priced at (`rc_avg_cost` for its op type, on its day). Every user
   operation of the transaction counts, including ones another account signed; virtual operations
-  take no share;
+  take no share. hived charges a transaction's whole cost to one account (the first required
+  authority of its first operation that has one), so an account's total here is the RC of the
+  operations it signed, which differs from what it was charged only for transactions with
+  operations of more than one signer;
 - shares are whole RC units and add up to the transaction's cost exactly (each gets the floor of
   its share, the transaction's highest op id also takes the remainder).
 

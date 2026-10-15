@@ -61,6 +61,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_backend TO haf_stats_user; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /interactions_cap.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_privileges.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql
     volumes:
@@ -71,6 +72,8 @@ services:
       # #44: exact per-operation RC. The REAL file, not a copy in ci_setup.sql, so the stub
       # lane tests what ships; it relies on ci_setup.sql's rc_avg_cost for the split weights.
       - ../db/exact_rc.sql:/exact_rc.sql:ro
+      # ...and its path on a HAF without rc_cost, which nothing else in this lane reaches.
+      - ../tests/ci_exact_rc_guard.sql:/ci_exact_rc_guard.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.

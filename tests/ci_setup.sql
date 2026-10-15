@@ -225,12 +225,21 @@ ON CONFLICT (id) DO NOTHING;
 --
 -- Totals: votes 100000000 + 89878541 + 73388427 + 97278897 + 50000000 = 410,545,865 (5 ops);
 -- custom_json 155060730 * 2 = 310,121,460 (2 ops).
+--
+-- A second day, 2021-03-21 (block 6503), with rate rows of its own further down: vote 300,000,000
+-- from that day (so a vote's weight depends on its day), and transfer (op 2) 0 (a zero rate, which
+-- the split clamps to a weight of 1 instead of dividing by zero).
+--   block 6503 tx 0  vote (seq 9) + custom_json (seq 10), rc 600,000,000, W = 300000000 + 167828015
+--                    -> vote 384,756,778, custom_json 215,243,222
+--   block 6503 tx 1  transfer (seq 11) + transfer (seq 12), rc 1,000,001, both weight 1
+--                    -> 500,000 and 500,001 (the remainder to the higher id)
 INSERT INTO hafd.accounts (id, name) VALUES (3101, 'rcexact'), (3102, 'rcother') ON CONFLICT DO NOTHING;
 
 INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive) VALUES
 (6500, '2021-03-20 00:00:00', 1000000000, 1000000000),
 (6501, '2021-03-20 00:00:03', 1000000000, 1000000000),
-(6502, '2021-03-20 00:00:06', 1000000000, 1000000000)
+(6502, '2021-03-20 00:00:06', 1000000000, 1000000000),
+(6503, '2021-03-21 00:00:00', 1000000000, 1000000000)
 ON CONFLICT (num) DO NOTHING;
 
 INSERT INTO hafd.transactions (block_num, trx_in_block, rc_cost) VALUES
@@ -238,7 +247,9 @@ INSERT INTO hafd.transactions (block_num, trx_in_block, rc_cost) VALUES
 (6500, 1, 400000001),
 (6501, 0, 200000000),
 (6502, 0, NULL),
-(6502, 1, 50000000)
+(6502, 1, 50000000),
+(6503, 0, 600000000),
+(6503, 1, 1000001)
 ON CONFLICT DO NOTHING;
 
 INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
@@ -250,7 +261,11 @@ INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
 (6501000002, 18, '{"id": "follow"}', 0),
 (6502000001, 1, '{}', 0),
 (6502000011, 1, '{}', 1),
-(6502000012, 64, '{}', 1)
+(6502000012, 64, '{}', 1),
+(6503000001, 1, '{}', 0),
+(6503000002, 18, '{"id": "sm_claim_daily"}', 0),
+(6503000011, 2, '{}', 1),
+(6503000012, 2, '{}', 1)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO hive.account_operations_view
@@ -264,6 +279,10 @@ VALUES
 (3101, 3101, 6502, 1, 6, 6502000001),
 (3101, 3101, 6502, 1, 7, 6502000011),
 (3101, 3101, 6502, 64, 8, 6502000012),
+(3101, 3101, 6503, 1, 9, 6503000001),
+(3101, 3101, 6503, 18, 10, 6503000002),
+(3101, 3101, 6503, 2, 11, 6503000011),
+(3101, 3101, 6503, 2, 12, 6503000012),
 (3102, 3102, 6501, 18, 1, 6501000002)
 ON CONFLICT DO NOTHING;
 
@@ -1072,6 +1091,17 @@ INSERT INTO haf_stats_backend.rc_op_stats_daily
 VALUES
 ('2020-06-01', 1, 50, 5, 97278897, 100, 1),
 ('2020-06-08', 1, 500, 50, 97278897, 100, 1)
+ON CONFLICT DO NOTHING;
+
+-- #44: rcexact's second day (block 6503, 2021-03-21). A vote rate that changes on that day, so a
+-- split's weight is taken at the transaction's own day; and a transfer (op 2) rate of 0, which the
+-- split clamps to a weight of 1. No other fixture prices an op 1 on or after 2021-03-21, and none
+-- prices an op 2 (rctester's transfer filter returns no rows), so no other figure moves.
+INSERT INTO haf_stats_backend.rc_op_stats_daily
+(day, op_type_id, base_rc, byte_rc, avg_cost_rc, avg_bytes, sample_count)
+VALUES
+('2021-03-21', 1, 500, 50, 300000000, 100, 1),
+('2021-03-21', 2, 0, 0, 0, 100, 1)
 ON CONFLICT DO NOTHING;
 
 -- Network activity on two days spanning the rate boundary: 06-05 ops use the cheap rate,

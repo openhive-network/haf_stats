@@ -316,3 +316,20 @@ stages:
       json:
         - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3}
         - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2}
+
+  # Day two (block 6503): the remainder of the zero-rate split goes to the higher id (seq 12).
+  - name: second-day events, including an even split under a zero rate
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-21"
+        to_date: "2021-03-21"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500001, op_seq: 12}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500000, op_seq: 11}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 215243222, op_seq: 10}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 384756778, op_seq: 9}
