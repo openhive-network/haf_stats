@@ -3,11 +3,13 @@
 -- Without this, CI ran the DDL of one guarded statement out of 14: comment_registry.community's
 -- ADD COLUMN, which every fresh install needs because its CREATE TABLE lacks the column. The other
 -- 13 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
--- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 14; install-again
+-- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 17 (#44 added three); install-again
 -- has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
 --
---   9 dropped columns   active_users_daily.ops, comment_registry.community,
+--  12 dropped columns   active_users_daily.ops, comment_registry.community,
 --                       account_custom_json_daily.op_bytes,
+--                       rc_exact on network_op_daily, network_custom_json_daily and
+--                       account_custom_json_daily (#44),
 --                       account_cohort_retention.eligible_at_7d/_30d/_90d,
 --                       author_cohort_retention.eligible_at_30d/_90d/_180d
 --   1 re-added column   account_custom_json_daily.rc_estimated, the pre-#32 column the upgrade drops
@@ -40,6 +42,9 @@ GRANT hive_applications_owner_group TO haf_stats_user;
 ALTER TABLE haf_stats_backend.active_users_daily DROP COLUMN ops;
 ALTER TABLE haf_stats_backend.comment_registry DROP COLUMN community;
 ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN op_bytes;
+ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN rc_exact;
+ALTER TABLE haf_stats_backend.network_op_daily DROP COLUMN rc_exact;
+ALTER TABLE haf_stats_backend.network_custom_json_daily DROP COLUMN rc_exact;
 ALTER TABLE haf_stats_backend.account_custom_json_daily
 ADD COLUMN rc_estimated BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE haf_stats_backend.account_cohort_retention
@@ -74,6 +79,9 @@ BEGIN
         ('haf_stats_backend.comment_registry', 'community', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', TRUE),
+        ('haf_stats_backend.account_custom_json_daily', 'rc_exact', FALSE),
+        ('haf_stats_backend.network_op_daily', 'rc_exact', FALSE),
+        ('haf_stats_backend.network_custom_json_daily', 'rc_exact', FALSE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_7d', FALSE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_30d', FALSE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_90d', FALSE),
@@ -117,6 +125,6 @@ BEGIN
         RAISE EXCEPTION 'break-schema: haf_stats_user has no direct hive_applications_owner_group edge, so that arm of the revoke goes untested';
     END IF;
 
-    RAISE NOTICE 'break-schema: all 14 guarded upgrades have work to do again (9 columns dropped, rc_estimated back, income/expense CHECK NOT VALID, one income and one incoming row)';
+    RAISE NOTICE 'break-schema: all 17 guarded upgrades have work to do again (12 columns dropped, rc_estimated back, income/expense CHECK NOT VALID, one income and one incoming row)';
 END;
 $check$;

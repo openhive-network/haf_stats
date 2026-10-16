@@ -53,6 +53,9 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_hp_distribution_snapshot();" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /sync_status.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /exact_rc.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_network_ops.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_network_custom_json.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_custom_json.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 --single-transaction -f /endpoint_schema.sql > /tmp/endpoint_load.log 2>&1 || { cat /tmp/endpoint_load.log; exit 1; } &&
         cat /tmp/endpoint_load.log &&
         if grep -q "there is no transaction in progress" /tmp/endpoint_load.log; then echo "FAIL (#79): endpoint_schema.sql ended psql transaction early -- the --single-transaction guarantee is gone"; exit 1; fi &&
@@ -62,6 +65,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /interactions_cap.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_privileges.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_rollups.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql
     volumes:
@@ -74,6 +78,12 @@ services:
       - ../db/exact_rc.sql:/exact_rc.sql:ro
       # ...and its path on a HAF without rc_cost, which nothing else in this lane reaches.
       - ../tests/ci_exact_rc_guard.sql:/ci_exact_rc_guard.sql:ro
+      # #44 part 2: the real rollup processors and the rc_exact backfill, run over the fixture
+      # in a rolled-back transaction (their tables are the stub's, created by ci_setup.sql).
+      - ../db/process_network_ops.sql:/process_network_ops.sql:ro
+      - ../db/process_network_custom_json.sql:/process_network_custom_json.sql:ro
+      - ../db/process_custom_json.sql:/process_custom_json.sql:ro
+      - ../tests/ci_exact_rc_rollups.sql:/ci_exact_rc_rollups.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.

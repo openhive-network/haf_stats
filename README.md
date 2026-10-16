@@ -75,6 +75,7 @@ db/
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
   process_rc.sql            RC estimate: calibrated per-op-type rates (rc_avg_cost, rc_rate) and the account seq-range helper
   exact_rc.sql              Exact per-operation RC from hafd.transactions.rc_cost where HAF records it (#44); see Exact RC
+                            (also the range split the rollups use, and the rc_exact backfill)
   process_content_cohorts.sql
                             ✓ First-post author retention cohorts
   process_community_registry.sql
@@ -1178,13 +1179,74 @@ For operators: the limit is `haf_stats_app.exact_rc_op_cap()`, redefined from `d
 on every install, so change it there rather than in the database. If you lower `haf_stats_user`'s
 `statement_timeout`, lower the cap with it (about 0.9 ms per operation on cold, old blocks).
 
-**Which figures are exact.** Up to the cap above, those computed from the operation stream at read time:
-`/account/{account}/rc-footprint` with `group_by=op_type`, its `non-custom_json` bucket under
-`group_by=app` and `group_by=category`, and every event of `/account/{account}/rc-footprint-timeline`.
-The figures read from daily rollups are still estimates: the custom_json buckets of
-`group_by=app`/`category`, `/account/{account}/dapp-footprint`, `/network/rc-utilization`,
-`/network/custom-json-usage` and `/network/top-custom-json`. Moving those needs the rollups to
-record exact RC as they are built, and a backfill.
+**Which figures are exact.**
+
+- **Priced at read time, up to the cap above:** `/account/{account}/rc-footprint` with
+  `group_by=op_type`, its `non-custom_json` bucket under `group_by=app` and `group_by=category`,
+  and every event of `/account/{account}/rc-footprint-timeline`.
+- **Read from the daily rollups, per row, with no cap:** the custom_json buckets of
+  `group_by=app`/`category`, `/account/{account}/dapp-footprint`, `/network/rc-utilization`,
+  `/network/custom-json-usage` and `/network/top-custom-json`. Each daily row carries `rc_exact`
+  (below); a response adds up exact rows and estimated ones as they come. The columns named
+  `rc_estimate`/`total_rc_estimated` keep those names for compatibility.
+
+### Exact RC in the daily rollups
+
+`network_op_daily`, `network_custom_json_daily` and `account_custom_json_daily` carry `rc_exact`,
+filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`, computed once per
+batch for all three by `haf_stats_app.prepare_batch_exact_rc`). A row's
+`rc_exact` is set only when every operation it counts had a recorded cost; otherwise it is NULL and
+the endpoints price that row with the estimate. A day that a batch without recorded costs touched
+stays NULL, so a row is never half exact. In `account_custom_json_daily` a custom_json signed by
+several accounts gives each signer its whole RC, as it already gives each its whole count and bytes.
+
+Measured read-only on a 1.28.8 node, the split of 10,000 blocks takes ~1.7 s for recent blocks
+(218,937 operations) and ~3.4 s for blocks from 2021 (392,913 operations), and in both its shares add
+up exactly to the transactions' recorded RC. That is what a catch-up batch gains (its batches take
+20-112 s on busy history); live processing is a block at a time. A range of more than 100,000
+blocks is not split at all: the installer's one-time self-heal of an empty `network_custom_json_daily`
+runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill. Until
+then that table is estimate up to the self-heal while the other two may be exact, so `custom-json-usage` and the
+custom_json part of `rc-utilization` can differ. `rebuild_custom_json.sh` and
+`rebuild_network_custom_json.sh` refuse a `BATCH_SIZE` above 100,000 for the same reason: they
+truncate first and would replace exact rows with NULL ones.
+
+The split's weights come from `rc_op_stats_daily`, which the daily sampler extends, so a
+multi-operation transaction of mixed op types computed again later may divide a few units
+differently between its op types. Its total never changes, and a row's first exact value stands.
+
+**After upgrading a synced node**, rows built before the column existed are NULL, and so is the row
+of the day the upgrade happened in. Fill them with:
+
+```bash
+./scripts/backfill_rc_exact.sh
+```
+
+It works one day at a time (`haf_stats_app.backfill_rc_exact(day)`), from hardfork 20
+(`FROM_DAY`, default 2018-09-25) to the last day the processor has finished (`TO_DAY`).
+
+- It only fills rows whose `rc_exact` is NULL, and only where it reproduces the row's
+  `op_count` and `op_bytes` from the chain. Per day it logs rows filled and NULL rows it found
+  but could not fill because their counts differ (those keep the estimate). A NULL row the
+  recomputed day has no group for is not counted.
+- It refuses a day the processor has not finished, so it can run while the processor runs.
+- It is resumable: set `FROM_DAY` to where it stopped. Re-running over days already filled
+  recomputes them in full (and changes nothing), so prefer `FROM_DAY` to a plain re-run.
+- On a node upgraded to 1.28.8 without a replay, history has no recorded cost. The script checks
+  the first 10,000 blocks of hardfork 20 and stops; set `FROM_DAY` to the upgrade day instead.
+- Time. A day is ~28,800 blocks, so from the per-batch figures above the split alone is ~5-10 s
+  per day, ~4-8 hours over about 2,900 days. Each day also runs the three rollups' own day queries
+  and its UPDATEs (~560M rows in all on a full node), so plan for well beyond that; a whole run has
+  not been timed. Time one busy day first.
+- Disk. Each filled row is an UPDATE. `account_custom_json_daily` (~560M rows, ~77 GB on a full
+  node) has only its primary key and full pages, so most updates write a new row version AND a new
+  index entry. Expect WAL of at least the order of 100 GB and the table and index to grow by tens of
+  GB; autovacuum makes that space reusable but does not give it back (`pg_repack`, or
+  `VACUUM FULL` and `REINDEX` under an exclusive lock, do). Check free disk first, and run it in chunks (`FROM_DAY`/`TO_DAY`) if disk or
+  replicas need it.
+- Load. It reads each day's operations cold, which pushes the live processor's and the API's data
+  out of the cache. On a node serving traffic, run it in chunks at quiet hours and watch the
+  processor's batch times.
 
 ## DApp Attribution
 

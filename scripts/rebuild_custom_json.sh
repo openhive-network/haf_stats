@@ -49,6 +49,13 @@ if (( FROM_BLOCK < 1 || TO_BLOCK < FROM_BLOCK || BATCH_SIZE < 1 )); then
     echo "Invalid range or batch size: FROM_BLOCK=${FROM_BLOCK}, TO_BLOCK=${TO_BLOCK}, BATCH_SIZE=${BATCH_SIZE}" >&2
     exit 2
 fi
+# Above 100,000 blocks per batch haf_stats_app.exact_rc_for_range declines to split the RC
+# (db/exact_rc.sql), so the rebuilt rows would carry no rc_exact - after a TRUNCATE that may have
+# removed exact ones. Refuse rather than lose them silently.
+if (( BATCH_SIZE > 100000 )); then
+    echo "BATCH_SIZE=${BATCH_SIZE} is above 100,000: the rebuilt rows would lose their exact RC (rc_exact). Use 100000 or less." >&2
+    exit 2
+fi
 
 if (( TO_BLOCK > app_block )); then
     echo "TO_BLOCK=${TO_BLOCK} exceeds the app's last processed block (${app_block}); rebuilding ahead of the app would double-count those blocks after restart." >&2
