@@ -20,8 +20,10 @@ SET ROLE haf_stats_owner;
 -- op-count estimate each would have been priced at (haf_stats_app.rc_avg_cost for its op
 -- type, at the rate effective on its day): the decision recorded on #44. Virtual operations
 -- consume no RC and take no share. Every operation of the transaction counts towards the
--- split, including operations another account signed in the same transaction, so a share is
--- the same whoever asks.
+-- split, including operations another account signed in the same transaction, so a share does
+-- not depend on which operations a caller asks about. It can depend on WHEN it is computed: the
+-- daily rate sampler extends rc_op_stats_daily, so a multi-op transaction of mixed op types may
+-- split a few units differently later. The transaction's total never changes.
 --
 -- Shares are whole RC units and add up to the transaction's cost exactly: each operation gets
 -- the floor of its proportional share and the transaction's last operation (highest op id)
@@ -176,15 +178,18 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_ops(BIGINT []) TO haf_stats
 -- ids, so it reads hafd.transactions and hafd.operations through their block-range indexes rather
 -- than probing one operation at a time. No cap: a batch is bounded by the processor's range.
 --
--- _op_type_id narrows the RESULT to one op type (the custom_json rollups pass 18); the split is
--- still computed over every user operation of each transaction, as it must be.
---
--- Returns nothing on a HAF without rc_cost, like exact_rc_for_ops.
+-- Returns nothing on a HAF without rc_cost, like exact_rc_for_ops - and nothing for a range of
+-- more than 100,000 blocks. The processors work in batches of at most 10,000 (a catch-up sync)
+-- or 1 (live), and the backfill a day (~28,800); the one caller with a bigger range is the
+-- installer's self-heal of an empty network_custom_json_daily, which runs a processor over the
+-- whole chain in one transaction. Splitting the whole chain's RC there would materialise every
+-- transaction and user operation since hardfork 20; instead those rows come out without rc_exact
+-- and scripts/backfill_rc_exact.sh fills them a day at a time.
 DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_range(INT, INT, SMALLINT);
+DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_range(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_for_range(
     _first_block INT,
-    _last_block INT,
-    _op_type_id SMALLINT DEFAULT NULL
+    _last_block INT
 )
 RETURNS TABLE (operation_id BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
@@ -192,6 +197,7 @@ STABLE
 AS $$
 BEGIN
     IF _first_block IS NULL OR _last_block IS NULL OR _first_block > _last_block
+       OR _last_block - _first_block + 1 > 100000
        OR NOT haf_stats_app.rc_cost_available() THEN
         RETURN;
     END IF;
@@ -228,7 +234,7 @@ BEGIN
         WINDOW tx AS (PARTITION BY x.block_num, x.trx_in_block)
     ),
     settled AS (
-        SELECT s.id, s.op_type_id,
+        SELECT s.id,
                s.floor_share
                + CASE WHEN s.from_last = 1
                       THEN s.rc_cost - SUM(s.floor_share) OVER (PARTITION BY s.block_num, s.trx_in_block)
@@ -236,29 +242,71 @@ BEGIN
         FROM share AS s
     )
     SELECT st.id, st.rc::BIGINT
-    FROM settled AS st
-    WHERE _op_type_id IS NULL OR st.op_type_id = _op_type_id;
+    FROM settled AS st;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT, SMALLINT) TO haf_stats_user;
+GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stats_user;
+
+-- The exact shares of one batch's operations, computed ONCE for the three rollups. The rollup
+-- functions (network_op_rows, network_custom_json_rows, account_custom_json_rows) each call this
+-- and then read the temp table, so a batch - or a backfilled day - splits its transactions' RC
+-- once instead of three times. Same pattern as prepare_batch_authored_ops
+-- (db/process_block_range.sql): the range-key GUC plus the temp table's existence make repeat calls
+-- for the same range no-ops, and the table is ON COMMIT DROP, so each transaction rebuilds it.
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_exact_rc(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_exact_rc(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+DECLARE
+    _range_key TEXT := _first_block::TEXT || ':' || _last_block::TEXT;
+BEGIN
+    IF current_setting('haf_stats.batch_exact_rc_range', TRUE) = _range_key
+       AND TO_REGCLASS('pg_temp.haf_stats_batch_exact_rc') IS NOT NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_batch_exact_rc (
+        op_id BIGINT NOT NULL PRIMARY KEY,
+        rc_exact BIGINT NOT NULL
+    ) ON COMMIT DROP;
+
+    TRUNCATE haf_stats_batch_exact_rc;
+
+    INSERT INTO haf_stats_batch_exact_rc (op_id, rc_exact)
+    SELECT e.operation_id, e.rc_exact
+    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block) AS e;
+
+    ANALYZE haf_stats_batch_exact_rc;
+    PERFORM set_config('haf_stats.batch_exact_rc_range', _range_key, TRUE);
+END;
+$$;
 
 -- Fill rc_exact on the three daily rollups for ONE past day (#44, part 2). Rows built before the
 -- column existed, or while their day was only partly processed after an upgrade, carry NULL;
--- this recomputes the day from the chain and sets the exact figure where it now is one.
+-- this recomputes the day from the chain and fills them.
 --
 -- It recomputes the day's rows with the processors' own grouping (network_op_rows,
--- network_custom_json_rows, account_custom_json_rows) and touches a row only when the recomputed
--- op_count and op_bytes equal what the row already holds - so a row is never given the RC of a
--- different set of operations. It writes rc_exact and nothing else.
+-- network_custom_json_rows, account_custom_json_rows) and fills a row only when:
+--   * its rc_exact is NULL - a value the processor already wrote is never replaced. The split's
+--     weights come from rc_op_stats_daily, which the daily sampler extends, so recomputing a
+--     multi-op transaction later can move a few units between its op types (never the
+--     transaction's total); the first exact value stands;
+--   * the recomputed op_count and op_bytes equal what the row holds - so a row is never given the
+--     RC of a different set of operations. A NULL row that fails this is counted in
+--     rows_mismatched and left NULL (the endpoints keep the estimate for it).
 --
 -- Refuses a day that is not entirely behind the processor (the day of
--- app_status.last_processed_block or later): the processor may still add to that day's rows, and
--- an exact figure set now would then be missing the later operations. A past day is never written
--- by the processor again, so the backfill can run while the processor is live.
+-- app_status.last_processed_block or later): the processor may still add to that day's rows. A
+-- past day is never written by the processor again, so the backfill can run while it is live.
 DROP FUNCTION IF EXISTS haf_stats_app.backfill_rc_exact(DATE);
 CREATE OR REPLACE FUNCTION haf_stats_app.backfill_rc_exact(_day DATE)
-RETURNS TABLE (rollup TEXT, rows_set BIGINT)
+RETURNS TABLE (rollup TEXT, rows_set BIGINT, rows_mismatched BIGINT)
 LANGUAGE plpgsql
 VOLATILE
 SET jit = OFF
@@ -283,36 +331,68 @@ BEGIN
         RETURN;
     END IF;
 
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_backfill_nod ON COMMIT DROP AS
+    SELECT * FROM haf_stats_app.network_op_rows(_first, _last) WITH NO DATA;
+    TRUNCATE haf_stats_backfill_nod;
+    INSERT INTO haf_stats_backfill_nod SELECT * FROM haf_stats_app.network_op_rows(_first, _last);
+
     UPDATE haf_stats_backend.network_op_daily AS t
     SET rc_exact = r.rc_exact
-    FROM haf_stats_app.network_op_rows(_first, _last) AS r
+    FROM haf_stats_backfill_nod AS r
     WHERE t.day = r.day AND t.op_type_id = r.op_type_id
-      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes
-      AND t.rc_exact IS DISTINCT FROM r.rc_exact;
+      AND t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes;
     GET DIAGNOSTICS _n = ROW_COUNT;
-    rollup := 'network_op_daily'; rows_set := _n; RETURN NEXT;
+    rollup := 'network_op_daily'; rows_set := _n;
+    SELECT count(*) INTO rows_mismatched
+    FROM haf_stats_backend.network_op_daily AS t
+    JOIN haf_stats_backfill_nod AS r ON t.day = r.day AND t.op_type_id = r.op_type_id
+    WHERE t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND (t.op_count <> r.op_count OR t.op_bytes <> r.op_bytes);
+    RETURN NEXT;
+
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_backfill_ncj ON COMMIT DROP AS
+    SELECT * FROM haf_stats_app.network_custom_json_rows(_first, _last) WITH NO DATA;
+    TRUNCATE haf_stats_backfill_ncj;
+    INSERT INTO haf_stats_backfill_ncj SELECT * FROM haf_stats_app.network_custom_json_rows(_first, _last);
 
     UPDATE haf_stats_backend.network_custom_json_daily AS t
     SET rc_exact = r.rc_exact
-    FROM haf_stats_app.network_custom_json_rows(_first, _last) AS r
+    FROM haf_stats_backfill_ncj AS r
     WHERE t.day = r.day AND t.json_id = r.json_id
-      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes
-      AND t.rc_exact IS DISTINCT FROM r.rc_exact;
+      AND t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes;
     GET DIAGNOSTICS _n = ROW_COUNT;
-    rollup := 'network_custom_json_daily'; rows_set := _n; RETURN NEXT;
+    rollup := 'network_custom_json_daily'; rows_set := _n;
+    SELECT count(*) INTO rows_mismatched
+    FROM haf_stats_backend.network_custom_json_daily AS t
+    JOIN haf_stats_backfill_ncj AS r ON t.day = r.day AND t.json_id = r.json_id
+    WHERE t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND (t.op_count <> r.op_count OR t.op_bytes <> r.op_bytes);
+    RETURN NEXT;
+
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_backfill_acj ON COMMIT DROP AS
+    SELECT * FROM haf_stats_app.account_custom_json_rows(_first, _last) WITH NO DATA;
+    TRUNCATE haf_stats_backfill_acj;
+    INSERT INTO haf_stats_backfill_acj SELECT * FROM haf_stats_app.account_custom_json_rows(_first, _last);
 
     UPDATE haf_stats_backend.account_custom_json_daily AS t
     SET rc_exact = r.rc_exact
-    FROM haf_stats_app.account_custom_json_rows(_first, _last) AS r
+    FROM haf_stats_backfill_acj AS r
     WHERE t.account_id = r.account_id AND t.day = r.day AND t.json_id = r.json_id
-      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes
-      AND t.rc_exact IS DISTINCT FROM r.rc_exact;
+      AND t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes;
     GET DIAGNOSTICS _n = ROW_COUNT;
-    rollup := 'account_custom_json_daily'; rows_set := _n; RETURN NEXT;
+    rollup := 'account_custom_json_daily'; rows_set := _n;
+    SELECT count(*) INTO rows_mismatched
+    FROM haf_stats_backend.account_custom_json_daily AS t
+    JOIN haf_stats_backfill_acj AS r ON t.account_id = r.account_id AND t.day = r.day AND t.json_id = r.json_id
+    WHERE t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
+      AND (t.op_count <> r.op_count OR t.op_bytes <> r.op_bytes);
+    RETURN NEXT;
 END;
 $$;
 
--- Writes backend tables: the owner runs it (scripts/backfill_rc_exact.sh), nobody else.
 REVOKE EXECUTE ON FUNCTION haf_stats_app.backfill_rc_exact(DATE) FROM public;
 
 RESET ROLE;

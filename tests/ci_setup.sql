@@ -248,6 +248,7 @@ INSERT INTO hafd.transactions (block_num, trx_in_block, rc_cost) VALUES
 (6501, 0, 200000000),
 (6502, 0, NULL),
 (6502, 1, 50000000),
+(6502, 2, 30000000),
 (6503, 0, 600000000),
 (6503, 1, 1000001)
 ON CONFLICT DO NOTHING;
@@ -262,6 +263,12 @@ INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
 (6502000001, 1, '{}', 0),
 (6502000011, 1, '{}', 1),
 (6502000012, 64, '{}', 1),
+-- #44 part 2: a second sm_claim_daily on 2021-03-20, in its own transaction with a recorded cost,
+-- signed by TWO accounts through required_auths. Only the rollup processors read it (it is not in
+-- hive.account_operations_view, so no read-time figure above changes): it makes the second batch
+-- of tests/ci_exact_rc_rollups.sql add an exact share to rows the first batch made exact, in all
+-- three rollups, and gives each of the two signers the whole 30,000,000.
+(6502000021, 18, '{"id": "sm_claim_daily", "required_auths": ["rcexact", "rcother"]}', 2),
 (6503000001, 1, '{}', 0),
 (6503000002, 18, '{"id": "sm_claim_daily", "required_posting_auths": ["rcexact"]}', 0),
 (6503000011, 2, '{}', 1),
@@ -949,7 +956,8 @@ VALUES
 ON CONFLICT DO NOTHING;
 
 -- DApp footprint stub: account_custom_json_daily + rc_op_stats_daily (mirror
--- db/process_custom_json.sql + db/process_rc.sql, which the stub does not load). The
+-- db/process_custom_json.sql + db/process_rc.sql; this lane loads process_custom_json.sql only
+-- after this file, for tests/ci_exact_rc_rollups.sql, and process_rc.sql not at all). The
 -- endpoint stores RC inputs (op_count + op_bytes) and applies the rc_op_stats_daily rate at
 -- read time (issue #32); app names + categories resolve from custom_json_app_registry.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
@@ -1165,9 +1173,9 @@ VALUES (3001, '2021-03-01', 'sm_claim_daily', 2, 200)
 ON CONFLICT DO NOTHING;
 
 -- #44: rcexact's two sm_claim_daily ops on 2021-03-20, so the timeline's app_filter branch (which
--- finds candidate ids in this rollup) reaches the raw ops and prices them exactly. The rollup's own
--- group_by=app figure stays the byte-aware ESTIMATE, 2*1000 + 200*100 = 22000, until the rollups
--- carry exact RC too.
+-- finds candidate ids in this rollup) reaches the raw ops and prices them exactly. This hand-written
+-- row has no rc_exact, so its group_by=app figure is the byte-aware ESTIMATE, 2*1000 + 200*100 =
+-- 22000 (tests/ci_exact_rc_rollups.sql builds real rows with the processors).
 INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
 VALUES (3101, '2021-03-20', 'sm_claim_daily', 2, 200)
 ON CONFLICT DO NOTHING;

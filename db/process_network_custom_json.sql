@@ -101,14 +101,16 @@ CREATE OR REPLACE FUNCTION haf_stats_app.network_custom_json_rows(
 )
 RETURNS TABLE (day DATE, json_id TEXT, op_count BIGINT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 SET jit = OFF
 AS $$
 BEGIN
+PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS MATERIALIZED (
-    SELECT e.operation_id, e.rc_exact
-    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block, 18::SMALLINT) AS e
+WITH ex AS (
+    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
+    SELECT c.op_id AS operation_id, c.rc_exact
+    FROM haf_stats_batch_exact_rc AS c
 )
 SELECT
     bv.created_at::DATE AS day,

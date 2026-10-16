@@ -112,16 +112,18 @@ CREATE OR REPLACE FUNCTION haf_stats_app.account_custom_json_rows(
 )
 RETURNS TABLE (account_id INT, day DATE, json_id TEXT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 SET jit = OFF
 SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 AS $$
 BEGIN
+PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS MATERIALIZED (
-    SELECT e.operation_id, e.rc_exact
-    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block, 18::SMALLINT) AS e
+WITH ex AS (
+    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
+    SELECT c.op_id AS operation_id, c.rc_exact
+    FROM haf_stats_batch_exact_rc AS c
 ),
 ops AS MATERIALIZED (
     -- One custom_json op per row, with its id, the day it landed, its payload size, and its

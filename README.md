@@ -1193,15 +1193,23 @@ on every install, so change it there rather than in the database. If you lower `
 ### Exact RC in the daily rollups
 
 `network_op_daily`, `network_custom_json_daily` and `account_custom_json_daily` carry `rc_exact`,
-filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`). A row's
+filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`, computed once per
+batch for all three by `haf_stats_app.prepare_batch_exact_rc`). A row's
 `rc_exact` is set only when every operation it counts had a recorded cost; otherwise it is NULL and
 the endpoints price that row with the estimate. A day that a batch without recorded costs touched
 stays NULL, so a row is never half exact. In `account_custom_json_daily` a custom_json signed by
 several accounts gives each signer its whole RC, as it already gives each its whole count and bytes.
 
-Measured on a 1.28.8 node, the split for 10,000 recent blocks (~218,000 operations) takes ~1.7 s,
-and its shares add up exactly to the transactions' recorded RC. The three processors each compute
-it for their batch.
+Measured read-only on a 1.28.8 node, the split of 10,000 blocks takes ~1.7 s for recent blocks
+(218,937 operations) and ~3.4 s for blocks from 2021 (392,913 operations), and in both its shares add
+up exactly to the transactions' recorded RC. That is what a catch-up batch gains (its batches take
+20-112 s on busy history); live processing is a block at a time. A range of more than 100,000
+blocks is not split at all: the installer's one-time self-heal of an empty `network_custom_json_daily`
+runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill.
+
+The split's weights come from `rc_op_stats_daily`, which the daily sampler extends, so a
+multi-operation transaction of mixed op types computed again later may divide a few units
+differently between its op types. Its total never changes, and a row's first exact value stands.
 
 **After upgrading a synced node**, rows built before the column existed are NULL, and so is the row
 of the day the upgrade happened in. Fill them with:
@@ -1211,10 +1219,20 @@ of the day the upgrade happened in. Fill them with:
 ```
 
 It works one day at a time (`haf_stats_app.backfill_rc_exact(day)`), from hardfork 20
-(`FROM_DAY`, default 2018-09-25) to the last day the processor has finished (`TO_DAY`). It only
-writes `rc_exact`, only on rows whose counts it reproduces from the chain, and it refuses a day the
-processor has not finished, so it can run while the processor runs. It is resumable: re-run it,
-or set `FROM_DAY` to where it stopped. Full history is about 2,900 days.
+(`FROM_DAY`, default 2018-09-25) to the last day the processor has finished (`TO_DAY`).
+
+- It only fills rows whose `rc_exact` is NULL, and only where it reproduces the row's
+  `op_count` and `op_bytes` from the chain. Per day it logs rows filled and rows it could not
+  fill because their counts differ (those keep the estimate).
+- It refuses a day the processor has not finished, so it can run while the processor runs.
+- It is resumable: re-run it, or set `FROM_DAY` to where it stopped.
+- On a node upgraded to 1.28.8 without a replay, history has no recorded cost. The script checks
+  the hardfork-20 day and stops; set `FROM_DAY` to the upgrade day instead.
+- Cost, from the per-batch figures above: on the order of a few seconds per day for the split plus
+  the rollups' own day queries, over about 2,900 days. A whole run has not been timed. Each filled
+  row is an UPDATE: across ~560M `account_custom_json_daily` rows on a full node, expect WAL in the
+  order of 100 GB and table bloat until autovacuum catches up. Run it in chunks
+  (`FROM_DAY`/`TO_DAY`) if disk or replicas need it.
 
 ## DApp Attribution
 
