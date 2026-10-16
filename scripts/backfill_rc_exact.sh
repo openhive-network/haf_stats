@@ -10,12 +10,12 @@
 #
 # Unlike the rebuild_*.sh scripts it is NOT destructive and does NOT need the processor stopped:
 # it only writes days the processor has finished, and the function refuses any other day. It is
-# resumable: re-run it with FROM_DAY set to the last day it logged, or simply again (it only fills
-# rows whose rc_exact is NULL; a value already there is never replaced).
+# resumable: re-run it with FROM_DAY set to the last day it logged (it only fills rows whose
+# rc_exact is NULL; a value already there is never replaced).
 #
 # Per day it logs, per rollup, the rows it filled and the NULL rows it found but could not fill
 # because their op_count/op_bytes no longer match what the chain gives (those keep the estimate).
-# A row the chain no longer produces at all is not counted.
+# A NULL row the recomputed day has no group for is not counted.
 #
 # A node replayed on HAF 1.28.8 has rc_cost from hardfork 20 on. A node UPGRADED to 1.28.8
 # without a replay has it only from the upgrade on: the script checks the hardfork-20 day first
@@ -23,13 +23,13 @@
 #
 # What it costs - see "Exact RC in the daily rollups" in README.md. In short: a day is ~28,800
 # blocks, so the split alone is ~5-10 s per day (measured 1.7 s per 10,000 recent blocks, 3.4 s
-# per 10,000 from 2021) before the three rollups' own day queries; a whole run is a day or more,
-# not hours, and has not been timed. Every filled row is an UPDATE that also writes a new index
-# entry, and the space that frees is reused, not returned to the OS. Re-running recomputes every
-# day in the range, filled or not: resume with FROM_DAY.
+# per 10,000 from 2021), ~4-8 hours over full history, before the three rollups' own day queries
+# and the UPDATEs; a whole run has not been timed. Most filled rows are UPDATEs that also write a
+# new index entry, and the space that frees is reused, not returned to the OS. Re-running
+# recomputes every day in the range, filled or not: resume with FROM_DAY.
 #
 # Before hardfork 20 (2018-09-25) there is no RC to record, so the default range starts there.
-# On a HAF without rc_cost it changes nothing. Full history is roughly 2,900 days.
+# On a HAF without rc_cost it stops at once (exit 2). Full history is roughly 2,900 days.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,22 +41,28 @@ FROM_DAY_GIVEN="${FROM_DAY:+yes}"
 
 wait_for_postgres
 
+# No error swallowing in these probes: a failed connection must stop the script (set -e on the
+# assignment), not read as "no recorded cost".
+#
+# A HAF without the column has nothing to fill at all, whatever FROM_DAY says - and it cannot even
+# parse the hardfork-20 probe below - so this is asked first, always.
+available="$(psql_cmd -Atc "SELECT haf_stats_app.rc_cost_available()")"
+if [[ "${available}" != "t" ]]; then
+    echo "This HAF has no hafd.transactions.rc_cost (it needs HAF 1.28.8 or later): nothing to fill." >&2
+    exit 2
+fi
+
 if [[ -z "${FROM_DAY_GIVEN}" ]]; then
     # Hardfork 20's first block with RC is 26,256,744. No recorded cost in the next 10,000 blocks
     # means this HAF was not replayed on 1.28.8: history has no rc_cost to backfill from.
-    # No error swallowing here: a failed connection must stop the script, not read as "not
-    # replayed". A HAF without the column cannot even parse the probe, so ask about that first.
-    recorded="$(psql_cmd -Atc "SELECT haf_stats_app.rc_cost_available()")"
-    if [[ "${recorded}" == "t" ]]; then
-        recorded="$(psql_cmd -Atc "
-            SELECT EXISTS (
-                SELECT 1 FROM hafd.transactions
-                WHERE block_num BETWEEN 26256744 AND 26266743 AND rc_cost IS NOT NULL
-            )
-        ")"
-    fi
+    recorded="$(psql_cmd -Atc "
+        SELECT EXISTS (
+            SELECT 1 FROM hafd.transactions
+            WHERE block_num BETWEEN 26256744 AND 26266743 AND rc_cost IS NOT NULL
+        )
+    ")"
     if [[ "${recorded}" != "t" ]]; then
-        echo "No recorded RC cost at hardfork 20: this HAF was not replayed on 1.28.8 (or has no rc_cost)." >&2
+        echo "No recorded RC cost at hardfork 20: this HAF was not replayed on 1.28.8." >&2
         echo "Set FROM_DAY to the day HAF was upgraded, or later; earlier days have nothing to fill." >&2
         exit 2
     fi

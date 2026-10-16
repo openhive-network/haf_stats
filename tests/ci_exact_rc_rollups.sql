@@ -365,6 +365,58 @@ BEGIN
         RAISE EXCEPTION 'FAIL (#44): backfill pass 2 wrote the wrong rc_exact: %', _diff;
     END IF;
 
+    -- Pass 3: counts and bytes put back and every 2021-03-20 row NULL again, then:
+    --   * already exact with matching counts (op 18, rcexact's sm_claim_daily): must keep 1;
+    --   * already exact with other counts (rcother's follow, the network follow): neither filled
+    --     nor counted as mismatched - only NULL rows are;
+    --   * the 2021-03-21 op-18, sm_claim_daily and rcexact sm_claim_daily rows given the counts of
+    --     the same key on 2021-03-20, so only the day keeps them apart (checked below: 2021-03-21
+    --     must stay untouched).
+    UPDATE haf_stats_backend.account_custom_json_daily SET op_bytes = op_bytes - 1
+    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    UPDATE haf_stats_backend.network_custom_json_daily SET op_bytes = op_bytes - 1
+    WHERE day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_op_daily SET op_bytes = op_bytes - 1
+    WHERE day = '2021-03-20' AND op_type_id = 18;
+    UPDATE haf_stats_backend.network_op_daily SET rc_exact = NULL WHERE day = '2021-03-20';
+    UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20';
+    UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20' AND account_id IN (3101, 3102);
+    UPDATE haf_stats_backend.network_op_daily SET rc_exact = 1
+    WHERE day = '2021-03-20' AND op_type_id = 18;
+    UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = 1
+    WHERE account_id = 3101 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = 1, op_count = op_count + 1
+    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = 1, op_bytes = op_bytes + 1
+    WHERE day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_op_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
+    FROM haf_stats_backend.network_op_daily AS s
+    WHERE t.day = '2021-03-21' AND s.day = '2021-03-20' AND t.op_type_id = 18 AND s.op_type_id = 18;
+    UPDATE haf_stats_backend.network_custom_json_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
+    FROM haf_stats_backend.network_custom_json_daily AS s
+    WHERE t.day = '2021-03-21' AND s.day = '2021-03-20' AND t.json_id = 'sm_claim_daily' AND s.json_id = 'sm_claim_daily';
+    UPDATE haf_stats_backend.account_custom_json_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
+    FROM haf_stats_backend.account_custom_json_daily AS s
+    WHERE t.account_id = 3101 AND s.account_id = 3101 AND t.day = '2021-03-21' AND s.day = '2021-03-20'
+      AND t.json_id = 'sm_claim_daily' AND s.json_id = 'sm_claim_daily';
+
+    SELECT string_agg(b.rollup || '=' || b.rows_set || '/' || b.rows_mismatched, ' ' ORDER BY b.rollup) INTO _set
+    FROM haf_stats_app.backfill_rc_exact('2021-03-20') AS b;
+    IF _set IS DISTINCT FROM 'account_custom_json_daily=1/0 network_custom_json_daily=1/0 network_op_daily=0/0' THEN
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 3 (values already there) set/mismatched %, expected acj 1/0 (rcother''s sm_claim_daily), ncj 1/0 (sm_claim_daily), nod 0/0', _set;
+    END IF;
+    SELECT string_agg(e.rollup || ' ' || e.k || '=' || coalesce(a.rc_exact::TEXT, 'NULL'), '; ') INTO _diff
+    FROM expected_rc AS e
+    LEFT JOIN actual_rc AS a ON a.rollup = e.rollup AND a.k = e.k
+    WHERE e.k LIKE '%2021-03-20%'
+      AND (a.k IS NULL
+           OR a.rc_exact IS DISTINCT FROM CASE WHEN e.k IN ('2021-03-20/18', '3101/2021-03-20/sm_claim_daily',
+                                                            '3102/2021-03-20/follow', '2021-03-20/follow')
+                                               THEN 1 ELSE e.rc_exact END);
+    IF _diff IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 3 replaced a value or wrote the wrong rc_exact: %', _diff;
+    END IF;
+
     IF EXISTS (SELECT 1 FROM actual_rc AS a WHERE a.k LIKE '%2021-03-21%' AND a.rc_exact IS NOT NULL) THEN
         RAISE EXCEPTION 'FAIL (#44): backfill of 2021-03-20 touched 2021-03-21';
     END IF;

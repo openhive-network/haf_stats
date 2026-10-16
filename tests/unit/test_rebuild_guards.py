@@ -680,3 +680,24 @@ def test_the_recheck_refuses_a_call_with_nothing_to_say(bash, tmp_path, call):
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "PROCEEDED" not in proc.stdout
     assert "consequence line" in proc.stderr
+
+
+# The two custom_json rebuilds also bound BATCH_SIZE from above (#44, part 2): over 100,000
+# blocks exact_rc_for_range declines to split the RC, so a rebuild in bigger batches would
+# truncate exact rows and write them back without rc_exact.
+RC_EXACT_REBUILDS = [SCRIPTS / "rebuild_custom_json.sh", SCRIPTS / "rebuild_network_custom_json.sh"]
+
+
+@pytest.mark.parametrize("script", RC_EXACT_REBUILDS, ids=lambda p: p.name)
+@pytest.mark.parametrize("batch, refused", [("100000", False), ("100001", True)])
+def test_a_custom_json_rebuild_refuses_batches_too_big_to_keep_exact_rc(bash, script, tmp_path,
+                                                                        batch, refused):
+    proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6,
+                                   env_extra={"BATCH_SIZE": batch})
+    if refused:
+        assert proc.returncode == 2, f"exit {proc.returncode}: {proc.stdout}{proc.stderr}"
+        assert not DESTRUCTIVE.search(statements), "it truncated before refusing"
+        assert "rc_exact" in proc.stderr
+    else:
+        assert proc.returncode == 0, proc.stderr
+        assert DESTRUCTIVE.search(statements)

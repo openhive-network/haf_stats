@@ -259,7 +259,7 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stat
 -- with it) instead of outliving it.
 --
 -- The table has a PRIMARY KEY on op_id, so an operation split twice would stop the batch rather
--- than count twice; hafd.transactions holds one row per (block_num, trx_in_block).
+-- than count twice.
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_exact_rc(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_exact_rc(
     _first_block INT,
@@ -305,10 +305,10 @@ $$;
 --     transaction's total); the first exact value stands;
 --   * the recomputed op_count and op_bytes equal what the row holds - so a row is never given the
 --     RC of a different set of operations. A NULL row that fails this is counted in
---     rows_mismatched and left NULL (the endpoints keep the estimate for it). A NULL row with no
---     recomputed group at all (or a group with no row) is neither filled nor counted: finding one
---     would mean scanning the whole day of account_custom_json_daily, whose key leads with the
---     account.
+--     rows_mismatched and left NULL (the endpoints keep the estimate for it). A NULL row the
+--     recomputed day has no group for is neither filled nor counted: finding those in
+--     account_custom_json_daily, whose key leads with the account and which has no index on day,
+--     would scan the whole table for every day.
 --
 -- Refuses a day that is not entirely behind the processor (the day of
 -- app_status.last_processed_block or later): the processor may still add to that day's rows. A

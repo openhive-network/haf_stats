@@ -1,0 +1,133 @@
+"""scripts/backfill_rc_exact.sh, run under a stub psql (#44, part 2).
+
+The SQL it drives (haf_stats_app.backfill_rc_exact) is tested in tests/ci_exact_rc_rollups.sql.
+This covers what only the script decides: when it refuses to start, that a failed query stops
+it instead of reading as an answer, and which days it hands to the function.
+
+NOT COVERED: the SQL the script evaluates itself - the "day before the last processed block's
+day" arithmetic and the generate_series of days - since the stub answers those with fixed text.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.unit.shell_harness import clean_env, require_bash, stub_bin, write_exec
+
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "scripts" / "backfill_rc_exact.sh"
+TIMEOUT = 60
+
+LAST_DONE_DAY = "2018-09-27"
+DAYS = ["2018-09-25", "2018-09-26", "2018-09-27"]
+
+
+@pytest.fixture
+def bash():
+    return require_bash()
+
+
+def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None):
+    """Run the script with psql answering: rc_cost_available() -> `available`, the hardfork-20
+    probe -> `recorded` (either may be FAIL: psql prints an error and exits 2, as on a lost
+    connection), the last finished day -> LAST_DONE_DAY, the day list -> DAYS."""
+    bindir = stub_bin(tmp_path)
+    log = tmp_path / "sql.log"
+    days = tmp_path / "days"
+    days.write_text("\n".join(DAYS) + "\n", encoding="utf-8")
+
+    def answer(value: str) -> str:
+        if value == "FAIL":
+            return 'echo "psql: error: server closed the connection unexpectedly" >&2; exit 2'
+        return f'echo "{value}"'
+
+    write_exec(
+        bindir / "psql",
+        "#!/bin/sh\n"
+        "cmd=''\n"
+        "prev=''\n"
+        'for a in "$@"; do\n'
+        '  case "$prev" in -c|-Atc) cmd="$cmd$a" ;; esac\n'
+        '  prev="$a"\n'
+        "done\n"
+        f'printf "%s\\n" "$(printf \'%s\' "$cmd" | tr \'\\n\' \' \')" >> "{log.as_posix()}"\n'
+        'case "$cmd" in\n'
+        f"  *rc_cost_available*) {answer(available)} ;;\n"
+        f"  *26256744*) {answer(recorded)} ;;\n"
+        f'  *last_processed_block*) echo "{LAST_DONE_DAY}" ;;\n'
+        f'  *generate_series*) cat "{days.as_posix()}" ;;\n'
+        '  *backfill_rc_exact*) echo "network_op_daily=1 (mismatched 0)" ;;\n'
+        "  *) : ;;\n"
+        "esac\n"
+        "exit 0\n",
+    )
+    env = clean_env(bindir)
+    env.pop("FROM_DAY", None)
+    env.pop("TO_DAY", None)
+    env.update(env_extra or {})
+    proc = subprocess.run([bash, str(SCRIPT)], capture_output=True, text=True,
+                          timeout=TIMEOUT, env=env)
+    statements = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return proc, statements
+
+
+def backfilled_days(statements):
+    return [s.split("backfill_rc_exact('")[1][:10] for s in statements if "backfill_rc_exact('" in s]
+
+
+def test_it_fills_every_finished_day_from_hardfork_20(bash, tmp_path):
+    """The control: with recorded costs from hardfork 20 it backfills each day it lists."""
+    proc, statements = run_backfill(bash, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert backfilled_days(statements) == DAYS
+    day_list = next(s for s in statements if "generate_series" in s)
+    assert f"'2018-09-25'::DATE, '{LAST_DONE_DAY}'::DATE" in day_list
+
+
+@pytest.mark.parametrize("from_day", [None, "2021-01-01"], ids=["default-range", "FROM_DAY-given"])
+def test_a_haf_without_rc_cost_stops_before_any_day(bash, tmp_path, from_day):
+    """Whatever FROM_DAY says: every day would recompute three rollups and fill nothing."""
+    extra = {"FROM_DAY": from_day} if from_day else {}
+    proc, statements = run_backfill(bash, tmp_path, available="f", env_extra=extra)
+    assert proc.returncode == 2, proc.stderr
+    assert "no hafd.transactions.rc_cost" in proc.stderr
+    assert backfilled_days(statements) == []
+    # It must not even send the hardfork-20 probe, which a HAF without the column cannot parse.
+    assert not any("26256744" in s for s in statements)
+
+
+def test_a_haf_not_replayed_on_1_28_8_stops_by_default(bash, tmp_path):
+    proc, statements = run_backfill(bash, tmp_path, recorded="f")
+    assert proc.returncode == 2, proc.stderr
+    assert "not replayed on 1.28.8" in proc.stderr
+    assert backfilled_days(statements) == []
+
+
+def test_from_day_skips_the_hardfork_20_probe(bash, tmp_path):
+    """FROM_DAY is how an operator of an upgraded (not replayed) node says where costs start."""
+    proc, statements = run_backfill(bash, tmp_path, recorded="f",
+                                    env_extra={"FROM_DAY": "2018-09-26"})
+    assert proc.returncode == 0, proc.stderr
+    assert not any("26256744" in s for s in statements)
+    assert backfilled_days(statements) == DAYS  # the stub's list; the range is SQL's job
+
+
+@pytest.mark.parametrize("which", ["available", "recorded"])
+def test_a_failed_probe_stops_it_and_is_not_read_as_an_answer(bash, tmp_path, which):
+    """A lost connection used to read as "not replayed on 1.28.8" (`2>/dev/null || echo f`)."""
+    proc, statements = run_backfill(bash, tmp_path, **{which: "FAIL"})
+    assert proc.returncode != 0
+    assert "server closed the connection" in proc.stderr
+    assert "not replayed" not in proc.stderr
+    assert "nothing to fill" not in proc.stderr
+    assert backfilled_days(statements) == []
+
+
+def test_it_refuses_a_to_day_the_processor_has_not_finished(bash, tmp_path):
+    proc, statements = run_backfill(bash, tmp_path, env_extra={"TO_DAY": "2018-09-28"})
+    assert proc.returncode == 2, proc.stderr
+    assert "not finished by the processor" in proc.stderr
+    assert backfilled_days(statements) == []
