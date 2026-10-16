@@ -71,7 +71,7 @@ trap 'rm -rf "${WORK}"' EXIT
 
 # Bump when you add or remove a check. This is the assertion that makes every other
 # assertion trustworthy: it turns "the fetch quietly failed" into a red job.
-EXPECTED_CHECKS=59
+EXPECTED_CHECKS=63
 
 fail=0
 ran=0
@@ -445,8 +445,19 @@ if fetch "irreversible_blocks.sql"; then
         "The account-scoped endpoints in endpoints/endpoint_schema.sql resolve names to ids here, as do the db/process_* writers."
     need "${C}TABLE${S}(IF${S}NOT${S}EXISTS${S})?hafd\.hive_state${B}" \
         "db/haf_stats_app.sql:232 clamps its context seed with LEAST(_app_block, MAX(hs.consistent_block)) so app_context_attach cannot be asked to start above HAF, and db/sync_status.sql reports it."
+    # #44: db/exact_rc.sql finds an operation's transaction through these. rc_cost itself is
+    # deliberately NOT checked: it exists only from HAF 1.28.8, the pin can be older, and the
+    # function checks for the column at run time and falls back to the estimate without it.
+    need "${C}TABLE${S}(IF${S}NOT${S}EXISTS${S})?hafd\.transactions${B}" \
+        "db/exact_rc.sql reads each transaction's rc_cost from it; tests/ci_setup.sql stubs block_num, trx_in_block and rc_cost."
+    need_col "${C}TABLE${S}(IF${S}NOT${S}EXISTS${S})?hafd\.transactions${B}" "block_num" \
+        "db/exact_rc.sql joins an operation's block to its transaction on it."
+    need_col "${C}TABLE${S}(IF${S}NOT${S}EXISTS${S})?hafd\.transactions${B}" "trx_in_block" \
+        "db/exact_rc.sql joins an operation to its transaction on it."
+    need_col "${C}TABLE${S}(IF${S}NOT${S}EXISTS${S})?hafd\.operations${B}" "trx_in_block" \
+        "db/exact_rc.sql groups a transaction's operations by it to split the transaction's RC cost; tests/ci_setup.sql stubs it."
 else
-    skip 5
+    skip 9
 fi
 
 # ======================================================================================

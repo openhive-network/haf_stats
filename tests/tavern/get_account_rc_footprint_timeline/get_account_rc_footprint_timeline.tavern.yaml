@@ -276,3 +276,60 @@ stages:
       json:
         - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2}
         - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1}
+
+  # #44: per-event EXACT shares for rcexact (ci_setup.sql). The vote of seq 6 sits in a
+  # transaction with no rc_cost and keeps the estimate; seq 7's transaction also holds a virtual
+  # op, which takes no share and is not listed. SUM = 720,667,325, the group_by=op_type total, so
+  # the timeline still reconciles with the aggregate.
+  - name: events are priced with their exact share of the transaction's RC cost
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-20"
+        to_date: "2021-03-20"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 50000000, op_seq: 7}
+        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 6}
+        - {timestamp: "2021-03-20T00:00:03", block_num: 6501, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 73388427, op_seq: 5}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 89878541, op_seq: 4}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 100000000, op_seq: 1}
+
+  # The app_filter branch reads the raw custom_json ops through a different query; it prices them
+  # exactly too.
+  - name: app_filter events are priced with their exact share too
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-20"
+        to_date: "2021-03-20"
+        app_filter: "Splinterlands"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2}
+
+  # Day two (block 6503): the remainder of the zero-rate split goes to the higher id (seq 12).
+  - name: second-day events, including an even split under a zero rate
+    request:
+      url: "{api_url}/rpc/get_account_rc_footprint_timeline"
+      method: GET
+      params:
+        account: "rcexact"
+        from_date: "2021-03-21"
+        to_date: "2021-03-21"
+    response:
+      status_code: 200
+      json:
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500001, op_seq: 12}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500000, op_seq: 11}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 215243222, op_seq: 10}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 384756778, op_seq: 9}

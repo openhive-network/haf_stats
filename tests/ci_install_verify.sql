@@ -46,6 +46,15 @@ BEGIN
         RAISE EXCEPTION 'install: haf_stats_endpoints.root() is missing';
     END IF;
 
+    -- #44: the exact-RC functions both RC footprint endpoints call. Asserted here because the
+    -- endpoint-tests lane loads db/exact_rc.sql itself, so only this lane would notice
+    -- install_app.sh no longer loading it - and every rc-footprint call would then fail.
+    IF to_regprocedure('haf_stats_app.exact_rc_for_ops(bigint[])') IS NULL
+       OR to_regprocedure('haf_stats_app.exact_rc_op_cap()') IS NULL
+       OR to_regprocedure('haf_stats_app.rc_cost_available()') IS NULL THEN
+        RAISE EXCEPTION 'install: the exact-RC functions from db/exact_rc.sql are missing';
+    END IF;
+
     -- ------------------------------------------------------------ control state
     IF to_regclass('haf_stats_app.app_status') IS NULL THEN
         RAISE EXCEPTION 'install: haf_stats_app.app_status is missing';

@@ -73,7 +73,8 @@ db/
   op_type_registry.sql      Every hafd.operation_types name / hardcoded op id the processors
                             depend on, plus the install-time assertion that verifies them
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
-  process_rc.sql            ⚠ RC cost attribution — BLOCKED: rc_account_statuses ops are not captured by HAF (see docs/VERIFICATION.md)
+  process_rc.sql            RC estimate: calibrated per-op-type rates (rc_avg_cost, rc_rate) and the account seq-range helper
+  exact_rc.sql              Exact per-operation RC from hafd.transactions.rc_cost where HAF records it (#44); see Exact RC
   process_content_cohorts.sql
                             ✓ First-post author retention cohorts
   process_community_registry.sql
@@ -818,8 +819,8 @@ Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths 
 | `GET /account/{account}/content-stats` | ✅ Live | process_content_stats.sql | Per-account posts/comments/votes/replies + author rewards, granularity |
 | `GET /account/{account}/community-activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
 | `GET /account/{account}/interactions` | ✅ Live | *(on-demand, no processor)* | Per-account outgoing interactions by type (reply/vote/transfer/reblog/follow) and counterparty; Top-N partners per type plus an `Others` band |
-| `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql | Estimated RC for an account's signed ops, grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
-| `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql | Per-account estimated RC as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
+| `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql, exact_rc.sql | RC for an account's signed ops (exact where the node records it, see [Exact RC](#exact-rc)), grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
+| `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql, exact_rc.sql | Per-account RC (exact where recorded) as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
 | `GET /account/{account}/dapp-footprint` | ✅ Live | process_custom_json.sql | Per-account custom_json activity resolved to DApp names and categories |
 | `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
 | `GET /network/content-volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
@@ -1131,6 +1132,59 @@ does **not** assert data was lost, because once the budget is exhausted the endp
 cannot tell an account with no follows from one whose follows fell outside it. The guarantee runs
 the other way: a band empty over a **fully covered** window emits no row at all, so an
 unqualified absence is a real zero.
+
+## Exact RC
+
+HAF 1.28.8 records the RC each transaction actually cost, in `hafd.transactions.rc_cost`
+(hive/haf!972). On a node replayed on 1.28.8 it is filled in every block window sampled from
+hardfork 20 (block 26,256,744, when RC began) to the head, and NULL before it (measured on
+2026-10-16; see #44). A HAF older than 1.28.8 has no such column.
+
+`db/exact_rc.sql` turns that into a per-operation figure (#44). The cost belongs to the
+transaction, while the endpoints report per operation, so:
+
+- a transaction with one user operation gives that operation its whole cost. Near the chain head
+  that is about 98% of RC spent (measured on 2026-10-16); some historical windows have far more
+  in multi-operation transactions (half of it in one sampled window, see #44);
+- a transaction with several splits its cost in proportion to the op-count estimate each
+  operation would have been priced at (`rc_avg_cost` for its op type, on its day). Every user
+  operation of the transaction counts, including ones another account signed; virtual operations
+  take no share. hived charges a transaction's whole cost to one account, taken from the first
+  operation that names one (usually the alphabetically first of its required active, else owner,
+  else posting authorities; see `db/exact_rc.sql`), so an account's total here is the RC of the
+  operations it signed, which differs from what it was charged only for transactions with
+  operations of more than one signer;
+- shares are whole RC units and add up to the transaction's cost exactly (each gets the floor of
+  its share, the transaction's highest op id also takes the remainder).
+
+Where there is no recorded cost (a HAF without the column, a transaction before hardfork 20) an
+operation is priced with the estimate, as before. Nothing has to be installed or rebuilt to
+switch: the function checks for the column when it runs.
+
+**A cap on exact pricing (decided 2026-10-16).** Each exactly priced operation costs about three
+random reads. Measured on a 1.28.8 node: ~0.2 ms an operation on recent blocks, ~0.9 ms on uncached
+old ones, where one account's 50,587 operations in January 2022 took 42 s, past the API role's 30 s
+`statement_timeout` (and 12,028 operations in October 2021 took 11.1 s). So when a window holds more than 15,000 operations the account signed
+(`haf_stats_app.exact_rc_op_cap()`), `/account/{account}/rc-footprint` prices the whole response
+with the estimate instead. Both groupings of one window decide alike. A caller can tell an
+all-estimate response by the `op_count` of a `group_by=op_type` response adding up to more than
+15,000 (under `app`/`category` the custom_json counts come from a daily rollup, so near 15,000 that
+sum is only approximate). Heavy accounts exceed the cap even in the default 30-day window. The timeline still prices
+every event exactly (a page is at most 1,000 operations), so above the cap summing the timeline no
+longer matches the footprint total. Exact figures for every window are part of moving the rollups
+to exact RC.
+
+For operators: the limit is `haf_stats_app.exact_rc_op_cap()`, redefined from `db/exact_rc.sql`
+on every install, so change it there rather than in the database. If you lower `haf_stats_user`'s
+`statement_timeout`, lower the cap with it (about 0.9 ms per operation on cold, old blocks).
+
+**Which figures are exact.** Up to the cap above, those computed from the operation stream at read time:
+`/account/{account}/rc-footprint` with `group_by=op_type`, its `non-custom_json` bucket under
+`group_by=app` and `group_by=category`, and every event of `/account/{account}/rc-footprint-timeline`.
+The figures read from daily rollups are still estimates: the custom_json buckets of
+`group_by=app`/`category`, `/account/{account}/dapp-footprint`, `/network/rc-utilization`,
+`/network/custom-json-usage` and `/network/top-custom-json`. Moving those needs the rollups to
+record exact RC as they are built, and a backfill.
 
 ## DApp Attribution
 

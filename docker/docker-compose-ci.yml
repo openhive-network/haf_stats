@@ -52,6 +52,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_hp_distribution.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "SELECT haf_stats_app.refresh_hp_distribution_snapshot();" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /sync_status.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /exact_rc.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 --single-transaction -f /endpoint_schema.sql > /tmp/endpoint_load.log 2>&1 || { cat /tmp/endpoint_load.log; exit 1; } &&
         cat /tmp/endpoint_load.log &&
         if grep -q "there is no transaction in progress" /tmp/endpoint_load.log; then echo "FAIL (#79): endpoint_schema.sql ended psql transaction early -- the --single-transaction guarantee is gone"; exit 1; fi &&
@@ -60,6 +61,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -c "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_backend TO haf_stats_user; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_endpoints TO haf_stats_user;" &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /interactions_cap.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_privileges.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql
     volumes:
@@ -67,6 +69,11 @@ services:
       # #55: the SECURITY DEFINER over hafd.contexts, plus the privilege/source probes
       # that run last (they need the endpoints and grants to already exist).
       - ../db/sync_status.sql:/sync_status.sql:ro
+      # #44: exact per-operation RC. The REAL file, not a copy in ci_setup.sql, so the stub
+      # lane tests what ships; it relies on ci_setup.sql's rc_avg_cost for the split weights.
+      - ../db/exact_rc.sql:/exact_rc.sql:ro
+      # ...and its path on a HAF without rc_cost, which nothing else in this lane reaches.
+      - ../tests/ci_exact_rc_guard.sql:/ci_exact_rc_guard.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.

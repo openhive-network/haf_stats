@@ -198,6 +198,9 @@ run_sql_file "${SCRIPT_DIR}/../db/schema_migration.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_block_range.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_financial.sql"
 run_sql_file_atomic "${SCRIPT_DIR}/../db/process_rc.sql"
+# Exact per-operation RC from hafd.transactions.rc_cost (#44). After process_rc.sql, because a
+# multi-operation transaction's split is weighted with haf_stats_app.rc_avg_cost.
+run_sql_file_atomic "${SCRIPT_DIR}/../db/exact_rc.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_account_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_active_users.sql"
 # Before process_content_stats: that file's community staging calls
