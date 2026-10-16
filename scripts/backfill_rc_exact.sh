@@ -18,8 +18,9 @@
 # A NULL row the recomputed day has no group for is not counted.
 #
 # A node replayed on HAF 1.28.8 has rc_cost from hardfork 20 on. A node UPGRADED to 1.28.8
-# without a replay has it only from the upgrade on: the script checks the hardfork-20 day first
-# and stops if it has no recorded cost there, unless FROM_DAY is given (set it to the upgrade day).
+# without a replay has it only from the upgrade on: the script checks the first 10,000 blocks of
+# hardfork 20 and stops if they have no recorded cost, unless FROM_DAY is given (set it to the
+# upgrade day).
 #
 # What it costs - see "Exact RC in the daily rollups" in README.md. In short: a day is ~28,800
 # blocks, so the split alone is ~5-10 s per day (measured 1.7 s per 10,000 recent blocks, 3.4 s

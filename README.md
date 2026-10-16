@@ -1233,7 +1233,7 @@ It works one day at a time (`haf_stats_app.backfill_rc_exact(day)`), from hardfo
 - It is resumable: set `FROM_DAY` to where it stopped. Re-running over days already filled
   recomputes them in full (and changes nothing), so prefer `FROM_DAY` to a plain re-run.
 - On a node upgraded to 1.28.8 without a replay, history has no recorded cost. The script checks
-  the hardfork-20 day and stops; set `FROM_DAY` to the upgrade day instead.
+  the first 10,000 blocks of hardfork 20 and stops; set `FROM_DAY` to the upgrade day instead.
 - Time. A day is ~28,800 blocks, so from the per-batch figures above the split alone is ~5-10 s
   per day, ~4-8 hours over about 2,900 days. Each day also runs the three rollups' own day queries
   and its UPDATEs (~560M rows in all on a full node), so plan for well beyond that; a whole run has

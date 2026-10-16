@@ -1,8 +1,8 @@
 """scripts/backfill_rc_exact.sh, run under a stub psql (#44, part 2).
 
 The SQL it drives (haf_stats_app.backfill_rc_exact) is tested in tests/ci_exact_rc_rollups.sql.
-This covers what only the script decides: when it refuses to start, that a failed query stops
-it instead of reading as an answer, and which days it hands to the function.
+This covers what only the script decides: each of its refusals, that a failed query stops it
+instead of reading as an answer, and the day range it asks SQL for.
 
 NOT COVERED: the SQL the script evaluates itself - the "day before the last processed block's
 day" arithmetic and the generate_series of days - since the stub answers those with fixed text.
@@ -30,10 +30,11 @@ def bash():
     return require_bash()
 
 
-def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None):
+def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, last_done=LAST_DONE_DAY):
     """Run the script with psql answering: rc_cost_available() -> `available`, the hardfork-20
     probe -> `recorded` (either may be FAIL: psql prints an error and exits 2, as on a lost
-    connection), the last finished day -> LAST_DONE_DAY, the day list -> DAYS."""
+    connection), the last finished day -> `last_done` (empty: no processed block yet), the day
+    list -> DAYS."""
     bindir = stub_bin(tmp_path)
     log = tmp_path / "sql.log"
     days = tmp_path / "days"
@@ -57,7 +58,7 @@ def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None):
         'case "$cmd" in\n'
         f"  *rc_cost_available*) {answer(available)} ;;\n"
         f"  *26256744*) {answer(recorded)} ;;\n"
-        f'  *last_processed_block*) echo "{LAST_DONE_DAY}" ;;\n'
+        f'  *last_processed_block*) echo "{last_done}" ;;\n'
         f'  *generate_series*) cat "{days.as_posix()}" ;;\n'
         '  *backfill_rc_exact*) echo "network_op_daily=1 (mismatched 0)" ;;\n'
         "  *) : ;;\n"
@@ -113,6 +114,41 @@ def test_from_day_skips_the_hardfork_20_probe(bash, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not any("26256744" in s for s in statements)
     assert backfilled_days(statements) == DAYS  # the stub's list; the range is SQL's job
+    day_list = next(s for s in statements if "generate_series" in s)
+    assert f"'2018-09-26'::DATE, '{LAST_DONE_DAY}'::DATE" in day_list
+
+
+def test_to_day_sets_the_end_of_the_range(bash, tmp_path):
+    proc, statements = run_backfill(bash, tmp_path, env_extra={"TO_DAY": "2018-09-26"})
+    assert proc.returncode == 0, proc.stderr
+    day_list = next(s for s in statements if "generate_series" in s)
+    assert "'2018-09-25'::DATE, '2018-09-26'::DATE" in day_list
+
+
+@pytest.mark.parametrize("knob", ["FROM_DAY", "TO_DAY"])
+@pytest.mark.parametrize("bad", ["2018-9-25", "2018-09-25'; SELECT 1; --"], ids=["short", "quote"])
+def test_a_day_not_in_iso_form_is_refused_before_it_reaches_sql(bash, tmp_path, knob, bad):
+    """The days are interpolated into SQL text; the YYYY-MM-DD check is all that stands there."""
+    proc, statements = run_backfill(bash, tmp_path, env_extra={knob: bad})
+    assert proc.returncode == 2, proc.stderr
+    assert "Not a YYYY-MM-DD day" in proc.stderr
+    assert not any(bad in s for s in statements)
+
+
+def test_from_day_after_to_day_does_nothing(bash, tmp_path):
+    proc, statements = run_backfill(bash, tmp_path,
+                                    env_extra={"FROM_DAY": "2018-09-27", "TO_DAY": "2018-09-26"})
+    assert proc.returncode == 0, proc.stderr
+    assert "Nothing to do" in proc.stderr
+    assert not any("generate_series" in s for s in statements)
+    assert backfilled_days(statements) == []
+
+
+def test_a_processor_with_no_finished_day_is_refused(bash, tmp_path):
+    proc, statements = run_backfill(bash, tmp_path, last_done="")
+    assert proc.returncode == 2, proc.stderr
+    assert "has not finished any day" in proc.stderr
+    assert backfilled_days(statements) == []
 
 
 @pytest.mark.parametrize("which", ["available", "recorded"])
