@@ -36,6 +36,16 @@ BEGIN
         RAISE EXCEPTION 'FAIL (#44): exact_rc_for_range(6502, 6502) gave %, expected 6502000011=50000000,6502000021=30000000', _got;
     END IF;
     RAISE NOTICE 'exact_rc_for_range: a virtual op takes no share, an op without a recorded cost gets no row';
+
+    -- The cutoff: a range of exactly 100,000 blocks around the fixture is split, one more block
+    -- and nothing is.
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_app.exact_rc_for_range(6403, 106402)) THEN
+        RAISE EXCEPTION 'FAIL (#44): exact_rc_for_range declined a range of 100,000 blocks';
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_app.exact_rc_for_range(6403, 106403)) THEN
+        RAISE EXCEPTION 'FAIL (#44): exact_rc_for_range split a range of 100,001 blocks';
+    END IF;
+    RAISE NOTICE 'exact_rc_for_range: splits 100,000 blocks, declines 100,001';
 END
 $range$;
 
@@ -181,13 +191,46 @@ BEGIN
 END
 $nulled$;
 
+-- The other direction - the day an upgrade lands in: a FULLY priced batch onto rows that are now
+-- NULL must leave them NULL (with 4 ops), not make them exact with only that batch's part. Block
+-- 6505 holds one more sm_claim_daily by rcexact on 2021-03-21, alone in a transaction with
+-- 9,000,000.
+INSERT INTO hafd.blocks (num, created_at, total_vesting_shares, total_vesting_fund_hive)
+VALUES (6505, '2021-03-21 00:00:12', 1000000000, 1000000000);
+INSERT INTO hafd.transactions (block_num, trx_in_block, rc_cost) VALUES (6505, 0, 9000000);
+INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
+(6505000001, 18, '{"id": "sm_claim_daily", "required_posting_auths": ["rcexact"]}', 0);
+SELECT haf_stats_app.process_network_ops(6505, 6505);
+SELECT haf_stats_app.process_network_custom_json(6505, 6505);
+SELECT haf_stats_app.process_custom_json(6505, 6505);
+
+DO $upgrade_day$
+DECLARE
+    _bad TEXT;
+BEGIN
+    IF (SELECT string_agg(e.operation_id || '=' || e.rc_exact, ',')
+        FROM haf_stats_app.exact_rc_for_range(6505, 6505) AS e) IS DISTINCT FROM '6505000001=9000000' THEN
+        RAISE EXCEPTION 'FAIL (#44): block 6505 should be fully priced';
+    END IF;
+    SELECT string_agg(a.rollup || ' ' || a.k || ' ' || a.op_count || '/' || coalesce(a.rc_exact::TEXT, 'NULL'), '; ') INTO _bad
+    FROM actual_rc AS a
+    WHERE a.k IN ('2021-03-21/18', '2021-03-21/sm_claim_daily', '3101/2021-03-21/sm_claim_daily')
+      AND (a.rc_exact IS NOT NULL OR a.op_count <> 4);
+    IF _bad IS NOT NULL OR (SELECT count(*) FROM actual_rc AS a
+                            WHERE a.k IN ('2021-03-21/18', '2021-03-21/sm_claim_daily', '3101/2021-03-21/sm_claim_daily')) <> 3 THEN
+        RAISE EXCEPTION 'FAIL (#44): a priced batch onto NULL rows should leave 4 ops and NULL in each: %', _bad;
+    END IF;
+    RAISE NOTICE 'exact rollups: a priced batch onto a NULL row leaves it NULL, in all three rollups';
+END
+$upgrade_day$;
+
 -- Put 2021-03-21 back as the first two batches left it, for the checks below.
 DELETE FROM haf_stats_backend.network_op_daily WHERE day = '2021-03-21' AND op_type_id = 18;
 DELETE FROM haf_stats_backend.network_custom_json_daily WHERE day = '2021-03-21';
 DELETE FROM haf_stats_backend.account_custom_json_daily WHERE account_id = 3101 AND day = '2021-03-21';
-DELETE FROM hafd.operations WHERE id IN (6504000001, 6504000002);
-DELETE FROM hafd.transactions WHERE block_num = 6504;
-DELETE FROM hafd.blocks WHERE num = 6504;
+DELETE FROM hafd.operations WHERE id IN (6504000001, 6504000002, 6505000001);
+DELETE FROM hafd.transactions WHERE block_num IN (6504, 6505);
+DELETE FROM hafd.blocks WHERE num IN (6504, 6505);
 INSERT INTO haf_stats_backend.network_op_daily (day, op_type_id, op_count, op_bytes, rc_exact)
 SELECT r.day, r.op_type_id, r.op_count, r.op_bytes, r.rc_exact
 FROM haf_stats_app.network_op_rows(6503, 6503) AS r WHERE r.op_type_id = 18;
@@ -227,6 +270,16 @@ BEGIN
     FROM haf_stats_endpoints.get_network_top_custom_json('2021-03-20', '2021-03-21', 25, 'app', 'op_count') AS t
     WHERE t.app_name = 'Splinterlands';
     IF _v IS DISTINCT FROM 340128760 THEN _bad := _bad || format(' top-custom-json app Splinterlands=%s;', _v); END IF;
+    SELECT t.rc_estimate INTO _v
+    FROM haf_stats_endpoints.get_network_top_custom_json('2021-03-20', '2021-03-21', 25, 'id', 'op_count') AS t
+    WHERE t.json_id = 'sm_claim_daily';
+    IF _v IS DISTINCT FROM 340128760 THEN _bad := _bad || format(' top-custom-json id sm_claim_daily=%s;', _v); END IF;
+    -- 2021-03-20 (a Saturday) and 2021-03-21 fall in the week of 2021-03-15: one period, two rows.
+    IF (SELECT string_agg(u.period || '=' || u.rc_estimate, ',' ORDER BY u.period)
+        FROM haf_stats_endpoints.get_network_custom_json_usage('sm_claim_daily', '2021-03-20', '2021-03-21', 'week') AS u)
+       IS DISTINCT FROM '2021-03-15=340128760' THEN
+        _bad := _bad || ' custom-json-usage week;';
+    END IF;
     IF _bad <> '' THEN
         RAISE EXCEPTION 'FAIL (#44): exact and estimated rows in one window:%', _bad;
     END IF;
@@ -235,22 +288,23 @@ END
 $mixed$;
 
 -- The backfill: make the rows look built before the column existed, put the processor on
--- 2021-03-21 (so 2021-03-20 is finished and 2021-03-21 is not), and backfill 2021-03-20.
+-- 2021-03-21 (so 2021-03-20 is finished and 2021-03-21 is not), and backfill 2021-03-20 TWICE in
+-- this transaction: first with rows whose op_count no longer matches the chain, then with rows
+-- whose op_bytes does not - one of each in every rollup - so every guard is needed, and the second
+-- call reuses the first call's temp tables.
 UPDATE haf_stats_backend.network_op_daily SET rc_exact = NULL WHERE day IN ('2021-03-20', '2021-03-21');
 UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL WHERE day IN ('2021-03-20', '2021-03-21');
 UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL WHERE account_id IN (3101, 3102);
--- Rows whose counts no longer match the chain: the backfill must leave them NULL. One by op_count
--- (account_custom_json_daily), one by op_bytes (network_custom_json_daily).
+-- Pass 1: wrong op_count on rcother's follow row, the network follow row and the op-18 row.
 UPDATE haf_stats_backend.account_custom_json_daily SET op_count = op_count + 1
 WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
-UPDATE haf_stats_backend.network_custom_json_daily SET op_bytes = op_bytes + 1
+UPDATE haf_stats_backend.network_custom_json_daily SET op_count = op_count + 1
 WHERE day = '2021-03-20' AND json_id = 'follow';
--- ...and one by op_bytes in account_custom_json_daily.
-UPDATE haf_stats_backend.account_custom_json_daily SET op_bytes = op_bytes + 1
-WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
--- A row that already holds a value: the backfill must leave it as it is, even when it differs.
-UPDATE haf_stats_backend.network_op_daily SET rc_exact = 1
+UPDATE haf_stats_backend.network_op_daily SET op_count = op_count + 1
 WHERE day = '2021-03-20' AND op_type_id = 18;
+-- A row that already holds a value: the backfill must leave it as it is, even when it differs.
+UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = 1
+WHERE day = '2021-03-20' AND json_id = 'sm_claim_daily';
 UPDATE haf_stats_app.app_status SET last_processed_block = 6503;
 
 DO $backfill$
@@ -261,20 +315,54 @@ DECLARE
 BEGIN
     SELECT string_agg(b.rollup || '=' || b.rows_set || '/' || b.rows_mismatched, ' ' ORDER BY b.rollup) INTO _set
     FROM haf_stats_app.backfill_rc_exact('2021-03-20') AS b;
-    IF _set IS DISTINCT FROM 'account_custom_json_daily=1/2 network_custom_json_daily=1/1 network_op_daily=0/0' THEN
-        RAISE EXCEPTION 'FAIL (#44): backfill of 2021-03-20 set/mismatched %, expected acj 1/2 (rcother''s follow: count, rcother''s sm_claim_daily: bytes), ncj 1/1 (follow: bytes), nod 0/0 (op 18 already holds a value, op 1 stays NULL)', _set;
+    IF _set IS DISTINCT FROM 'account_custom_json_daily=2/1 network_custom_json_daily=0/1 network_op_daily=0/1' THEN
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 1 (op_count) set/mismatched %, expected acj 2/1 (rcother''s follow), ncj 0/1 (sm_claim_daily already holds a value, follow), nod 0/1 (op 18; op 1 stays NULL)', _set;
+    END IF;
+    SELECT string_agg(e.rollup || ' ' || e.k || '=' || coalesce(a.rc_exact::TEXT, 'NULL'), '; ') INTO _diff
+    FROM expected_rc AS e
+    LEFT JOIN actual_rc AS a ON a.rollup = e.rollup AND a.k = e.k
+    WHERE e.k LIKE '%2021-03-20%'
+      AND (a.k IS NULL
+           OR a.rc_exact IS DISTINCT FROM CASE WHEN e.k IN ('3102/2021-03-20/follow', '2021-03-20/follow', '2021-03-20/18')
+                                               THEN NULL
+                                               WHEN e.rollup = 'ncj' AND e.k = '2021-03-20/sm_claim_daily' THEN 1
+                                               ELSE e.rc_exact END);
+    IF _diff IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 1 wrote the wrong rc_exact: %', _diff;
     END IF;
 
-    SELECT string_agg(a.rollup || ' ' || a.k || '=' || coalesce(a.rc_exact::TEXT, 'NULL'), '; ') INTO _diff
-    FROM actual_rc AS a
-    JOIN expected_rc AS e ON e.rollup = a.rollup AND e.k = a.k
-    WHERE a.k LIKE '%2021-03-20%'
-      AND a.rc_exact IS DISTINCT FROM CASE WHEN a.k IN ('3102/2021-03-20/follow', '2021-03-20/follow',
-                                                       '3102/2021-03-20/sm_claim_daily') THEN NULL
-                                           WHEN a.rollup = 'nod' AND a.k = '2021-03-20/18' THEN 1
-                                           ELSE e.rc_exact END;
+    -- Pass 2: counts put back, every 2021-03-20 row NULL again, and wrong op_bytes instead on
+    -- rcother's sm_claim_daily row, the network follow row and the op-18 row.
+    UPDATE haf_stats_backend.account_custom_json_daily SET op_count = op_count - 1
+    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_custom_json_daily SET op_count = op_count - 1
+    WHERE day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_op_daily SET op_count = op_count - 1
+    WHERE day = '2021-03-20' AND op_type_id = 18;
+    UPDATE haf_stats_backend.network_op_daily SET rc_exact = NULL WHERE day = '2021-03-20';
+    UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20';
+    UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20' AND account_id IN (3101, 3102);
+    UPDATE haf_stats_backend.account_custom_json_daily SET op_bytes = op_bytes + 1
+    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    UPDATE haf_stats_backend.network_custom_json_daily SET op_bytes = op_bytes + 1
+    WHERE day = '2021-03-20' AND json_id = 'follow';
+    UPDATE haf_stats_backend.network_op_daily SET op_bytes = op_bytes + 1
+    WHERE day = '2021-03-20' AND op_type_id = 18;
+
+    SELECT string_agg(b.rollup || '=' || b.rows_set || '/' || b.rows_mismatched, ' ' ORDER BY b.rollup) INTO _set
+    FROM haf_stats_app.backfill_rc_exact('2021-03-20') AS b;
+    IF _set IS DISTINCT FROM 'account_custom_json_daily=2/1 network_custom_json_daily=1/1 network_op_daily=0/1' THEN
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 2 (op_bytes) set/mismatched %, expected acj 2/1 (rcother''s sm_claim_daily), ncj 1/1 (follow), nod 0/1 (op 18)', _set;
+    END IF;
+    SELECT string_agg(e.rollup || ' ' || e.k || '=' || coalesce(a.rc_exact::TEXT, 'NULL'), '; ') INTO _diff
+    FROM expected_rc AS e
+    LEFT JOIN actual_rc AS a ON a.rollup = e.rollup AND a.k = e.k
+    WHERE e.k LIKE '%2021-03-20%'
+      AND (a.k IS NULL
+           OR a.rc_exact IS DISTINCT FROM CASE WHEN e.k IN ('3102/2021-03-20/sm_claim_daily', '2021-03-20/follow', '2021-03-20/18')
+                                               THEN NULL ELSE e.rc_exact END);
     IF _diff IS NOT NULL THEN
-        RAISE EXCEPTION 'FAIL (#44): backfill wrote the wrong rc_exact: %', _diff;
+        RAISE EXCEPTION 'FAIL (#44): backfill pass 2 wrote the wrong rc_exact: %', _diff;
     END IF;
 
     IF EXISTS (SELECT 1 FROM actual_rc AS a WHERE a.k LIKE '%2021-03-21%' AND a.rc_exact IS NOT NULL) THEN

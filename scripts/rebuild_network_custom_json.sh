@@ -76,6 +76,13 @@ if (( BATCH_SIZE < 1 )); then
     echo "BATCH_SIZE must be >= 1; got ${BATCH_SIZE}." >&2
     exit 2
 fi
+# Above 100,000 blocks per batch haf_stats_app.exact_rc_for_range declines to split the RC
+# (db/exact_rc.sql), so the rebuilt rows would carry no rc_exact - after a TRUNCATE that may have
+# removed exact ones. Refuse rather than lose them silently.
+if (( BATCH_SIZE > 100000 )); then
+    echo "BATCH_SIZE=${BATCH_SIZE} is above 100,000: the rebuilt rows would lose their exact RC (rc_exact). Use 100000 or less." >&2
+    exit 2
+fi
 
 app_block="$(
     psql_cmd -Atc "

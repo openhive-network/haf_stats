@@ -13,18 +13,20 @@
 # resumable: re-run it with FROM_DAY set to the last day it logged, or simply again (it only fills
 # rows whose rc_exact is NULL; a value already there is never replaced).
 #
-# Per day it logs, per rollup, the rows it filled and the rows it could not fill because the row's
-# op_count/op_bytes no longer match what the chain gives (those keep the estimate).
+# Per day it logs, per rollup, the rows it filled and the NULL rows it found but could not fill
+# because their op_count/op_bytes no longer match what the chain gives (those keep the estimate).
+# A row the chain no longer produces at all is not counted.
 #
 # A node replayed on HAF 1.28.8 has rc_cost from hardfork 20 on. A node UPGRADED to 1.28.8
 # without a replay has it only from the upgrade on: the script checks the hardfork-20 day first
 # and stops if it has no recorded cost there, unless FROM_DAY is given (set it to the upgrade day).
 #
-# What it costs (measured on a 1.28.8 node, not for a whole run): the split of 10,000 recent
-# blocks takes ~1.7 s and of 10,000 blocks from 2021 ~3.4 s, once per day for the three rollups,
-# plus the rollups' own day queries. Each filled row is an UPDATE: across ~560M
-# account_custom_json_daily rows on a full node expect WAL in the order of 100 GB and table bloat
-# until autovacuum catches up; run it in chunks (FROM_DAY/TO_DAY) if disk or replicas need it.
+# What it costs - see "Exact RC in the daily rollups" in README.md. In short: a day is ~28,800
+# blocks, so the split alone is ~5-10 s per day (measured 1.7 s per 10,000 recent blocks, 3.4 s
+# per 10,000 from 2021) before the three rollups' own day queries; a whole run is a day or more,
+# not hours, and has not been timed. Every filled row is an UPDATE that also writes a new index
+# entry, and the space that frees is reused, not returned to the OS. Re-running recomputes every
+# day in the range, filled or not: resume with FROM_DAY.
 #
 # Before hardfork 20 (2018-09-25) there is no RC to record, so the default range starts there.
 # On a HAF without rc_cost it changes nothing. Full history is roughly 2,900 days.
@@ -42,12 +44,17 @@ wait_for_postgres
 if [[ -z "${FROM_DAY_GIVEN}" ]]; then
     # Hardfork 20's first block with RC is 26,256,744. No recorded cost in the next 10,000 blocks
     # means this HAF was not replayed on 1.28.8: history has no rc_cost to backfill from.
-    recorded="$(psql_cmd -Atc "
-        SELECT EXISTS (
-            SELECT 1 FROM hafd.transactions
-            WHERE block_num BETWEEN 26256744 AND 26266743 AND rc_cost IS NOT NULL
-        )
-    " 2>/dev/null || echo f)"
+    # No error swallowing here: a failed connection must stop the script, not read as "not
+    # replayed". A HAF without the column cannot even parse the probe, so ask about that first.
+    recorded="$(psql_cmd -Atc "SELECT haf_stats_app.rc_cost_available()")"
+    if [[ "${recorded}" == "t" ]]; then
+        recorded="$(psql_cmd -Atc "
+            SELECT EXISTS (
+                SELECT 1 FROM hafd.transactions
+                WHERE block_num BETWEEN 26256744 AND 26266743 AND rc_cost IS NOT NULL
+            )
+        ")"
+    fi
     if [[ "${recorded}" != "t" ]]; then
         echo "No recorded RC cost at hardfork 20: this HAF was not replayed on 1.28.8 (or has no rc_cost)." >&2
         echo "Set FROM_DAY to the day HAF was upgraded, or later; earlier days have nothing to fill." >&2

@@ -1371,7 +1371,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account DApp footprint",
-        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. Defaults to the last 30 days.",
+        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. Defaults to the last 30 days.",
         "operationId": "haf_stats_endpoints.get_account_dapp_footprint",
         "parameters": [
           {
@@ -1573,7 +1573,7 @@ DECLARE
           "Network"
         ],
         "summary": "Network RC utilization",
-        "description": "Time-series of total RC consumption across the network, broken down by operation type, aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before each day).",
+        "description": "Time-series of total RC consumption across the network, broken down by operation type, aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before each day).",
         "operationId": "haf_stats_endpoints.get_network_rc_utilization",
         "parameters": [
           {
@@ -1658,7 +1658,7 @@ DECLARE
           "Network"
         ],
         "summary": "custom_json usage over time for one id",
-        "description": "Time-series of network-wide custom_json (op_type 18) usage for a single id (e.g. `follow`, `sm_claim_daily`): op_count, summed payload bytes, and the RC cost per period. Per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18 rc_op_stats_daily rate effective on/before each day); the column keeps its old name rc_estimate. Reads the network_custom_json_daily rollup.",
+        "description": "Time-series of network-wide custom_json (op_type 18) usage for a single id (e.g. `follow`, `sm_claim_daily`): op_count, summed payload bytes, and the RC cost per period. Per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18 rc_op_stats_daily rate effective on/before each day); the column keeps its old name rc_estimate. Reads the network_custom_json_daily rollup.",
         "operationId": "haf_stats_endpoints.get_network_custom_json_usage",
         "parameters": [
           {
@@ -1755,7 +1755,7 @@ DECLARE
           "Network"
         ],
         "summary": "Most-used custom_json ids / DApps",
-        "description": "Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked by op_count (or op_bytes / rc_estimate), returning at most limit_count ranked rows. group_by=id ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app collapses an app's ids to the registered DApp; group_by=category rolls up one level further (json_id is null for app, json_id and app_name are null for category). group_by=app and group_by=category PARTITION the window, so they append one extra Others row aggregating every group beyond limit_count, sorted last and emitted only when something is actually absorbed - the rows therefore always sum to the window total regardless of limit_count. Identify that row by its CATEGORY, which is null for group_by=app and Others for group_by=category: a real DApp id can itself resolve to the name Others, so app_name is not a reliable marker. group_by=id is a plain top-N and has no Others row. RC (the column rc_estimate, named before exact RC): per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day). Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.",
+        "description": "Leaderboard of the most-used network custom_json actions over [from_date, to_date], ranked by op_count (or op_bytes / rc_estimate), returning at most limit_count ranked rows. group_by=id ranks raw custom_json ids (each with its resolved DApp name + category); group_by=app collapses an app's ids to the registered DApp; group_by=category rolls up one level further (json_id is null for app, json_id and app_name are null for category). group_by=app and group_by=category PARTITION the window, so they append one extra Others row aggregating every group beyond limit_count, sorted last and emitted only when something is actually absorbed - the rows therefore always sum to the window total regardless of limit_count. Identify that row by its CATEGORY, which is null for group_by=app and Others for group_by=category: a real DApp id can itself resolve to the name Others, so app_name is not a reliable marker. group_by=id is a plain top-N and has no Others row. RC (the column rc_estimate, named before exact RC): per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc at the op-18 rate effective on/before each day). Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.",
         "operationId": "haf_stats_endpoints.get_network_top_custom_json",
         "parameters": [
           {
@@ -4912,7 +4912,7 @@ $$;
       breakdown tagged with its category (for a drill-down bar chart) - so the client
       renders the whole dashboard from one response. The primary metric is op COUNT
       (custom_json operations signed by the account). RC figures add up the per-account daily
-      rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A
+      rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A
       multi-signer op counts its whole RC for each signer, as it counts once per signer in
       op_count. Defaults to the last 30 days.
     operationId: haf_stats_endpoints.get_account_dapp_footprint
@@ -5223,7 +5223,7 @@ $$;
     summary: Network RC utilization
     description: >-
       Time-series of total RC consumption across the network, broken down by operation type,
-      aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE
+      aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE
       (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before
       each day).
     operationId: haf_stats_endpoints.get_network_rc_utilization
@@ -5395,7 +5395,7 @@ $$;
     description: >-
       Time-series of network-wide custom_json (op_type 18) usage for a single id (e.g. `follow`,
       `sm_claim_daily`): op_count, summed payload bytes, and the RC cost per period. Per day,
-      each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18
+      each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from the op-18
       rc_op_stats_daily rate effective on/before each day); the column keeps its old name
       rc_estimate. Reads the network_custom_json_daily rollup.
     operationId: haf_stats_endpoints.get_network_custom_json_usage
@@ -5544,7 +5544,7 @@ $$;
       Identify that row by its CATEGORY, which is null for group_by=app and Others for
       group_by=category: a real DApp id can itself resolve to the name Others, so app_name is
       not a reliable marker. group_by=id is a plain top-N and has no Others row. RC (the column
-      rc_estimate, named before exact RC): per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, once the row is complete or backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc +
+      rc_estimate, named before exact RC): per day, each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, when every operation behind the row had one or the row was backfilled), and otherwise the calibrated ESTIMATE (op_count*base_rc +
       op_bytes*byte_rc at the op-18 rate effective on/before each day).
       Reads the network_custom_json_daily rollup; app/category resolved via custom_json_app_registry.
     operationId: haf_stats_endpoints.get_network_top_custom_json

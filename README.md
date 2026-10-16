@@ -1205,7 +1205,11 @@ Measured read-only on a 1.28.8 node, the split of 10,000 blocks takes ~1.7 s for
 up exactly to the transactions' recorded RC. That is what a catch-up batch gains (its batches take
 20-112 s on busy history); live processing is a block at a time. A range of more than 100,000
 blocks is not split at all: the installer's one-time self-heal of an empty `network_custom_json_daily`
-runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill.
+runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill. Until
+then that table is all estimate while the other two may be exact, so `custom-json-usage` and the
+custom_json part of `rc-utilization` can differ. `rebuild_custom_json.sh` and
+`rebuild_network_custom_json.sh` refuse a `BATCH_SIZE` above 100,000 for the same reason: they
+truncate first and would replace exact rows with NULL ones.
 
 The split's weights come from `rc_op_stats_daily`, which the daily sampler extends, so a
 multi-operation transaction of mixed op types computed again later may divide a few units
@@ -1222,17 +1226,27 @@ It works one day at a time (`haf_stats_app.backfill_rc_exact(day)`), from hardfo
 (`FROM_DAY`, default 2018-09-25) to the last day the processor has finished (`TO_DAY`).
 
 - It only fills rows whose `rc_exact` is NULL, and only where it reproduces the row's
-  `op_count` and `op_bytes` from the chain. Per day it logs rows filled and rows it could not
-  fill because their counts differ (those keep the estimate).
+  `op_count` and `op_bytes` from the chain. Per day it logs rows filled and NULL rows it found
+  but could not fill because their counts differ (those keep the estimate). A row the chain no
+  longer produces at all is not counted.
 - It refuses a day the processor has not finished, so it can run while the processor runs.
-- It is resumable: re-run it, or set `FROM_DAY` to where it stopped.
+- It is resumable: set `FROM_DAY` to where it stopped. Re-running over days already filled
+  recomputes them in full (and changes nothing), so prefer `FROM_DAY` to a plain re-run.
 - On a node upgraded to 1.28.8 without a replay, history has no recorded cost. The script checks
   the hardfork-20 day and stops; set `FROM_DAY` to the upgrade day instead.
-- Cost, from the per-batch figures above: on the order of a few seconds per day for the split plus
-  the rollups' own day queries, over about 2,900 days. A whole run has not been timed. Each filled
-  row is an UPDATE: across ~560M `account_custom_json_daily` rows on a full node, expect WAL in the
-  order of 100 GB and table bloat until autovacuum catches up. Run it in chunks
-  (`FROM_DAY`/`TO_DAY`) if disk or replicas need it.
+- Time. A day is ~28,800 blocks, so from the per-batch figures above the split alone is ~5-10 s
+  per day, and each day also runs the three rollups' own day queries (catch-up batches of 10,000
+  blocks took 20-112 s on busy history). Over about 2,900 days expect a day or more, not hours. A
+  whole run has not been timed: time one busy day first.
+- Disk. Each filled row is an UPDATE. `account_custom_json_daily` (~560M rows, ~77 GB on a full
+  node) has only its primary key and full pages, so most updates write a new row version AND a new
+  index entry. Expect WAL of at least the order of 100 GB and the table and index to grow by tens of
+  GB; autovacuum makes that space reusable but does not give it back (only `pg_repack` or
+  `VACUUM FULL` does). Check free disk first, and run it in chunks (`FROM_DAY`/`TO_DAY`) if disk or
+  replicas need it.
+- Load. It reads each day's operations cold, which pushes the live processor's and the API's data
+  out of the cache. On a node serving traffic, run it in chunks at quiet hours and watch the
+  processor's batch times.
 
 ## DApp Attribution
 

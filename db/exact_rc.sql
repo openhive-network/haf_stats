@@ -176,15 +176,17 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_ops(BIGINT []) TO haf_stats
 -- one day at a time. Same rule as exact_rc_for_ops - whole transaction split by rc_avg_cost
 -- weights, floor plus the remainder to the highest op id - but driven by the range instead of by
 -- ids, so it reads hafd.transactions and hafd.operations through their block-range indexes rather
--- than probing one operation at a time. No cap: a batch is bounded by the processor's range.
+-- than probing one operation at a time.
 --
 -- Returns nothing on a HAF without rc_cost, like exact_rc_for_ops - and nothing for a range of
 -- more than 100,000 blocks. The processors work in batches of at most 10,000 (a catch-up sync)
--- or 1 (live), and the backfill a day (~28,800); the one caller with a bigger range is the
--- installer's self-heal of an empty network_custom_json_daily, which runs a processor over the
--- whole chain in one transaction. Splitting the whole chain's RC there would materialise every
--- transaction and user operation since hardfork 20; instead those rows come out without rc_exact
--- and scripts/backfill_rc_exact.sh fills them a day at a time.
+-- or 1 (live), and the backfill a day (~28,800). Bigger ranges come from the installer's
+-- self-heal of an empty network_custom_json_daily, which runs a processor over the whole chain in
+-- one transaction, and from a manual process_block_range over a big range. Splitting the whole
+-- chain's RC there would materialise every transaction and user operation since hardfork 20;
+-- instead those rows come out without rc_exact and scripts/backfill_rc_exact.sh fills them a day
+-- at a time. (The rebuild_*custom_json.sh scripts refuse a BATCH_SIZE above 100,000 for this
+-- reason: they truncate first, so they would replace exact rows with NULL ones.)
 DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_range(INT, INT, SMALLINT);
 DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_for_range(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_for_range(
@@ -251,9 +253,13 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stat
 -- The exact shares of one batch's operations, computed ONCE for the three rollups. The rollup
 -- functions (network_op_rows, network_custom_json_rows, account_custom_json_rows) each call this
 -- and then read the temp table, so a batch - or a backfilled day - splits its transactions' RC
--- once instead of three times. Same pattern as prepare_batch_authored_ops
--- (db/process_block_range.sql): the range-key GUC plus the temp table's existence make repeat calls
--- for the same range no-ops, and the table is ON COMMIT DROP, so each transaction rebuilds it.
+-- once instead of three times. Like prepare_batch_authored_ops (db/process_block_range.sql), the
+-- range-key GUC plus the temp table's existence make repeat calls for the same range no-ops; unlike
+-- it, the key is set transaction-local, so it ends with the ON COMMIT DROP table (and rolls back
+-- with it) instead of outliving it.
+--
+-- The table has a PRIMARY KEY on op_id, so an operation split twice would stop the batch rather
+-- than count twice; hafd.transactions holds one row per (block_num, trx_in_block).
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_exact_rc(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_exact_rc(
     _first_block INT,
@@ -299,7 +305,10 @@ $$;
 --     transaction's total); the first exact value stands;
 --   * the recomputed op_count and op_bytes equal what the row holds - so a row is never given the
 --     RC of a different set of operations. A NULL row that fails this is counted in
---     rows_mismatched and left NULL (the endpoints keep the estimate for it).
+--     rows_mismatched and left NULL (the endpoints keep the estimate for it). A NULL row with no
+--     recomputed group at all (or a group with no row) is neither filled nor counted: finding one
+--     would mean scanning the whole day of account_custom_json_daily, whose key leads with the
+--     account.
 --
 -- Refuses a day that is not entirely behind the processor (the day of
 -- app_status.last_processed_block or later): the processor may still add to that day's rows. A
