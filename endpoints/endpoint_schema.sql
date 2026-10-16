@@ -1110,7 +1110,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than 15,000 ops is priced entirely with the estimate, to keep the call fast. For group_by=app and group_by=category the custom_json buckets are still the byte-aware estimate from the per-account daily rollup; only their non-custom_json bucket is exact.",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than 15,000 ops is priced entirely with the estimate, to keep the call fast: a caller can tell by the response's op_count adding up to more than 15,000. For group_by=app and group_by=category the custom_json buckets are still the byte-aware estimate from the per-account daily rollup; only their non-custom_json bucket is exact, under the same 15,000-op limit.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -1206,7 +1206,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total when the account signed at most 15,000 ops in the window; above that rc-footprint is all estimate while each timeline event stays exact. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -4229,9 +4229,11 @@ $$;
       and for a multi-op transaction a share in proportion to the op-count estimate of each op.
       Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the
       calibrated rc_op_stats_daily rates). A window in which the account signed more than
-      15,000 ops is priced entirely with the estimate, to keep the call fast. For group_by=app
-      and group_by=category the custom_json buckets are still the byte-aware estimate from the
-      per-account daily rollup; only their non-custom_json bucket is exact.
+      15,000 ops is priced entirely with the estimate, to keep the call fast: a caller can tell
+      by the response's op_count adding up to more than 15,000. For group_by=app and
+      group_by=category the custom_json buckets are still the byte-aware estimate from the
+      per-account daily rollup; only their non-custom_json bucket is exact, under the same
+      15,000-op limit.
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
@@ -4451,12 +4453,17 @@ BEGIN
               AND ao.block_num BETWEEN _from_block AND _to_block
         ),
         noncj_ex AS MATERIALIZED (
-            -- Every signed op is handed over, custom_json included, although only the others are
-            -- priced here: the same array as group_by=op_type, so exact_rc_op_cap() makes the same
-            -- exact-or-estimate decision for both groupings of one window.
+            -- The cap is decided on ALL the window's signed ops, custom_json included - the count
+            -- group_by=op_type hands over - so both groupings of one window make the same
+            -- exact-or-estimate decision. Only the non-custom_json ops are then priced: the
+            -- custom_json buckets come from the rollup, and pricing those ops would be wasted reads.
             SELECT e.operation_id, e.rc_exact
             FROM haf_stats_app.exact_rc_for_ops(
-                ARRAY(SELECT s.operation_id FROM noncj_signed s WHERE s.operation_id IS NOT NULL)) e
+                CASE WHEN (SELECT count(s.operation_id) FROM noncj_signed s) > haf_stats_app.exact_rc_op_cap()
+                     THEN '{}'::BIGINT []
+                     ELSE ARRAY(SELECT s.operation_id FROM noncj_signed s
+                                WHERE s.operation_id IS NOT NULL AND s.op_type_id <> 18)
+                END) e
         ),
         noncj AS (
             -- Exact where the node records the transaction's RC cost, the op-count estimate
@@ -4508,7 +4515,8 @@ $$;
       transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and
       otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each
       event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed
-      over a window reconciles with that total. Optional op_type_filter / app_filter narrow the
+      over a window reconciles with that total when the account signed at most 15,000 ops in
+      the window; above that rc-footprint is all estimate while each timeline event stays exact. Optional op_type_filter / app_filter narrow the
       timeline to the events of one op type or DApp (the same events as the matching rc-footprint
       bucket; each event is still priced per op, so an app_filter sum matches the op_type total,
       not the byte-aware group_by=app figure). Pages via limit_count/offset_start,
@@ -4739,7 +4747,9 @@ BEGIN
     -- the op's EXACT share of its transaction's recorded RC cost where there is one
     -- (haf_stats_app.exact_rc_for_ops, issue #44), else the read-time ESTIMATE
     -- rc_avg_cost(op_type, day) - the same per-op rule as the aggregate's group_by=op_type, so
-    -- SUM(rc_consumed) over a window reconciles with that total. Order by account_op_seq_no DESC alone: within an account it is dense and
+    -- SUM(rc_consumed) over a window reconciles with that total, as long as the window holds at
+    -- most exact_rc_op_cap() signed ops (a page never exceeds it; the aggregate above it is all
+    -- estimate). Order by account_op_seq_no DESC alone: within an account it is dense and
     -- MONOTONIC with block_num (the invariant account_op_seq_range relies on), so it equals
     -- timestamp DESC while being served by the (account_id, seq) index - an Index Scan Backward
     -- that stops at OFFSET+LIMIT. Adding the computed block_num to the ORDER BY would instead force

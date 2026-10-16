@@ -46,12 +46,13 @@ $$;
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_cost_available() TO haf_stats_user;
 
 -- The most operations one call prices exactly (#44, decided 2026-10-16). Each costs about three
--- random reads (its operation, its transaction, the transaction's operations): measured on a
--- 1.28.8 node at ~0.2 ms an op when recently read and ~0.8 ms cold on old blocks, where 50,587
--- ops took 42 s, past the API role's 30 s statement_timeout (db/builtin_roles.sql). 15,000 keeps
--- a cold call around 13 s. A call asking for more gets no rows at all, so the caller prices the
--- whole response with the estimate rather than mixing the two. A function, not a literal, so the
--- CI lane can lower it to test that path.
+-- random reads (its operation, its transaction, the transaction's operations). Measured on a
+-- 1.28.8 node: ~0.2 ms an op on recent blocks (0.02 ms once cached), ~0.9 ms on uncached old
+-- blocks, where one account's 50,587 ops took 42 s, past the API role's 30 s statement_timeout
+-- (db/builtin_roles.sql), and 12,028 ops took 11.1 s. So 15,000 keeps a cold call around 14 s.
+-- A call asking for more gets no rows at all, so the caller prices the whole response with the
+-- estimate rather than mixing the two. A function, not a literal, so the CI lane can lower it to
+-- test that path.
 DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_op_cap();
 CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_op_cap()
 RETURNS INT

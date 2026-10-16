@@ -1157,19 +1157,25 @@ transaction, while the endpoints report per operation, so:
   its share, the transaction's highest op id also takes the remainder).
 
 Where there is no recorded cost (a HAF without the column, a transaction before hardfork 20) an
-operation is priced with the estimate, as before.
+operation is priced with the estimate, as before. Nothing has to be installed or rebuilt to
+switch: the function checks for the column when it runs.
 
 **A cap on exact pricing (decided 2026-10-16).** Each exactly priced operation costs about three
-random reads. Measured on a 1.28.8 node: ~0.2 ms an operation on recent blocks, ~0.8 ms cold on old
-ones, where one account's 50,587 operations in January 2022 took 42 s, past the API role's 30 s
-`statement_timeout`. So when a window holds more than 15,000 operations the account signed
+random reads. Measured on a 1.28.8 node: ~0.2 ms an operation on recent blocks, ~0.9 ms on uncached
+old ones, where one account's 50,587 operations in January 2022 took 42 s, past the API role's 30 s
+`statement_timeout` (and 12,028 operations in October 2021 took 11.1 s). So when a window holds more than 15,000 operations the account signed
 (`haf_stats_app.exact_rc_op_cap()`), `/account/{account}/rc-footprint` prices the whole response
-with the estimate instead. Both groupings of one window decide alike. The timeline is unaffected:
-it prices at most one page of 1,000 operations. Exact figures for every window are part of moving
-the rollups to exact RC. Nothing has to be installed or rebuilt to switch:
-the function checks for the column when it runs.
+with the estimate instead. Both groupings of one window decide alike. A caller can tell an
+all-estimate response by its `op_count` adding up to more than 15,000. The timeline still prices
+every event exactly (a page is at most 1,000 operations), so above the cap summing the timeline no
+longer matches the footprint total. Exact figures for every window are part of moving the rollups
+to exact RC.
 
-**Which figures are exact.** Those computed from the operation stream at read time:
+For operators: the limit is `haf_stats_app.exact_rc_op_cap()`, redefined from `db/exact_rc.sql`
+on every install, so change it there rather than in the database. If you lower `haf_stats_user`'s
+`statement_timeout`, lower the cap with it (about 0.9 ms per operation on cold, old blocks).
+
+**Which figures are exact.** Up to the cap above, those computed from the operation stream at read time:
 `/account/{account}/rc-footprint` with `group_by=op_type`, its `non-custom_json` bucket under
 `group_by=app` and `group_by=category`, and every event of `/account/{account}/rc-footprint-timeline`.
 The figures read from daily rollups are still estimates: the custom_json buckets of

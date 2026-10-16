@@ -69,6 +69,16 @@ $guard$;
 -- estimate, for BOTH groupings: the non-custom_json bucket alone (5 ops) is under the cap, so it must
 -- be decided on the same 7-op array as group_by=op_type. Estimate: 5 votes * 97,278,897 =
 -- 486,394,485; 2 custom_json * 167,828,015 = 335,656,030.
+-- The shipped value first: the rest of this file lowers it, so nothing else pins it, and the README
+-- and API text state it. NULL-safe: a NULL cap would make the check above it never fire.
+DO $guard$
+BEGIN
+    IF haf_stats_app.exact_rc_op_cap() IS DISTINCT FROM 15000 THEN
+        RAISE EXCEPTION 'FAIL (#44): exact_rc_op_cap() is %, but the README and the API description say 15,000', haf_stats_app.exact_rc_op_cap();
+    END IF;
+END
+$guard$;
+
 BEGIN;
 CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_op_cap()
 RETURNS INT LANGUAGE sql STABLE AS $$ SELECT 6 $$;
@@ -79,6 +89,7 @@ DECLARE
     _vote BIGINT;
     _cj BIGINT;
     _noncj BIGINT;
+    _noncj_cat BIGINT;
 BEGIN
     SELECT count(*) INTO _rows FROM haf_stats_app.exact_rc_for_ops(
         ARRAY[6500000001, 6500000011, 6500000012, 6500000013, 6501000001, 6502000001, 6502000011]::BIGINT []);
@@ -99,8 +110,12 @@ BEGIN
     SELECT f.rc_consumed INTO _noncj
     FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'app') f
     WHERE f.label = 'non-custom_json';
-    IF _vote IS DISTINCT FROM 486394485 OR _cj IS DISTINCT FROM 335656030 OR _noncj IS DISTINCT FROM 486394485 THEN
-        RAISE EXCEPTION 'FAIL (#44): over the cap the footprint should be all estimate (486394485 / 335656030 / 486394485), got % / % / %', _vote, _cj, _noncj;
+    SELECT f.rc_consumed INTO _noncj_cat
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'category') f
+    WHERE f.label = 'non-custom_json';
+    IF _vote IS DISTINCT FROM 486394485 OR _cj IS DISTINCT FROM 335656030
+       OR _noncj IS DISTINCT FROM 486394485 OR _noncj_cat IS DISTINCT FROM 486394485 THEN
+        RAISE EXCEPTION 'FAIL (#44): over the cap the footprint should be all estimate (486394485 / 335656030 / 486394485 / 486394485), got % / % / % / %', _vote, _cj, _noncj, _noncj_cat;
     END IF;
     RAISE NOTICE 'exact_rc_op_cap: over the cap no rows and an all-estimate footprint, as required';
 END
