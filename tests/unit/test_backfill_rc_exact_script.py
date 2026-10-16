@@ -40,7 +40,7 @@ def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, la
     bindir = stub_bin(tmp_path)
     log = tmp_path / "sql.log"
     days = tmp_path / "days"
-    days.write_text("\n".join(DAYS) + "\n", encoding="utf-8")
+    days.write_text("\n".join(DAYS) + "\n", encoding="utf-8", newline="\n")
 
     def answer(value: str) -> str:
         if value == "FAIL":
@@ -149,6 +149,7 @@ def test_a_single_day_is_filled(bash, tmp_path):
     assert "Nothing to do" not in proc.stderr
     day_list = next(s for s in statements if "generate_series" in s)
     assert "'2018-09-26'::DATE, '2018-09-26'::DATE" in day_list
+    assert backfilled_days(statements) == DAYS  # the stub's list: the loop ran
 
 
 @pytest.mark.parametrize("query", ["last_done", "days", "backfill"])
@@ -157,6 +158,8 @@ def test_a_failed_query_after_the_probes_stops_it_too(bash, tmp_path, query):
     proc, statements = run_backfill(bash, tmp_path, fail=query)
     assert proc.returncode != 0
     assert "server closed the connection" in proc.stderr
+    # Stopped BY the failure, not by a later refusal that an empty answer would reach.
+    assert "not finished any day" not in proc.stderr
     assert "backfill complete" not in proc.stdout + proc.stderr
     assert "no blocks" not in proc.stdout + proc.stderr
 
