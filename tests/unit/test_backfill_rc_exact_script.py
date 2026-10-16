@@ -30,11 +30,13 @@ def bash():
     return require_bash()
 
 
-def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, last_done=LAST_DONE_DAY):
+def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, last_done=LAST_DONE_DAY,
+                 fail=None):
     """Run the script with psql answering: rc_cost_available() -> `available`, the hardfork-20
     probe -> `recorded` (either may be FAIL: psql prints an error and exits 2, as on a lost
     connection), the last finished day -> `last_done` (empty: no processed block yet), the day
-    list -> DAYS."""
+    list -> DAYS. `fail` names one of the later queries ("last_done", "days", "backfill") to
+    fail the same way."""
     bindir = stub_bin(tmp_path)
     log = tmp_path / "sql.log"
     days = tmp_path / "days"
@@ -44,6 +46,8 @@ def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, la
         if value == "FAIL":
             return 'echo "psql: error: server closed the connection unexpectedly" >&2; exit 2'
         return f'echo "{value}"'
+
+    days_answer = f'cat "{days.as_posix()}"'
 
     write_exec(
         bindir / "psql",
@@ -58,9 +62,9 @@ def run_backfill(bash, tmp_path, available="t", recorded="t", env_extra=None, la
         'case "$cmd" in\n'
         f"  *rc_cost_available*) {answer(available)} ;;\n"
         f"  *26256744*) {answer(recorded)} ;;\n"
-        f'  *last_processed_block*) echo "{last_done}" ;;\n'
-        f'  *generate_series*) cat "{days.as_posix()}" ;;\n'
-        '  *backfill_rc_exact*) echo "network_op_daily=1 (mismatched 0)" ;;\n'
+        f'  *last_processed_block*) {answer("FAIL") if fail == "last_done" else answer(last_done)} ;;\n'
+        f'  *generate_series*) {answer("FAIL") if fail == "days" else days_answer} ;;\n'
+        f'  *backfill_rc_exact*) {answer("FAIL") if fail == "backfill" else answer("network_op_daily=1 (mismatched 0)")} ;;\n'
         "  *) : ;;\n"
         "esac\n"
         "exit 0\n",
@@ -126,13 +130,35 @@ def test_to_day_sets_the_end_of_the_range(bash, tmp_path):
 
 
 @pytest.mark.parametrize("knob", ["FROM_DAY", "TO_DAY"])
-@pytest.mark.parametrize("bad", ["2018-9-25", "2018-09-25'; SELECT 1; --"], ids=["short", "quote"])
+@pytest.mark.parametrize("bad", ["2018-9-25", "2018-09-25'; SELECT 1; --", "x'; SELECT 1; --2018-09-25",
+                                 "2018-0'-25"],
+                         ids=["short", "payload-after", "payload-before", "right-length"])
 def test_a_day_not_in_iso_form_is_refused_before_it_reaches_sql(bash, tmp_path, knob, bad):
     """The days are interpolated into SQL text; the YYYY-MM-DD check is all that stands there."""
     proc, statements = run_backfill(bash, tmp_path, env_extra={knob: bad})
     assert proc.returncode == 2, proc.stderr
     assert "Not a YYYY-MM-DD day" in proc.stderr
     assert not any(bad in s for s in statements)
+
+
+def test_a_single_day_is_filled(bash, tmp_path):
+    """FROM_DAY == TO_DAY is how a run resumes from the last day it logged."""
+    proc, statements = run_backfill(bash, tmp_path,
+                                    env_extra={"FROM_DAY": "2018-09-26", "TO_DAY": "2018-09-26"})
+    assert proc.returncode == 0, proc.stderr
+    assert "Nothing to do" not in proc.stderr
+    day_list = next(s for s in statements if "generate_series" in s)
+    assert "'2018-09-26'::DATE, '2018-09-26'::DATE" in day_list
+
+
+@pytest.mark.parametrize("query", ["last_done", "days", "backfill"])
+def test_a_failed_query_after_the_probes_stops_it_too(bash, tmp_path, query):
+    """A day that fails must not be logged as "no blocks" and the run reported complete."""
+    proc, statements = run_backfill(bash, tmp_path, fail=query)
+    assert proc.returncode != 0
+    assert "server closed the connection" in proc.stderr
+    assert "backfill complete" not in proc.stdout + proc.stderr
+    assert "no blocks" not in proc.stdout + proc.stderr
 
 
 def test_from_day_after_to_day_does_nothing(bash, tmp_path):
