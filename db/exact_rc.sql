@@ -7,9 +7,11 @@ SET ROLE haf_stats_owner;
 -- from hardfork 20 (block 26,256,744, when RC began) to the head; earlier transactions have
 -- NULL. A HAF older than 1.28.8 (1.28.6 and before) has no such column at all.
 --
--- The cost belongs to the TRANSACTION, and hived charges all of it to ONE account: the first
--- required authority (active, else owner, else posting) of the first operation that has one
--- (hive/hive libraries/chain/rc/resource_user.cpp). haf_stats reports per OPERATION and
+-- The cost belongs to the TRANSACTION, and hived charges all of it to ONE account, taken from the
+-- first operation that names one: for most operations the alphabetically first of its required
+-- active, else owner, else posting authorities; witness_set_properties, recover_account and
+-- witness_block_approve name theirs directly (hive/hive libraries/chain/rc/resource_user.cpp).
+-- haf_stats reports per OPERATION and
 -- attributes each operation to the account that signed it. So a per-account total built from
 -- these shares is the RC of the operations that account signed, not what it was charged: the
 -- two differ only for transactions carrying operations of more than one signer. Most

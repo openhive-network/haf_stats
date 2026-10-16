@@ -122,3 +122,29 @@ END
 $guard$;
 
 ROLLBACK;
+
+-- Exactly AT the cap (7, the window's 7 signed ops), both groupings must still price exactly: the
+-- votes are 410,545,865 under group_by=op_type and in the non-custom_json bucket of group_by=app.
+BEGIN;
+CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_op_cap()
+RETURNS INT LANGUAGE sql STABLE AS $$ SELECT 7 $$;
+
+DO $guard$
+DECLARE
+    _vote BIGINT;
+    _noncj BIGINT;
+BEGIN
+    SELECT f.rc_consumed INTO _vote
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') f
+    WHERE f.label = 'vote_operation';
+    SELECT f.rc_consumed INTO _noncj
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'app') f
+    WHERE f.label = 'non-custom_json';
+    IF _vote IS DISTINCT FROM 410545865 OR _noncj IS DISTINCT FROM 410545865 THEN
+        RAISE EXCEPTION 'FAIL (#44): at the cap both groupings should be exact (410545865 / 410545865), got % / %', _vote, _noncj;
+    END IF;
+    RAISE NOTICE 'exact_rc_op_cap: at the cap both groupings price exactly, as required';
+END
+$guard$;
+
+ROLLBACK;

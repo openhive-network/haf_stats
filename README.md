@@ -1149,8 +1149,9 @@ transaction, while the endpoints report per operation, so:
 - a transaction with several splits its cost in proportion to the op-count estimate each
   operation would have been priced at (`rc_avg_cost` for its op type, on its day). Every user
   operation of the transaction counts, including ones another account signed; virtual operations
-  take no share. hived charges a transaction's whole cost to one account (the first required
-  authority of its first operation that has one), so an account's total here is the RC of the
+  take no share. hived charges a transaction's whole cost to one account, taken from the first
+  operation that names one (usually the alphabetically first of its required active, else owner,
+  else posting authorities; see `db/exact_rc.sql`), so an account's total here is the RC of the
   operations it signed, which differs from what it was charged only for transactions with
   operations of more than one signer;
 - shares are whole RC units and add up to the transaction's cost exactly (each gets the floor of
@@ -1166,7 +1167,9 @@ old ones, where one account's 50,587 operations in January 2022 took 42 s, past 
 `statement_timeout` (and 12,028 operations in October 2021 took 11.1 s). So when a window holds more than 15,000 operations the account signed
 (`haf_stats_app.exact_rc_op_cap()`), `/account/{account}/rc-footprint` prices the whole response
 with the estimate instead. Both groupings of one window decide alike. A caller can tell an
-all-estimate response by its `op_count` adding up to more than 15,000. The timeline still prices
+all-estimate response by the `op_count` of a `group_by=op_type` response adding up to more than
+15,000 (under `app`/`category` the custom_json counts come from a daily rollup, so near 15,000 that
+sum is only approximate). Heavy accounts exceed the cap even in the default 30-day window. The timeline still prices
 every event exactly (a page is at most 1,000 operations), so above the cap summing the timeline no
 longer matches the footprint total. Exact figures for every window are part of moving the rollups
 to exact RC.
