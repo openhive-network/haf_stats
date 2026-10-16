@@ -75,6 +75,7 @@ db/
   process_financial.sql     ✓ Author rewards, curation, interest, transfers, power-up/down
   process_rc.sql            RC estimate: calibrated per-op-type rates (rc_avg_cost, rc_rate) and the account seq-range helper
   exact_rc.sql              Exact per-operation RC from hafd.transactions.rc_cost where HAF records it (#44); see Exact RC
+                            (also the range split the rollups use, and the rc_exact backfill)
   process_content_cohorts.sql
                             ✓ First-post author retention cohorts
   process_community_registry.sql
@@ -1178,13 +1179,42 @@ For operators: the limit is `haf_stats_app.exact_rc_op_cap()`, redefined from `d
 on every install, so change it there rather than in the database. If you lower `haf_stats_user`'s
 `statement_timeout`, lower the cap with it (about 0.9 ms per operation on cold, old blocks).
 
-**Which figures are exact.** Up to the cap above, those computed from the operation stream at read time:
-`/account/{account}/rc-footprint` with `group_by=op_type`, its `non-custom_json` bucket under
-`group_by=app` and `group_by=category`, and every event of `/account/{account}/rc-footprint-timeline`.
-The figures read from daily rollups are still estimates: the custom_json buckets of
-`group_by=app`/`category`, `/account/{account}/dapp-footprint`, `/network/rc-utilization`,
-`/network/custom-json-usage` and `/network/top-custom-json`. Moving those needs the rollups to
-record exact RC as they are built, and a backfill.
+**Which figures are exact.**
+
+- **Priced at read time, up to the cap above:** `/account/{account}/rc-footprint` with
+  `group_by=op_type`, its `non-custom_json` bucket under `group_by=app` and `group_by=category`,
+  and every event of `/account/{account}/rc-footprint-timeline`.
+- **Read from the daily rollups, per row, with no cap:** the custom_json buckets of
+  `group_by=app`/`category`, `/account/{account}/dapp-footprint`, `/network/rc-utilization`,
+  `/network/custom-json-usage` and `/network/top-custom-json`. Each daily row carries `rc_exact`
+  (below); a response adds up exact rows and estimated ones as they come. The columns named
+  `rc_estimate`/`total_rc_estimated` keep those names for compatibility.
+
+### Exact RC in the daily rollups
+
+`network_op_daily`, `network_custom_json_daily` and `account_custom_json_daily` carry `rc_exact`,
+filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`). A row's
+`rc_exact` is set only when every operation it counts had a recorded cost; otherwise it is NULL and
+the endpoints price that row with the estimate. A day that a batch without recorded costs touched
+stays NULL, so a row is never half exact. In `account_custom_json_daily` a custom_json signed by
+several accounts gives each signer its whole RC, as it already gives each its whole count and bytes.
+
+Measured on a 1.28.8 node, the split for 10,000 recent blocks (~218,000 operations) takes ~1.7 s,
+and its shares add up exactly to the transactions' recorded RC. The three processors each compute
+it for their batch.
+
+**After upgrading a synced node**, rows built before the column existed are NULL, and so is the row
+of the day the upgrade happened in. Fill them with:
+
+```bash
+./scripts/backfill_rc_exact.sh
+```
+
+It works one day at a time (`haf_stats_app.backfill_rc_exact(day)`), from hardfork 20
+(`FROM_DAY`, default 2018-09-25) to the last day the processor has finished (`TO_DAY`). It only
+writes `rc_exact`, only on rows whose counts it reproduces from the chain, and it refuses a day the
+processor has not finished, so it can run while the processor runs. It is resumable: re-run it,
+or set `FROM_DAY` to where it stopped. Full history is about 2,900 days.
 
 ## DApp Attribution
 

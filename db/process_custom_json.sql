@@ -68,6 +68,27 @@ SELECT haf_stats_app.apply_schema_migration(
     'account_custom_json_daily.rc_estimated (drop)'
 );
 
+
+-- #44 part 2: the EXACT RC of this row's operations, summed from their shares of the RC their
+-- transactions recorded (haf_stats_app.exact_rc_for_range, db/exact_rc.sql). NULL unless EVERY
+-- operation counted in the row had one: a row is exact or it is not, never half of each. NULL on a
+-- HAF without rc_cost, before hardfork 20, and for rows built before this column existed until
+-- scripts/backfill_rc_exact.sh has filled them. The endpoints use it where set and the estimate
+-- otherwise. Guarded: no ACCESS EXCLUSIVE lock where the column already exists (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS
+            AND a.attname = 'rc_exact'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_custom_json_daily
+     ADD COLUMN IF NOT EXISTS rc_exact BIGINT',
+    'account_custom_json_daily.rc_exact'
+);
+
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
@@ -81,38 +102,50 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
 
-DROP FUNCTION IF EXISTS haf_stats_app.process_custom_json;
-CREATE OR REPLACE FUNCTION haf_stats_app.process_custom_json(
+-- The rows process_custom_json adds for a block range, before they are merged into the table: one per
+-- group, with its op_count, op_bytes and exact RC (#44). The processor INSERTs them; the rc_exact
+-- backfill (haf_stats_app.backfill_rc_exact) compares them with what a past day already holds.
+DROP FUNCTION IF EXISTS haf_stats_app.account_custom_json_rows(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.account_custom_json_rows(
     _first_block INT,
     _last_block INT
 )
-RETURNS VOID
+RETURNS TABLE (account_id INT, day DATE, json_id TEXT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
+STABLE
 SET jit = OFF
 SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 AS $$
 BEGIN
-
-WITH ops AS MATERIALIZED (
-    -- One custom_json op per row, with its id, the day it landed, and its payload size.
+RETURN QUERY
+WITH ex AS MATERIALIZED (
+    SELECT e.operation_id, e.rc_exact
+    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block, 18::SMALLINT) AS e
+),
+ops AS MATERIALIZED (
+    -- One custom_json op per row, with its id, the day it landed, its payload size, and its
+    -- exact RC share where its transaction recorded one (#44).
     SELECT
         ov.id AS op_id,
         bv.created_at::DATE AS day,
         ov.body_value ->> 'id' AS json_id,
         ov.body_value AS body,
-        octet_length(ov.body_value::text) AS op_bytes
+        octet_length(ov.body_value::text) AS op_bytes,
+        ex.rc_exact
     FROM hafd.operations ov
     JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+    LEFT JOIN ex ON ex.operation_id = ov.id
     WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
       AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 ),
 -- Fan each op out to its signer(s): required_posting_auths UNION required_auths.
 -- UNION (not UNION ALL) dedups an account listed under both auths so it counts the op once.
--- The op's payload size rides along; for a (rare) multi-signer op each signer is attributed
--- the full op_bytes, consistent with op_count counting the op once per signer.
+-- The op's payload size and exact RC ride along; for a (rare) multi-signer op each signer is
+-- attributed the full op_bytes and the full rc_exact, consistent with op_count counting the op
+-- once per signer (the network rollup counts it once).
 signers AS (
-    SELECT o.op_id, o.day, o.json_id, o.op_bytes, s.signer
+    SELECT o.op_id, o.day, o.json_id, o.op_bytes, o.rc_exact, s.signer
     FROM ops o
     CROSS JOIN LATERAL (
         SELECT jsonb_array_elements_text(o.body -> 'required_posting_auths') AS signer
@@ -128,14 +161,33 @@ name_ids AS MATERIALIZED (
     FROM hive.accounts_view av
     WHERE av.name IN (SELECT DISTINCT signer FROM signers)
 )
-INSERT INTO haf_stats_backend.account_custom_json_daily AS acj (account_id, day, json_id, op_count, op_bytes)
-SELECT ni.id, sg.day, sg.json_id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT
+SELECT ni.id::INT, sg.day, sg.json_id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT,
+       -- Exact only when every op of the group has its share (#44); otherwise NULL.
+       CASE WHEN COUNT(sg.rc_exact) = COUNT(*) THEN SUM(sg.rc_exact) END::BIGINT
 FROM signers sg
 JOIN name_ids ni ON ni.name = sg.signer
-GROUP BY ni.id, sg.day, sg.json_id
+GROUP BY ni.id, sg.day, sg.json_id;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS haf_stats_app.process_custom_json;
+CREATE OR REPLACE FUNCTION haf_stats_app.process_custom_json(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+
+INSERT INTO haf_stats_backend.account_custom_json_daily AS acj (account_id, day, json_id, op_count, op_bytes, rc_exact)
+SELECT r.account_id, r.day, r.json_id, r.op_count, r.op_bytes, r.rc_exact
+FROM haf_stats_app.account_custom_json_rows(_first_block, _last_block) AS r
 ON CONFLICT (account_id, day, json_id) DO UPDATE SET
     op_count = acj.op_count + EXCLUDED.op_count,
-    op_bytes = acj.op_bytes + EXCLUDED.op_bytes;
+    op_bytes = acj.op_bytes + EXCLUDED.op_bytes,
+    rc_exact = acj.rc_exact + EXCLUDED.rc_exact;
 
 END;
 $$;

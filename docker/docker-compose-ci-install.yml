@@ -319,7 +319,7 @@ services:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_lock_holder.sql
     healthcheck:
-      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -Atc \"SELECT COUNT(DISTINCT relation) = 6 FROM pg_locks WHERE mode = 'AccessShareLock' AND granted AND relation IN ('haf_stats_backend.account_financial_daily'::regclass, 'haf_stats_backend.active_users_daily'::regclass, 'haf_stats_backend.comment_registry'::regclass, 'haf_stats_backend.account_custom_json_daily'::regclass, 'haf_stats_backend.account_cohort_retention'::regclass, 'haf_stats_backend.author_cohort_retention'::regclass)\" | grep -qx t"]
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -Atc \"SELECT COUNT(DISTINCT relation) = 8 FROM pg_locks WHERE mode = 'AccessShareLock' AND granted AND relation IN ('haf_stats_backend.account_financial_daily'::regclass, 'haf_stats_backend.active_users_daily'::regclass, 'haf_stats_backend.comment_registry'::regclass, 'haf_stats_backend.account_custom_json_daily'::regclass, 'haf_stats_backend.account_cohort_retention'::regclass, 'haf_stats_backend.author_cohort_retention'::regclass, 'haf_stats_backend.network_op_daily'::regclass, 'haf_stats_backend.network_custom_json_daily'::regclass)\" | grep -qx t"]
       interval: 1s
       timeout: 3s
       retries: 30

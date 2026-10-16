@@ -254,16 +254,16 @@ ON CONFLICT DO NOTHING;
 
 INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
 (6500000001, 1, '{}', 0),
-(6500000011, 18, '{"id": "sm_claim_daily"}', 1),
-(6500000012, 18, '{"id": "sm_claim_daily"}', 1),
+(6500000011, 18, '{"id": "sm_claim_daily", "required_posting_auths": ["rcexact"]}', 1),
+(6500000012, 18, '{"id": "sm_claim_daily", "required_posting_auths": ["rcexact"]}', 1),
 (6500000013, 1, '{}', 1),
 (6501000001, 1, '{}', 0),
-(6501000002, 18, '{"id": "follow"}', 0),
+(6501000002, 18, '{"id": "follow", "required_posting_auths": ["rcother"]}', 0),
 (6502000001, 1, '{}', 0),
 (6502000011, 1, '{}', 1),
 (6502000012, 64, '{}', 1),
 (6503000001, 1, '{}', 0),
-(6503000002, 18, '{"id": "sm_claim_daily"}', 0),
+(6503000002, 18, '{"id": "sm_claim_daily", "required_posting_auths": ["rcexact"]}', 0),
 (6503000011, 2, '{}', 1),
 (6503000012, 2, '{}', 1)
 ON CONFLICT (id) DO NOTHING;
@@ -958,6 +958,8 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     json_id TEXT NOT NULL,
     op_count INT NOT NULL DEFAULT 0,
     op_bytes BIGINT NOT NULL DEFAULT 0,
+    -- #44 part 2: the rollup's exact RC, NULL unless every op in the row had one.
+    rc_exact BIGINT,
     PRIMARY KEY (account_id, day, json_id)
 );
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
@@ -1080,6 +1082,8 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_op_daily (
     op_type_id SMALLINT NOT NULL,
     op_count BIGINT NOT NULL DEFAULT 0,
     op_bytes BIGINT NOT NULL DEFAULT 0,
+    -- #44 part 2: the rollup's exact RC, NULL unless every op in the row had one.
+    rc_exact BIGINT,
     PRIMARY KEY (day, op_type_id)
 );
 GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
@@ -1137,6 +1141,8 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_custom_json_daily (
     json_id TEXT NOT NULL,
     op_count BIGINT NOT NULL DEFAULT 0,
     op_bytes BIGINT NOT NULL DEFAULT 0,
+    -- #44 part 2: the rollup's exact RC, NULL unless every op in the row had one.
+    rc_exact BIGINT,
     PRIMARY KEY (day, json_id)
 );
 GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;

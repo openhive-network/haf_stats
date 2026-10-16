@@ -25,6 +25,27 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_op_daily (
     PRIMARY KEY (day, op_type_id)
 );
 
+
+-- #44 part 2: the EXACT RC of this row's operations, summed from their shares of the RC their
+-- transactions recorded (haf_stats_app.exact_rc_for_range, db/exact_rc.sql). NULL unless EVERY
+-- operation counted in the row had one: a row is exact or it is not, never half of each. NULL on a
+-- HAF without rc_cost, before hardfork 20, and for rows built before this column existed until
+-- scripts/backfill_rc_exact.sh has filled them. The endpoints use it where set and the estimate
+-- otherwise. Guarded: no ACCESS EXCLUSIVE lock where the column already exists (#96).
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.network_op_daily'::REGCLASS
+            AND a.attname = 'rc_exact'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.network_op_daily
+     ADD COLUMN IF NOT EXISTS rc_exact BIGINT',
+    'network_op_daily.rc_exact'
+);
+
 GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 
 -- ---------------------------------------------------------------------------
@@ -37,6 +58,41 @@ GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
 
+-- The rows process_network_ops adds for a block range, before they are merged into the table: one per
+-- group, with its op_count, op_bytes and exact RC (#44). The processor INSERTs them; the rc_exact
+-- backfill (haf_stats_app.backfill_rc_exact) compares them with what a past day already holds.
+DROP FUNCTION IF EXISTS haf_stats_app.network_op_rows(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.network_op_rows(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS TABLE (day DATE, op_type_id SMALLINT, op_count BIGINT, op_bytes BIGINT, rc_exact BIGINT)
+LANGUAGE plpgsql
+STABLE
+SET jit = OFF
+AS $$
+BEGIN
+RETURN QUERY
+WITH ex AS MATERIALIZED (
+    SELECT e.operation_id, e.rc_exact
+    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block) AS e
+)
+SELECT
+    bv.created_at::DATE AS day,
+    ov.op_type_id::SMALLINT,
+    COUNT(*)::BIGINT,
+    SUM(octet_length(ov.body_value::text))::BIGINT,
+    -- Exact only when every op of the group has its share (#44); otherwise NULL.
+    CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
+FROM hafd.operations ov
+JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+JOIN hafd.operation_types ot ON ot.id = ov.op_type_id AND ot.is_virtual = FALSE
+LEFT JOIN ex ON ex.operation_id = ov.id
+WHERE hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
+GROUP BY bv.created_at::DATE, ov.op_type_id;
+END;
+$$;
+
 DROP FUNCTION IF EXISTS haf_stats_app.process_network_ops;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_network_ops(
     _first_block INT,
@@ -48,20 +104,14 @@ SET jit = OFF
 AS $$
 BEGIN
 
-INSERT INTO haf_stats_backend.network_op_daily AS nod (day, op_type_id, op_count, op_bytes)
-SELECT
-    bv.created_at::DATE AS day,
-    ov.op_type_id,
-    COUNT(*)::BIGINT,
-    SUM(octet_length(ov.body_value::text))::BIGINT
-FROM hafd.operations ov
-JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-JOIN hafd.operation_types ot ON ot.id = ov.op_type_id AND ot.is_virtual = FALSE
-WHERE hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-GROUP BY bv.created_at::DATE, ov.op_type_id
+INSERT INTO haf_stats_backend.network_op_daily AS nod (day, op_type_id, op_count, op_bytes, rc_exact)
+SELECT r.day, r.op_type_id, r.op_count, r.op_bytes, r.rc_exact
+FROM haf_stats_app.network_op_rows(_first_block, _last_block) AS r
 ON CONFLICT (day, op_type_id) DO UPDATE SET
     op_count = nod.op_count + EXCLUDED.op_count,
-    op_bytes = nod.op_bytes + EXCLUDED.op_bytes;
+    op_bytes = nod.op_bytes + EXCLUDED.op_bytes,
+    -- NULL + anything is NULL: a day stays exact only while every batch that touched it was.
+    rc_exact = nod.rc_exact + EXCLUDED.rc_exact;
 
 END;
 $$;

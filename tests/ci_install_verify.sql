@@ -321,7 +321,7 @@ $shim$;
 
 -- The upgrade branch of the guarded migrations actually ran. (#96)
 --
--- tests/ci_break_schema.sql undid all 14 guarded upgrades before install-again: nine columns
+-- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: twelve columns
 -- dropped, rc_estimated put back, the pre-canonical income/expense CHECK restored NOT VALID, and
 -- one 'income' and one 'incoming' row written. Without break-schema only one of the 14 DDL strings
 -- (comment_registry.community's ADD COLUMN) ever ran in CI, so a typo in any other, or a catalog
@@ -339,6 +339,9 @@ BEGIN
         ('haf_stats_backend.comment_registry', 'community', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', FALSE),
+        ('haf_stats_backend.account_custom_json_daily', 'rc_exact', TRUE),
+        ('haf_stats_backend.network_op_daily', 'rc_exact', TRUE),
+        ('haf_stats_backend.network_custom_json_daily', 'rc_exact', TRUE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_7d', TRUE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_30d', TRUE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_90d', TRUE),
@@ -363,6 +366,8 @@ BEGIN
         ('haf_stats_backend.active_users_daily'),
         ('haf_stats_backend.comment_registry'),
         ('haf_stats_backend.account_custom_json_daily'),
+        ('haf_stats_backend.network_op_daily'),
+        ('haf_stats_backend.network_custom_json_daily'),
         ('haf_stats_backend.account_cohort_retention'),
         ('haf_stats_backend.author_cohort_retention')
     ) AS t (rel)
@@ -398,7 +403,7 @@ BEGIN
         RAISE EXCEPTION 'install: the canonical incoming row break-schema wrote is gone - the guarded DELETE removed a row it must keep';
     END IF;
 
-    RAISE NOTICE 'install verified: install-again re-applied all 14 guarded upgrades (9 columns back, rc_estimated gone, canonical CHECK validated, the income row deleted and the incoming row kept)';
+    RAISE NOTICE 'install verified: install-again re-applied all 17 guarded upgrades (12 columns back, rc_estimated gone, canonical CHECK validated, the income row deleted and the incoming row kept)';
 END
 $upgraded$;
 
