@@ -1157,7 +1157,16 @@ transaction, while the endpoints report per operation, so:
   its share, the transaction's highest op id also takes the remainder).
 
 Where there is no recorded cost (a HAF without the column, a transaction before hardfork 20) an
-operation is priced with the estimate, as before. Nothing has to be installed or rebuilt to switch:
+operation is priced with the estimate, as before.
+
+**A cap on exact pricing (decided 2026-10-16).** Each exactly priced operation costs about three
+random reads. Measured on a 1.28.8 node: ~0.2 ms an operation on recent blocks, ~0.8 ms cold on old
+ones, where one account's 50,587 operations in January 2022 took 42 s, past the API role's 30 s
+`statement_timeout`. So when a window holds more than 15,000 operations the account signed
+(`haf_stats_app.exact_rc_op_cap()`), `/account/{account}/rc-footprint` prices the whole response
+with the estimate instead. Both groupings of one window decide alike. The timeline is unaffected:
+it prices at most one page of 1,000 operations. Exact figures for every window are part of moving
+the rollups to exact RC. Nothing has to be installed or rebuilt to switch:
 the function checks for the column when it runs.
 
 **Which figures are exact.** Those computed from the operation stream at read time:

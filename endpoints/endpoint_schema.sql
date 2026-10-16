@@ -1110,7 +1110,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). For group_by=app and group_by=category the custom_json buckets are still the byte-aware estimate from the per-account daily rollup; only their non-custom_json bucket is exact.",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed (the RC payer). Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than 15,000 ops is priced entirely with the estimate, to keep the call fast. For group_by=app and group_by=category the custom_json buckets are still the byte-aware estimate from the per-account daily rollup; only their non-custom_json bucket is exact.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -4228,9 +4228,10 @@ $$;
       is priced with its EXACT share of that cost: the whole cost for a single-op transaction,
       and for a multi-op transaction a share in proportion to the op-count estimate of each op.
       Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the
-      calibrated rc_op_stats_daily rates). For group_by=app and group_by=category the
-      custom_json buckets are still the byte-aware estimate from the per-account daily rollup;
-      only their non-custom_json bucket is exact.
+      calibrated rc_op_stats_daily rates). A window in which the account signed more than
+      15,000 ops is priced entirely with the estimate, to keep the call fast. For group_by=app
+      and group_by=category the custom_json buckets are still the byte-aware estimate from the
+      per-account daily rollup; only their non-custom_json bucket is exact.
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
@@ -4361,7 +4362,9 @@ BEGIN
         -- (haf_stats_app.exact_rc_for_ops, issue #44: the op's share of hafd.transactions.rc_cost)
         -- and otherwise the op-count estimate avg_cost_rc, the rc_api average for the type at the
         -- rate effective on/before the op's day. The estimate still needs no per-op body join;
-        -- the exact path reads only the ops' transactions.
+        -- the exact path reads only the ops' transactions. A window with more signed ops than
+        -- haf_stats_app.exact_rc_op_cap() (15,000) is priced entirely with the estimate, which keeps
+        -- the call inside the API role's statement_timeout.
         RETURN QUERY
         WITH signed AS MATERIALIZED (
             SELECT ao.operation_id, ao.op_type_id, bv.created_at::DATE AS day
@@ -4446,9 +4449,11 @@ BEGIN
               AND ao.transacting_account_id = ao.account_id
               AND ao.account_op_seq_no BETWEEN _lo_seq AND _hi_seq
               AND ao.block_num BETWEEN _from_block AND _to_block
-              AND ao.op_type_id <> 18
         ),
         noncj_ex AS MATERIALIZED (
+            -- Every signed op is handed over, custom_json included, although only the others are
+            -- priced here: the same array as group_by=op_type, so exact_rc_op_cap() makes the same
+            -- exact-or-estimate decision for both groupings of one window.
             SELECT e.operation_id, e.rc_exact
             FROM haf_stats_app.exact_rc_for_ops(
                 ARRAY(SELECT s.operation_id FROM noncj_signed s WHERE s.operation_id IS NOT NULL)) e
@@ -4468,6 +4473,7 @@ BEGIN
                        COALESCE(SUM(x.rc_exact), 0)::NUMERIC  AS exact_rc
                 FROM noncj_signed s
                 LEFT JOIN noncj_ex x ON x.operation_id = s.operation_id
+                WHERE s.op_type_id <> 18
                 GROUP BY s.op_type_id, s.day
             ) t
         ),

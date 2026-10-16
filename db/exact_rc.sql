@@ -45,10 +45,29 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.rc_cost_available() TO haf_stats_user;
 
+-- The most operations one call prices exactly (#44, decided 2026-10-16). Each costs about three
+-- random reads (its operation, its transaction, the transaction's operations): measured on a
+-- 1.28.8 node at ~0.2 ms an op when recently read and ~0.8 ms cold on old blocks, where 50,587
+-- ops took 42 s, past the API role's 30 s statement_timeout (db/builtin_roles.sql). 15,000 keeps
+-- a cold call around 13 s. A call asking for more gets no rows at all, so the caller prices the
+-- whole response with the estimate rather than mixing the two. A function, not a literal, so the
+-- CI lane can lower it to test that path.
+DROP FUNCTION IF EXISTS haf_stats_app.exact_rc_op_cap();
+CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_op_cap()
+RETURNS INT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT 15000
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_op_cap() TO haf_stats_user;
+
 -- Exact RC share of each given operation. Returns one row per operation it can price: a
 -- non-virtual operation whose transaction has a recorded rc_cost. An operation it cannot
 -- price (no rc_cost on its transaction, a virtual op, an unknown id, a HAF without the column)
--- has NO row, and the caller prices it with the estimate instead.
+-- has NO row, and the caller prices it with the estimate instead. Neither does any op of a call
+-- asking for more than exact_rc_op_cap() ops.
 --
 -- Takes ids rather than an account or a range so each endpoint keeps its own way of choosing
 -- operations (and its own index), and only hands over what it already selected.
@@ -62,7 +81,9 @@ STABLE
 SET plan_cache_mode = force_custom_plan
 AS $$
 BEGIN
-    IF _op_ids IS NULL OR cardinality(_op_ids) = 0 OR NOT haf_stats_app.rc_cost_available() THEN
+    IF _op_ids IS NULL OR cardinality(_op_ids) = 0
+       OR cardinality(_op_ids) > haf_stats_app.exact_rc_op_cap()
+       OR NOT haf_stats_app.rc_cost_available() THEN
         RETURN;
     END IF;
 

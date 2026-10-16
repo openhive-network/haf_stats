@@ -62,3 +62,48 @@ BEGIN
     RAISE NOTICE 'exact_rc_for_ops contract: no row without a cost, only the asked-for ops';
 END
 $guard$;
+
+-- The cap (exact_rc_op_cap(), 15,000 on a node). Lowered to 6 inside a rolled-back transaction:
+-- rcexact signed 7 ops on 2021-03-20, 5 of them not custom_json. A call asking for more ops than the
+-- cap gets no rows, one at the cap gets its rows, and the endpoint prices the whole window with the
+-- estimate, for BOTH groupings: the non-custom_json bucket alone (5 ops) is under the cap, so it must
+-- be decided on the same 7-op array as group_by=op_type. Estimate: 5 votes * 97,278,897 =
+-- 486,394,485; 2 custom_json * 167,828,015 = 335,656,030.
+BEGIN;
+CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_op_cap()
+RETURNS INT LANGUAGE sql STABLE AS $$ SELECT 6 $$;
+
+DO $guard$
+DECLARE
+    _rows INT;
+    _vote BIGINT;
+    _cj BIGINT;
+    _noncj BIGINT;
+BEGIN
+    SELECT count(*) INTO _rows FROM haf_stats_app.exact_rc_for_ops(
+        ARRAY[6500000001, 6500000011, 6500000012, 6500000013, 6501000001, 6502000001, 6502000011]::BIGINT []);
+    IF _rows <> 0 THEN
+        RAISE EXCEPTION 'FAIL (#44): % row(s) for a call over the cap', _rows;
+    END IF;
+    SELECT count(*) INTO _rows FROM haf_stats_app.exact_rc_for_ops(
+        ARRAY[6500000001, 6500000011, 6500000012, 6500000013, 6501000001, 6502000011]::BIGINT []);
+    IF _rows <> 6 THEN
+        RAISE EXCEPTION 'FAIL (#44): % row(s) for a call AT the cap, expected 6', _rows;
+    END IF;
+    SELECT f.rc_consumed INTO _vote
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') f
+    WHERE f.label = 'vote_operation';
+    SELECT f.rc_consumed INTO _cj
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') f
+    WHERE f.label = 'custom_json_operation';
+    SELECT f.rc_consumed INTO _noncj
+    FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'app') f
+    WHERE f.label = 'non-custom_json';
+    IF _vote IS DISTINCT FROM 486394485 OR _cj IS DISTINCT FROM 335656030 OR _noncj IS DISTINCT FROM 486394485 THEN
+        RAISE EXCEPTION 'FAIL (#44): over the cap the footprint should be all estimate (486394485 / 335656030 / 486394485), got % / % / %', _vote, _cj, _noncj;
+    END IF;
+    RAISE NOTICE 'exact_rc_op_cap: over the cap no rows and an all-estimate footprint, as required';
+END
+$guard$;
+
+ROLLBACK;
