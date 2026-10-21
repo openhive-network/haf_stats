@@ -113,8 +113,9 @@ RUN case "${GIT_HASH}" in \
 # runtime user is a code path: haf_app_driver.py is `#!/usr/bin/env python3` without
 # -s, so ~/.local/lib/python3.*/site-packages/usercustomize.py -- or a planted psycopg2/
 # -- would run inside the block loop. PYTHONNOUSERSITE below disables the user site as
-# well, so neither defence depends on the other. Nothing here needs a home: psql runs
-# with -X and no history, libpq finds no ~/.pgpass, which is the intended state.
+# well, so neither defence depends on the other. Nothing here needs a home: psql and
+# libpq look for ~/.psqlrc, ~/.pgpass and ~/.postgresql/ and carry on when they are
+# missing, which is the intended state.
 #
 # This RUN is the LAST build step before USER: tests/unit/test_dockerfile_user.py
 # rejects any RUN/COPY/ADD after it, because a later COPY would land files with the
