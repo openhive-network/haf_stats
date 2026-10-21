@@ -2,7 +2,8 @@ FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3
 
 # Root for the BUILD steps only: WORKDIR creates /app root-owned and the RUN below writes
 # /app/db/version.sql into it. The runtime user is dropped to at the end of this file.
-USER root
+# `0`, not `root`: hadolint's DL3066 flags every non-numeric USER, not only the last.
+USER 0
 
 WORKDIR /app
 
@@ -80,11 +81,18 @@ RUN case "${GIT_HASH}" in \
 # connection names its role (POSTGRES_USER), so the OS user only matters to a `peer`
 # pg_hba rule, which neither this repo's stacks nor haf_api_node use for app containers.
 #
+# `chmod -R a+rX /app` because COPY keeps the BUILD CONTEXT's file modes, and those are
+# not always 644: scripts/openapi_rewrite.sh writes endpoints/rewrite_rules.conf through
+# mktemp, i.e. 0600, and CI's openapi-drift job runs it in the runner's shared checkout.
+# The first pipeline of this change built exactly that image -- a root-owned 0600 file
+# the runtime user could not read, invisible while the image ran as root.
+#
 # Added AFTER the version.sql RUN on purpose: tests/unit/test_version_provenance.py
 # extracts that RUN with a non-greedy match from the FIRST `^RUN`, so a RUN placed above
 # it would be swept into the script it executes.
 RUN addgroup -S -g 10001 haf_stats \
- && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats
+ && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats \
+ && chmod -R a+rX /app
 
 # Verb dispatcher: install_app | process_blocks | uninstall_app (#57). Every other
 # haf_api_node app image exposes that trio, which is what lets a module file say

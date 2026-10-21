@@ -45,6 +45,9 @@ def test_the_uid_is_created_with_that_number_and_without_sudo():
     # The base image grants haf_admin NOPASSWD sudo; the runtime user must not be added
     # to sudoers or to a group that has it.
     assert "sudo" not in create[0], create[0]
+    # COPY keeps the build context's modes, and CI's openapi-drift leaves
+    # endpoints/rewrite_rules.conf 0600 in the shared checkout (mktemp + mv).
+    assert re.search(r"\bchmod -R a\+rX /app$", create[0]), create[0]
 
 
 def test_nothing_after_the_final_user_switches_back():
