@@ -131,6 +131,11 @@ BEGIN
         WHERE f.label = 'non-custom_json') IS DISTINCT FROM 'estimated/0/6/true' THEN
         RAISE EXCEPTION 'FAIL (#101): over the cap the group_by=app non-custom_json row should read estimated/0/6/true';
     END IF;
+    IF (SELECT f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap
+        FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'category') f
+        WHERE f.label = 'non-custom_json') IS DISTINCT FROM 'estimated/0/6/true' THEN
+        RAISE EXCEPTION 'FAIL (#101): over the cap the group_by=category non-custom_json row should read estimated/0/6/true';
+    END IF;
     RAISE NOTICE 'exact_rc_op_cap: over the cap no rows and an all-estimate footprint, as required';
 END
 $guard$;

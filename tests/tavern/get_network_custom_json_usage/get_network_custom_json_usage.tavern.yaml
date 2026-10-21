@@ -28,10 +28,12 @@ stages:
           op_count: 12
           op_bytes: 120
           rc_estimate: 2400
+          rc_source: "estimated"
         - period: "2020-06-10"
           op_count: 10
           op_bytes: 100
           rc_estimate: 20000
+          rc_source: "estimated"
 
   - name: follow at granularity=month aggregates both days into one period
     request:
@@ -49,6 +51,7 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
 
   - name: a Gaming id (sm_claim_daily) returns only its single active day
     request:
@@ -64,3 +67,4 @@ stages:
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
