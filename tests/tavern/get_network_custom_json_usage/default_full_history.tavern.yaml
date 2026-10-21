@@ -26,3 +26,4 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"

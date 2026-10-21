@@ -26,11 +26,13 @@ stages:
       json:
         - period: "2020-06-05"
           rc_total: 15000
+          rc_source: "estimated"
           by_label:
             vote_operation: 10000
             custom_json_operation: 5000
         - period: "2020-06-10"
           rc_total: 70000
+          rc_source: "estimated"
           by_label:
             vote_operation: 50000
             custom_json_operation: 20000
@@ -48,6 +50,7 @@ stages:
       json:
         - period: "2020-06-01"
           rc_total: 85000
+          rc_source: "estimated"
           by_label:
             vote_operation: 60000
             custom_json_operation: 25000

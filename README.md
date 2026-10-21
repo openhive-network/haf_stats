@@ -821,7 +821,7 @@ Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths 
 | `GET /account/{account}/community-activity` | ✅ Live | process_content_stats.sql + process_community_registry.sql | Per-account created posts/comments grouped by community (replies attributed to their ROOT post's community), plus a personal-blog bucket that makes the buckets sum to `get_account_content_stats` |
 | `GET /account/{account}/interactions` | ✅ Live | *(on-demand, no processor)* | Per-account outgoing interactions by type (reply/vote/transfer/reblog/follow) and counterparty; Top-N partners per type plus an `Others` band |
 | `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql, exact_rc.sql | RC for an account's signed ops (exact where the node records it, see [Exact RC](#exact-rc)), grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
-| `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql, exact_rc.sql | Per-account RC (exact where recorded) as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
+| `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql, exact_rc.sql | Per-account RC (exact where recorded) as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq, rc_source) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
 | `GET /account/{account}/dapp-footprint` | ✅ Live | process_custom_json.sql | Per-account custom_json activity resolved to DApp names and categories |
 | `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
 | `GET /network/content-volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
@@ -1167,10 +1167,9 @@ random reads. Measured on a 1.28.8 node: ~0.2 ms an operation on recent blocks, 
 old ones, where one account's 50,587 operations in January 2022 took 42 s, past the API role's 30 s
 `statement_timeout` (and 12,028 operations in October 2021 took 11.1 s). So when a window holds more than 15,000 operations the account signed
 (`haf_stats_app.exact_rc_op_cap()`), `/account/{account}/rc-footprint` prices the whole response
-with the estimate instead. Both groupings of one window decide alike. A caller can tell an
-all-estimate response by the `op_count` of a `group_by=op_type` response adding up to more than
-15,000 (under `app`/`category` the custom_json counts come from a daily rollup, so near 15,000 that
-sum is only approximate). Heavy accounts exceed the cap even in the default 30-day window. The timeline still prices
+with the estimate instead. Both groupings of one window decide alike. Every row returns the cap
+(`rc_exact_op_cap`) and whether the window exceeded it (`rc_over_cap`), so a caller never has to
+hardcode 15,000 (see below). Heavy accounts exceed the cap even in the default 30-day window. The timeline still prices
 every event exactly (a page is at most 1,000 operations), so above the cap summing the timeline no
 longer matches the footprint total. Exact figures for every window are part of moving the rollups
 to exact RC.
@@ -1189,6 +1188,14 @@ on every install, so change it there rather than in the database. If you lower `
   `/network/custom-json-usage` and `/network/top-custom-json`. Each daily row carries `rc_exact`
   (below); a response adds up exact rows and estimated ones as they come. The columns named
   `rc_estimate`/`total_rc_estimated` keep those names for compatibility.
+- **Every response says which it got (#101).** `rc_source` is `recorded` (every op or rollup row
+  priced exactly), `estimated` (none) or `mixed`, on each row of all the endpoints above and at
+  the top level and on each item of `dapp-footprint` (`null` when the account has no ops). The
+  timeline's events are `recorded` or `estimated`. `rc-footprint` and `dapp-footprint` also return
+  `rc_exact_ops`, how many ops were priced exactly; `rc-footprint` returns `rc_exact_op_cap` and
+  `rc_over_cap` too. `rc_over_cap` explains an `estimated` per-op row; a custom_json bucket from
+  the uncapped rollup can be `recorded` while it is true, so read `rc_source` for each row. The
+  rollup-backed network endpoints count `rc_source` in daily rows, not ops.
 
 ### Exact RC in the daily rollups
 

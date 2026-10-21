@@ -70,11 +70,11 @@ $guard$;
 -- be decided on the same 7-op array as group_by=op_type. Estimate: 5 votes * 97,278,897 =
 -- 486,394,485; 2 custom_json * 167,828,015 = 335,656,030.
 -- The shipped value first: the rest of this file lowers it, so nothing else pins it, and the README
--- and API text state it. NULL-safe: a NULL cap would make the check above it never fire.
+-- states it (the API returns it as rc_exact_op_cap). NULL-safe: a NULL cap would make the check above it never fire.
 DO $guard$
 BEGIN
     IF haf_stats_app.exact_rc_op_cap() IS DISTINCT FROM 15000 THEN
-        RAISE EXCEPTION 'FAIL (#44): exact_rc_op_cap() is %, but the README and the API description say 15,000', haf_stats_app.exact_rc_op_cap();
+        RAISE EXCEPTION 'FAIL (#44): exact_rc_op_cap() is %, but the README says 15,000', haf_stats_app.exact_rc_op_cap();
     END IF;
 END
 $guard$;
@@ -117,6 +117,25 @@ BEGIN
        OR _noncj IS DISTINCT FROM 486394485 OR _noncj_cat IS DISTINCT FROM 486394485 THEN
         RAISE EXCEPTION 'FAIL (#44): over the cap the footprint should be all estimate (486394485 / 335656030 / 486394485 / 486394485), got % / % / % / %', _vote, _cj, _noncj, _noncj_cat;
     END IF;
+    -- #101: and every row must SAY so, with the cap that applied, in both groupings.
+    IF (SELECT string_agg(f.label || '=' || f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap,
+                          ',' ORDER BY f.label)
+        FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') f)
+       IS DISTINCT FROM 'custom_json_operation=estimated/0/6/true,vote_operation=estimated/0/6/true' THEN
+        RAISE EXCEPTION 'FAIL (#101): over the cap op_type rows should read estimated/0/6/true, got %',
+            (SELECT string_agg(f.label || '=' || f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap, ',')
+             FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') f);
+    END IF;
+    IF (SELECT f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap
+        FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'app') f
+        WHERE f.label = 'non-custom_json') IS DISTINCT FROM 'estimated/0/6/true' THEN
+        RAISE EXCEPTION 'FAIL (#101): over the cap the group_by=app non-custom_json row should read estimated/0/6/true';
+    END IF;
+    IF (SELECT f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap
+        FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'category') f
+        WHERE f.label = 'non-custom_json') IS DISTINCT FROM 'estimated/0/6/true' THEN
+        RAISE EXCEPTION 'FAIL (#101): over the cap the group_by=category non-custom_json row should read estimated/0/6/true';
+    END IF;
     RAISE NOTICE 'exact_rc_op_cap: over the cap no rows and an all-estimate footprint, as required';
 END
 $guard$;
@@ -142,6 +161,17 @@ BEGIN
     WHERE f.label = 'non-custom_json';
     IF _vote IS DISTINCT FROM 410545865 OR _noncj IS DISTINCT FROM 410545865 THEN
         RAISE EXCEPTION 'FAIL (#44): at the cap both groupings should be exact (410545865 / 410545865), got % / %', _vote, _noncj;
+    END IF;
+    -- #101: at the cap nothing is over it, and the votes are mixed - 4 of 5 recorded (seq 6's
+    -- transaction has no rc_cost), in both groupings.
+    IF (SELECT string_agg(f.rc_source || '/' || f.rc_exact_ops || '/' || f.rc_exact_op_cap || '/' || f.rc_over_cap, ',')
+        FROM (SELECT * FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'op_type') x
+              WHERE x.label = 'vote_operation'
+              UNION ALL
+              SELECT * FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-20', 'app') y
+              WHERE y.label = 'non-custom_json') f)
+       IS DISTINCT FROM 'mixed/4/7/false,mixed/4/7/false' THEN
+        RAISE EXCEPTION 'FAIL (#101): at the cap the vote rows should read mixed/4/7/false in both groupings';
     END IF;
     RAISE NOTICE 'exact_rc_op_cap: at the cap both groupings price exactly, as required';
 END

@@ -17,6 +17,9 @@ includes:
 # with each json_id resolved to its DApp name via custom_json_app_registry (sm_claim_daily
 # starts_with 'sm_' -> "Splinterlands"); other signed ops roll into one non-custom_json
 # bucket (the 4 votes = 389115588).
+# #101: every row says how it was priced. rctester and dapptester have no recorded rc_cost, so
+# rc_source is "estimated" with 0 exact ops; rcexact's rows below are "recorded" or "mixed".
+# rc_exact_op_cap is the node's 15,000 and none of these windows exceeds it.
 stages:
   - name: group_by=op_type ranks op types by estimated RC (excludes received + virtual ops)
     request:
@@ -34,10 +37,18 @@ stages:
           rc_consumed: 389115588
           op_count: 4
           pct: 53.69
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "custom_json_operation"
           rc_consumed: 335656030
           op_count: 2
           pct: 46.31
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   - name: group_by=app resolves custom_json apps to DApp names, split from a non-custom_json bucket
     request:
@@ -55,10 +66,18 @@ stages:
           rc_consumed: 389115588
           op_count: 4
           pct: 99.99
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Splinterlands"
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # group_by=category rolls each app one registry level up: sm_claim_daily -> Splinterlands -> the
   # "Gaming" category (same byte-aware 22000/2 figures relabelled), while the non-custom_json bucket
@@ -79,10 +98,18 @@ stages:
           rc_consumed: 389115588
           op_count: 4
           pct: 99.99
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Gaming"
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
 ---
 test_name: Account RC footprint group_by=app merges shared DApps and keeps unmatched ids raw
@@ -118,18 +145,34 @@ stages:
           rc_consumed: 85000
           op_count: 5
           pct: 75.22
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Hivemind Follow"
           rc_consumed: 15000
           op_count: 10
           pct: 13.27
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Hive Engine (SSC)"
           rc_consumed: 7000
           op_count: 20
           pct: 6.19
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Splinterlands"
           rc_consumed: 6000
           op_count: 30
           pct: 5.31
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # group_by=category rolls those same apps up to their registry categories, exercising the
   # Uncategorized fallback: mystery_app (no registry match) -> Uncategorized, follow -> Social Graph,
@@ -151,18 +194,34 @@ stages:
           rc_consumed: 85000
           op_count: 5
           pct: 75.22
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Social Graph"
           rc_consumed: 15000
           op_count: 10
           pct: 13.27
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "DeFi & Tokens"
           rc_consumed: 7000
           op_count: 20
           pct: 6.19
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Gaming"
           rc_consumed: 6000
           op_count: 30
           pct: 5.31
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # #44: rcexact's ops sit in transactions with a recorded rc_cost (ci_setup.sql), so each is
   # priced with its EXACT share of its transaction's cost, not the op-count estimate. The one
@@ -186,10 +245,18 @@ stages:
           rc_consumed: 410545865
           op_count: 5
           pct: 56.97
+          rc_source: "mixed"
+          rc_exact_ops: 4
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "custom_json_operation"
           rc_consumed: 310121460
           op_count: 2
           pct: 43.03
+          rc_source: "recorded"
+          rc_exact_ops: 2
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # The non-custom_json bucket of group_by=app takes the same exact path (the 5 votes,
   # 410,545,865). The custom_json bucket still comes from the per-account rollup, which carries
@@ -210,10 +277,18 @@ stages:
           rc_consumed: 410545865
           op_count: 5
           pct: 99.99
+          rc_source: "mixed"
+          rc_exact_ops: 4
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "Splinterlands"
           rc_consumed: 22000
           op_count: 2
           pct: 0.01
+          rc_source: "estimated"
+          rc_exact_ops: 0
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # #44, rcexact's second day (ci_setup.sql, block 6503): the vote's weight is the vote rate of
   # THAT day (300,000,000), and the two transfers have a zero rate, clamped to weight 1 each.
@@ -233,14 +308,26 @@ stages:
           rc_consumed: 384756778
           op_count: 1
           pct: 64.02
+          rc_source: "recorded"
+          rc_exact_ops: 1
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "custom_json_operation"
           rc_consumed: 215243222
           op_count: 1
           pct: 35.81
+          rc_source: "recorded"
+          rc_exact_ops: 1
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "transfer_operation"
           rc_consumed: 1000001
           op_count: 2
           pct: 0.17
+          rc_source: "recorded"
+          rc_exact_ops: 2
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
 
   # Both days in one call: each transaction is still split at its own day's rates, so the figures
   # are the two single-day results added up.
@@ -260,11 +347,23 @@ stages:
           rc_consumed: 795302643
           op_count: 6
           pct: 60.17
+          rc_source: "mixed"
+          rc_exact_ops: 5
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "custom_json_operation"
           rc_consumed: 525364682
           op_count: 3
           pct: 39.75
+          rc_source: "recorded"
+          rc_exact_ops: 3
+          rc_exact_op_cap: 15000
+          rc_over_cap: false
         - label: "transfer_operation"
           rc_consumed: 1000001
           op_count: 2
           pct: 0.08
+          rc_source: "recorded"
+          rc_exact_ops: 2
+          rc_exact_op_cap: 15000
+          rc_over_cap: false

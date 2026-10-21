@@ -1,6 +1,6 @@
 [
-  { "period": "2016-06-01", "op_count": 1147, "op_bytes": 191505, "rc_estimate": 117837314032 },
-  { "period": "2016-07-01", "op_count": 32888, "op_bytes": 5487354, "rc_estimate": 3377008210928 },
-  { "period": "2016-08-01", "op_count": 313903, "op_bytes": 52903192, "rc_estimate": 32483278823768 },
-  { "period": "2016-09-01", "op_count": 129759, "op_bytes": 23362022, "rc_estimate": 14137013472104 }
+  { "period": "2016-06-01", "op_count": 1147, "op_bytes": 191505, "rc_estimate": 117837314032, "rc_source": "estimated" },
+  { "period": "2016-07-01", "op_count": 32888, "op_bytes": 5487354, "rc_estimate": 3377008210928, "rc_source": "estimated" },
+  { "period": "2016-08-01", "op_count": 313903, "op_bytes": 52903192, "rc_estimate": 32483278823768, "rc_source": "estimated" },
+  { "period": "2016-09-01", "op_count": 129759, "op_bytes": 23362022, "rc_estimate": 14137013472104, "rc_source": "estimated" }
 ]

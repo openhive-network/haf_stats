@@ -68,6 +68,24 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_op_cap() TO haf_stats_user;
 
+-- How a figure was priced, for the RC endpoints' rc_source field (#101): recorded when all of its
+-- units (ops, or daily rollup rows) were priced with the recorded RC, estimated when none were,
+-- mixed otherwise. One definition so the four endpoints cannot disagree on the rule.
+DROP FUNCTION IF EXISTS haf_stats_app.rc_source_label(BIGINT, BIGINT);
+CREATE OR REPLACE FUNCTION haf_stats_app.rc_source_label(_exact BIGINT, _total BIGINT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN COALESCE(_exact, 0) <= 0 THEN 'estimated'
+        WHEN _exact >= _total THEN 'recorded'
+        ELSE 'mixed'
+    END
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.rc_source_label(BIGINT, BIGINT) TO haf_stats_user;
+
 -- Exact RC share of each given operation. Returns one row per operation it can price: a
 -- non-virtual operation whose transaction has a recorded rc_cost. An operation it cannot
 -- price (no rc_cost on its transaction, a virtual op, an unknown id, a HAF without the column)

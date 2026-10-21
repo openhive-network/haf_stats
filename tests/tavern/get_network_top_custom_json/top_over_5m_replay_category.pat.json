@@ -1,4 +1,4 @@
 [
-  { "json_id": null, "app_name": null, "category": "Social Graph", "op_count": 477707, "op_bytes": 81946231, "rc_estimate": 50116397155392 },
-  { "json_id": null, "app_name": null, "category": "Uncategorized", "op_count": 12, "op_bytes": 2118, "rc_estimate": 1287191472 }
+  { "json_id": null, "app_name": null, "category": "Social Graph", "op_count": 477707, "op_bytes": 81946231, "rc_estimate": 50116397155392, "rc_source": "estimated" },
+  { "json_id": null, "app_name": null, "category": "Uncategorized", "op_count": 12, "op_bytes": 2118, "rc_estimate": 1287191472, "rc_source": "estimated" }
 ]

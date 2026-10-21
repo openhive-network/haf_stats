@@ -26,18 +26,21 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: "sm_claim_daily"
           app_name: "Splinterlands"
           category: "Gaming"
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
         - json_id: "actifit"
           app_name: "Actifit"
           category: "Community & Social DApps"
           op_count: 5
           op_bytes: 50
           rc_estimate: 1000
+          rc_source: "estimated"
 
   - name: group_by=category rolls ids up to their category (json_id + app_name null)
     request:
@@ -54,18 +57,21 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: null
           category: "Gaming"
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
         - json_id: null
           app_name: null
           category: "Community & Social DApps"
           op_count: 5
           op_bytes: 50
           rc_estimate: 1000
+          rc_source: "estimated"
 
   - name: group_by=app rolls ids up to the registered DApp (json_id null)
     request:
@@ -82,18 +88,21 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: "Splinterlands"
           category: "Gaming"
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
         - json_id: null
           app_name: "Actifit"
           category: "Community & Social DApps"
           op_count: 5
           op_bytes: 50
           rc_estimate: 1000
+          rc_source: "estimated"
 
   - name: limit_count truncates to the single top row
     request:
@@ -110,6 +119,7 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
 
   # group_by=app/category PARTITION the window, so limit_count keeps the top N and folds the rest
   # into one Others band rather than dropping it - the rows still sum to the window total
@@ -135,12 +145,14 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: "Others"
           category: null
           op_count: 13
           op_bytes: 130
           rc_estimate: 2600
+          rc_source: "estimated"
 
   - name: limit_count=1 on group_by=category folds two categories, Others carries the label
     request:
@@ -158,12 +170,14 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: null
           category: "Others"
           op_count: 13
           op_bytes: 130
           rc_estimate: 2600
+          rc_source: "estimated"
 
   # The boundary: one group named short of the total, so the band holds exactly the last group.
   - name: limit_count=2 names two groups and bands only the third
@@ -182,18 +196,21 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: "Splinterlands"
           category: "Gaming"
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
         - json_id: null
           app_name: "Others"
           category: null
           op_count: 5
           op_bytes: 50
           rc_estimate: 1000
+          rc_source: "estimated"
 
   # The band is emitted only when it actually absorbs something: with limit_count at or above the
   # group count every group is named and no zero-filled band appears.
@@ -213,18 +230,21 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: "Splinterlands"
           category: "Gaming"
           op_count: 8
           op_bytes: 80
           rc_estimate: 1600
+          rc_source: "estimated"
         - json_id: null
           app_name: "Actifit"
           category: "Community & Social DApps"
           op_count: 5
           op_bytes: 50
           rc_estimate: 1000
+          rc_source: "estimated"
 
   # order_by=rc_estimate on the app branch: the only path that ranks a top-N on a NUMERIC metric,
   # and the one where a tie-break bug would surface. follow's mid-window rate step (2400 on 06-05
@@ -246,9 +266,11 @@ stages:
           op_count: 22
           op_bytes: 220
           rc_estimate: 22400
+          rc_source: "estimated"
         - json_id: null
           app_name: "Others"
           category: null
           op_count: 13
           op_bytes: 130
           rc_estimate: 2600
+          rc_source: "estimated"

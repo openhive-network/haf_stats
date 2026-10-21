@@ -29,12 +29,12 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8}
-        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1, rc_source: "estimated"}
 
   - name: limit_count + offset_start page into the middle of the ordered timeline
     request:
@@ -49,8 +49,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
 
   # Keyset cursor: before_seq=4 returns only events with op_seq < 4 (the same rows offset_start=3
   # would reach), served by the index with no offset walk.
@@ -66,9 +66,9 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1, rc_source: "estimated"}
 
   - name: op_type_filter drills into a single op-type bucket (the 4 signed votes)
     request:
@@ -82,10 +82,10 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8}
-        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1}
+        - {timestamp: "2021-03-10T00:00:00", block_num: 6000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 8, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:01:00", block_num: 5001, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 7, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 2, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 1, rc_source: "estimated"}
 
   # app_filter resolves the account's json_ids from account_custom_json_daily (rctester seeded with
   # sm_claim_daily -> Splinterlands), then scans the raw op-18 rows for that id set.
@@ -101,8 +101,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
 
   # app_filter for a DApp the account never signed short-circuits via the rollup (no raw op scan).
   - name: app_filter for an app the account never used returns empty (rollup fast-reject)
@@ -133,8 +133,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
 
   # category_filter for a category the account never used short-circuits via the rollup (no op scan).
   - name: category_filter for a category the account never used returns empty (rollup fast-reject)
@@ -165,8 +165,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4}
-        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 4, rc_source: "estimated"}
+        - {timestamp: "2021-03-01T00:00:00", block_num: 5000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
 
   # Splinterlands is NOT in the NFTs category, so the intersection is empty (no json_id resolves to
   # both) - the rollup fast-reject returns empty without an op scan.
@@ -241,8 +241,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2}
-        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2, rc_source: "estimated"}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1, rc_source: "estimated"}
 
   # category_filter=Uncategorized drills into the unmatched-id bucket; app falls back to the raw id.
   - name: category_filter=Uncategorized returns unmatched-id events with the raw id as app
@@ -257,7 +257,7 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "mystery_cat", custom_json_id: "mystery_cat", rc_consumed: 167828015, op_seq: 3}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "mystery_cat", custom_json_id: "mystery_cat", rc_consumed: 167828015, op_seq: 3, rc_source: "estimated"}
 
   # op_type_filter=custom_json_operation is consistent with a category_filter (both select op 18),
   # so the contradiction guard must NOT fire - the result equals the plain category_filter=Gaming.
@@ -274,8 +274,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2}
-        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Rising Star", custom_json_id: "risingstar", rc_consumed: 167828015, op_seq: 2, rc_source: "estimated"}
+        - {timestamp: "2020-06-01T00:00:00", block_num: 4000, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 167828015, op_seq: 1, rc_source: "estimated"}
 
   # #44: per-event EXACT shares for rcexact (ci_setup.sql). The vote of seq 6 sits in a
   # transaction with no rc_cost and keeps the estimate; seq 7's transaction also holds a virtual
@@ -292,13 +292,13 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 50000000, op_seq: 7}
-        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 6}
-        - {timestamp: "2021-03-20T00:00:03", block_num: 6501, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 73388427, op_seq: 5}
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 89878541, op_seq: 4}
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3}
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2}
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 100000000, op_seq: 1}
+        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 50000000, op_seq: 7, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:06", block_num: 6502, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 97278897, op_seq: 6, rc_source: "estimated"}
+        - {timestamp: "2021-03-20T00:00:03", block_num: 6501, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 73388427, op_seq: 5, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 89878541, op_seq: 4, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 100000000, op_seq: 1, rc_source: "recorded"}
 
   # The app_filter branch reads the raw custom_json ops through a different query; it prices them
   # exactly too.
@@ -314,8 +314,8 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3}
-        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 3, rc_source: "recorded"}
+        - {timestamp: "2021-03-20T00:00:00", block_num: 6500, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 155060730, op_seq: 2, rc_source: "recorded"}
 
   # Day two (block 6503): the remainder of the zero-rate split goes to the higher id (seq 12).
   - name: second-day events, including an even split under a zero rate
@@ -329,7 +329,7 @@ stages:
     response:
       status_code: 200
       json:
-        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500001, op_seq: 12}
-        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500000, op_seq: 11}
-        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 215243222, op_seq: 10}
-        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 384756778, op_seq: 9}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500001, op_seq: 12, rc_source: "recorded"}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "transfer_operation", app: null, custom_json_id: null, rc_consumed: 500000, op_seq: 11, rc_source: "recorded"}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "custom_json_operation", app: "Splinterlands", custom_json_id: "sm_claim_daily", rc_consumed: 215243222, op_seq: 10, rc_source: "recorded"}
+        - {timestamp: "2021-03-21T00:00:00", block_num: 6503, op_type: "vote_operation", app: null, custom_json_id: null, rc_consumed: 384756778, op_seq: 9, rc_source: "recorded"}
