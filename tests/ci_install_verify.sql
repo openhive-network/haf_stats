@@ -193,7 +193,8 @@ BEGIN
     -- context row.
     --
     -- So this assertion is the single most valuable line in the lane: on a node the
-    -- failure it catches is SILENT, not loud.
+    -- failure it catches is SILENT, not loud. (In CI it fails loudly only because the table
+    -- is owned by postgres there, while the install has already SET ROLE to a non-owner.)
     IF _owner <> 'haf_stats_owner' THEN
         RAISE EXCEPTION 'install: the context is owned by %, not haf_stats_owner. The '
                         'installer did not SET ROLE, so the grants and RLS this lane '
@@ -312,7 +313,7 @@ $shim$;
 --
 -- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: twelve columns
 -- dropped, rc_estimated put back, the pre-canonical income/expense CHECK restored NOT VALID, and
--- one 'income' and one 'incoming' row written. Without break-schema only one of the 14 DDL strings
+-- one 'income' and one 'incoming' row written. Without break-schema only one of the 17 DDL strings
 -- (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or a catalog
 -- test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).

@@ -342,15 +342,15 @@ USING (hive.can_impersonate(current_user, owner));
 -- Typing the arguments as the domains rather than as INT/TEXT is what makes the CHECKs fire
 -- at the CALL, as they do upstream, instead of at the cast inside.
 --
--- Retired signatures. CREATE OR REPLACE cannot remove an overload, and both of these changed shape after the
--- file had already been loaded on some databases: hive.stage was (TEXT, INT, INT, INTERVAL)
--- and hive.app_context_attach took a second _block_num. On a fresh CI postgres this is a
--- no-op; locally, `docker compose up` without `down -v` across a branch switch would leave
--- the old ones behind, and hive.app_context_attach('haf_stats') would then be AMBIGUOUS
--- against a 2-arg overload with a defaulted second parameter. Every other object in this
--- file is written to survive a re-run (IF NOT EXISTS on all 10 type objects, 6 DROP POLICY
--- IF EXISTS before 3 CREATE POLICY), and these DROP FUNCTIONs (with the two before
--- app_create_context) make the functions survive one too.
+-- Retired signatures. CREATE OR REPLACE cannot remove an overload, and both of these
+-- changed shape after the file had already been loaded on some databases: hive.stage was
+-- (TEXT, INT, INT, INTERVAL) and hive.app_context_attach took a second _block_num. On a
+-- fresh CI postgres this is a no-op; locally, `docker compose up` without `down -v` across
+-- a branch switch would leave the old ones behind, and hive.app_context_attach('haf_stats')
+-- would then be AMBIGUOUS against a 2-arg overload with a defaulted second parameter. Every
+-- other object in this file is written to survive a re-run (IF NOT EXISTS on all 10 type
+-- objects, 6 DROP POLICY IF EXISTS before 3 CREATE POLICY), and these DROP FUNCTIONs (with
+-- the two before app_create_context) make the functions survive one too.
 DROP FUNCTION IF EXISTS hive.stage(TEXT, INT, INT, INTERVAL);
 -- The DOMAIN-TYPED signature too, and this one is not optional. #87 changed this
 -- function's RETURN type from hive.stage to hafd.application_stage, and CREATE OR
@@ -592,8 +592,8 @@ $$;
 -- and nothing on a node either, where HAF issues the same group grant. :81 is
 -- belt-and-braces, and no assertion can defend a grant that nothing needs.
 --
--- AND THE ROLE TOPOLOGY HERE IS NOT THE NODE'S. Measured on testapi, before an installer
--- carrying #88 has run there:
+-- AND THE ROLE TOPOLOGY HERE IS NOT NECESSARILY THE NODE'S. A node whose role predates
+-- the #88 installer carries
 --   haf_stats_user  rolinherit = t, LOGIN, and a DIRECT member of hive_applications_group
 -- That installer removes the group edge, after which only the INHERIT flag still differs.
 -- db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group, so this
