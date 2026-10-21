@@ -571,7 +571,9 @@ and read-only to it: the only file the processes write is the healthcheck's star
 timestamp, `/tmp/block_processing_startup_time.txt`. If you point
 `HAF_STATS_STARTUP_TIME_FILE` (or the driver's `LOG_FILE`) at a mounted volume, that
 volume must be writable by uid 10001; a root-owned path now fails with `Permission
-denied`. Likewise a node-local override that bind-mounts files into `/app` must leave
+denied`. The same goes for a root-owned volume mounted over `/tmp` itself, which
+breaks the default `/tmp/block_processing_startup_time.txt` with
+`HAF_STATS_STARTUP_TIME_FILE` unset. Likewise a node-local override that bind-mounts files into `/app` must leave
 them readable by uid 10001 -- a `0600` root-owned file used to work only because the
 image ran as root. Nothing binds a port, and every connection names
 its role explicitly (`POSTGRES_USER`), so the OS user does not reach the

@@ -1,9 +1,11 @@
 # Real-data value verification
 
-The tavern pattern suite asserts **exact** values for the 2016-04 window: each
-`tests/tavern/<endpoint>/<endpoint>.tavern.yaml` compares the response with its sibling
-`<endpoint>.pat.json` (layout in `tests/tavern/README.md`), and the CI `pattern-test`
-job runs it against the cached replay stack. Those values were originally produced by
+The tavern pattern suite asserts **exact** values for the 2016-04 window. It lives in
+`tests/tavern/<endpoint>/`: the `*.tavern.yaml` files there compare responses with
+`*.pat.json` pattern files, which are named per endpoint or per scenario (for example
+`interactions_over_5m_replay.pat.json`), and a test can also reuse a sibling's pattern
+(layout in `tests/tavern/README.md`). The CI `pattern-test` job runs the suite against
+the cached replay stack. Those values were originally produced by
 *running the endpoints*, so on their own the tavern assertions only prove the
 endpoints are **deterministic** —
 not that the numbers are **correct** (the oracle-circularity problem: "what if we

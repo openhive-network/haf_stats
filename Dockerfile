@@ -82,16 +82,16 @@ RUN case "${GIT_HASH}" in \
 # pg_hba rule, which neither this repo's stacks nor haf_api_node use for app containers.
 #
 # `chmod -R u=rwX,go=rX /app` because COPY keeps the BUILD CONTEXT's file modes, and
-# those are not always 644 -- in EITHER direction. Too WIDE: pipeline 182878 found every
-# db/*.sql, endpoints/* and the healthcheck .sql in the image WORLD-WRITABLE (the runner
-# checks out with umask 0000), so the runtime user could have rewritten the SQL that
-# install_app runs as haf_admin. Too NARROW: scripts/openapi_rewrite.sh writes
-# endpoints/rewrite_rules.conf through mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
-# build directory -- git tracks only the exec bit, so a later fetch/checkout of the same
-# content never resets the mode. The first pipeline of this change built exactly that
-# image: a root-owned 0600 file the runtime user could not read, invisible while the
-# image ran as root (earlier published images likely carry it too, harmlessly).
-#
+# those are not always 644 -- in EITHER direction:
+#   * too WIDE: pipeline 182878 found every db/*.sql, endpoints/* and the healthcheck
+#     .sql in the image WORLD-WRITABLE -- consistent with the runner checking out under
+#     umask 0000 (GitLab's docker executor does that unless
+#     FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR is set) -- so the runtime user could have
+#     rewritten SQL that install_app runs as haf_admin;
+#   * too NARROW: scripts/openapi_rewrite.sh writes endpoints/rewrite_rules.conf through
+#     mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
+#     build directory -- git tracks only the exec bit, so a later fetch/checkout of the
+#     same content never resets the mode. Invisible while the image ran as root.
 # go=rX keeps the exec bit on the scripts (X = only where some exec bit is already set).
 #
 # Cost: chmod copies /app into this layer once more, about 1 MB. A symbolic `COPY --chmod`
@@ -99,11 +99,28 @@ RUN case "${GIT_HASH}" in \
 # pull from Docker Hub on every build; an octal --chmod applies to directories too, so
 # no single octal value suits both files and directories.
 #
-# Added AFTER the version.sql RUN on purpose: tests/unit/test_version_provenance.py
-# extracts that RUN with a non-greedy match from the FIRST `^RUN`, so a RUN placed above
-# it would be swept into the script it executes.
+# The PATH directories (Alpine's default PATH, listed literally; check_runtime_user.sh
+# walks the RUNTIME $PATH, so a directory added there later fails CI rather than being
+# silently skipped here) get the same treatment, but only for the files that need it.
+# The base image (common-ci-configuration psql:14-3) ships haf_app_driver.py,
+# install_with_app_lock.py and run_with_reconnect.sh in /usr/local/bin as 0777, and
+# scripts/process_blocks.sh execs haf_app_driver.py from PATH -- so without this the
+# runtime user could rewrite its own block loop. `find ... -exec`, not `chmod -R`, so
+# only the offending files are copied into this layer rather than all of /usr/bin.
+# Symlinks are skipped: their mode is meaningless and chmod would follow them.
+#
+# This RUN is the LAST build step before USER: tests/unit/test_dockerfile_user.py
+# rejects any RUN/COPY/ADD after it, because a later COPY would land files with the
+# context's modes again. It is also AFTER the version.sql RUN on purpose:
+# tests/unit/test_version_provenance.py extracts that RUN with a non-greedy match from the
+# FIRST `^RUN`, so a RUN placed above it would be swept into the script it executes.
 RUN addgroup -S -g 10001 haf_stats \
  && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats \
+ && for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do \
+      if [ -d "$d" ]; then \
+        find "$d" ! -type l \( -perm -0002 -o -perm -0020 \) -exec chmod go-w {} +; \
+      fi; \
+    done \
  && chmod -R u=rwX,go=rX /app
 
 # Verb dispatcher: install_app | process_blocks | uninstall_app (#57). Every other

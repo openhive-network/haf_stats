@@ -673,7 +673,9 @@ docker-build:
     # make the check exit non-zero AND name the specific path or problem, so a check
     # that died for an unrelated reason does not count as catching it. These are the
     # review's mutations: a writable subdirectory, a runtime-owned COPY, an unreadable
-    # file, and a separate sudoers RUN.
+    # file, a separate sudoers RUN, a 0777 file on PATH (what the base image ships for
+    # haf_app_driver.py), a setuid interpreter, and a directory that is readable but not
+    # searchable (only the check's directory clause can see an EMPTY one).
     mutant() {
       name="$1"; shift
       printf 'FROM %s\nUSER 0\nRUN %s\nUSER 10001:10001\n' "$IMG" "$1" \
@@ -694,6 +696,9 @@ docker-build:
     mutant runtime_owned   'chown -R 10001:10001 /app/db'                          'owned by uid or gid 10001'
     mutant unreadable_file 'chmod 0600 /app/db/version.sql'                        '^/app/db/version.sql$'
     mutant sudoers         'echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers' 'can sudo'
+    mutant path_0777       'chmod 0777 /usr/local/bin/haf_app_driver.py'           '^/usr/local/bin/haf_app_driver.py$'
+    mutant setuid_python   'chmod 4755 "$(readlink -f /usr/bin/python3)"'          'unexpected setuid/setgid files'
+    mutant nosearch_dir    'mkdir /app/nosearch && chmod 0644 /app/nosearch'       '^/app/nosearch$'
     echo "--- entrypoint dispatches its own usage on stdout ---"
     expect_ok --help; grep -q "install_app" "$OUT"
     echo "--- unknown verb fails with the right message, not merely non-zero ---"
@@ -1108,7 +1113,7 @@ sync:
     # CI_FAST_HEALTHCHECK_SERVICES replaces the compose healthcheck on this service, so
     # without this nothing in CI showed the real script passing as uid 10001 against a
     # real HAF. In sync by now, so it must answer healthy; exit status is the assertion.
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
     uid=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-process id -u)
     [[ "$uid" == "10001" ]] || { echo "FAIL: haf-stats-process runs as uid '$uid', want 10001"; exit 1; }
