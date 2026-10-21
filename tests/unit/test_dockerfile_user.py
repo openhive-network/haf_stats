@@ -57,10 +57,10 @@ def user_creation_problems(text: str) -> list[str]:
         problems.append(f"addgroup does not create haf_stats with gid {UID}: {run}")
     if not re.search(rf"\badduser\b[^&]*-u {UID}\b[^&]*-G haf_stats\b", run):
         problems.append(f"adduser does not create uid {UID} in haf_stats: {run}")
-    # COPY keeps the build context's modes; CI's openapi-drift leaves
-    # endpoints/rewrite_rules.conf 0600 in a reused runner build directory.
-    if not re.search(r"\bchmod -R a\+rX /app$", run):
-        problems.append(f"no `chmod -R a+rX /app` after the copies: {run}")
+    # COPY keeps the build context's modes: CI checks out world-writable (umask 0000),
+    # and openapi-drift leaves endpoints/rewrite_rules.conf 0600 in a reused build dir.
+    if not re.search(r"\bchmod -R u=rwX,go=rX /app$", run):
+        problems.append(f"no `chmod -R u=rwX,go=rX /app` after the copies: {run}")
     return problems
 
 
@@ -118,11 +118,14 @@ MUTATIONS = {
     "final_user_root": REAL.replace(f"USER {UID}:{UID}", "USER root"),
     "final_user_by_name": REAL.replace(f"USER {UID}:{UID}", "USER haf_stats"),
     "uid_1000": REAL.replace(f"-u {UID}", "-u 1000"),
-    "no_chmod": REAL.replace(" \\\n && chmod -R a+rX /app", ""),
+    "no_chmod": REAL.replace(" \\\n && chmod -R u=rwX,go=rX /app", ""),
+    # The pre-182878 form: readable, but leaves the context's world-write bits in place.
+    "chmod_without_go_minus_w": REAL.replace("chmod -R u=rwX,go=rX /app", "chmod -R a+rX /app"),
     "lowercase_run_after_user": _append("run true"),
     "runtime_chown": _append("RUN chown -R 10001:10001 /app/db"),
-    "chmod_o_w_db": REAL.replace("&& chmod -R a+rX /app", "&& chmod -R a+rX /app && chmod -R o+w /app/db"),
-    "chmod_octal_777": REAL.replace("&& chmod -R a+rX /app", "&& chmod -R 777 /app"),
+    "chmod_o_w_db": REAL.replace("&& chmod -R u=rwX,go=rX /app",
+                                 "&& chmod -R u=rwX,go=rX /app && chmod -R o+w /app/db"),
+    "chmod_octal_777": REAL.replace("&& chmod -R u=rwX,go=rX /app", "&& chmod -R 777 /app"),
 }
 
 

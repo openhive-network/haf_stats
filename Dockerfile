@@ -81,15 +81,20 @@ RUN case "${GIT_HASH}" in \
 # connection names its role (POSTGRES_USER), so the OS user only matters to a `peer`
 # pg_hba rule, which neither this repo's stacks nor haf_api_node use for app containers.
 #
-# `chmod -R a+rX /app` because COPY keeps the BUILD CONTEXT's file modes, and those are
-# not always 644: scripts/openapi_rewrite.sh writes endpoints/rewrite_rules.conf through
-# mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
+# `chmod -R u=rwX,go=rX /app` because COPY keeps the BUILD CONTEXT's file modes, and
+# those are not always 644 -- in EITHER direction. Too WIDE: pipeline 182878 found every
+# db/*.sql, endpoints/* and the healthcheck .sql in the image WORLD-WRITABLE (the runner
+# checks out with umask 0000), so the runtime user could have rewritten the SQL that
+# install_app runs as haf_admin. Too NARROW: scripts/openapi_rewrite.sh writes
+# endpoints/rewrite_rules.conf through mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
 # build directory -- git tracks only the exec bit, so a later fetch/checkout of the same
 # content never resets the mode. The first pipeline of this change built exactly that
 # image: a root-owned 0600 file the runtime user could not read, invisible while the
 # image ran as root (earlier published images likely carry it too, harmlessly).
 #
-# Cost: chmod copies /app into this layer once more, about 1 MB. `COPY --chmod=a+rX`
+# go=rX keeps the exec bit on the scripts (X = only where some exec bit is already set).
+#
+# Cost: chmod copies /app into this layer once more, about 1 MB. A symbolic `COPY --chmod`
 # would avoid it but symbolic modes need the dockerfile:1.10 frontend, i.e. a `# syntax=`
 # pull from Docker Hub on every build; an octal --chmod applies to directories too, so
 # no single octal value suits both files and directories.
@@ -99,7 +104,7 @@ RUN case "${GIT_HASH}" in \
 # it would be swept into the script it executes.
 RUN addgroup -S -g 10001 haf_stats \
  && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats \
- && chmod -R a+rX /app
+ && chmod -R u=rwX,go=rX /app
 
 # Verb dispatcher: install_app | process_blocks | uninstall_app (#57). Every other
 # haf_api_node app image exposes that trio, which is what lets a module file say
