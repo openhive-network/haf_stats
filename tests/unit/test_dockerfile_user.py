@@ -1,18 +1,25 @@
-"""The app image must not run as root (#64).
+"""A FAST LINT of the Dockerfile for the runtime-user setup (#64). NOT the guarantee.
 
-The behavioural check is scripts/ci-helpers/check_runtime_user.sh, which the docker-build
-smoke test runs INSIDE the built image (and against mutant images it must reject). This
-file pins the Dockerfile's declarations, so a regression names the line rather than
-surfacing as "running as 0:0" after a build.
+THE GUARANTEE is the built-image checks the docker-build job runs on what actually
+shipped -- scripts/ci-helpers/check_image_config.sh (final image config),
+check_image_root.sh (as root, by mode bits) and check_runtime_user.sh (as the runtime
+user, by access(2)) -- each with negative controls. They hold whatever the Dockerfile
+says, including edits this parser misreads. This file exists only so the common
+regressions fail in seconds, before a build, with the offending line named; a hostile
+Dockerfile can get past a text lint, and that is accepted here because it cannot get past
+the image checks.
 
-The parser follows Docker's rules closely enough to be trusted, and REFUSES what it does
-not model rather than guessing:
+The parser follows Docker's rules for the cases it handles and REFUSES what it does not
+model rather than guessing:
   * comments and blank lines are dropped, including inside a continuation (Docker does
     the same), so prose about `USER root` can neither satisfy nor fail a check;
-  * a continuation is `\\` followed by optional trailing whitespace, as in Docker;
+  * a continuation is `\\` followed by optional trailing whitespace, and the lines are
+    joined with NOTHING in between, as in Docker (`0\\` + `777` is `0777`);
+  * an `# escape=` directive anywhere in the leading parser-directive block is refused;
   * keywords are case-insensitive: a trailing lowercase `user 0` is a real USER;
-  * heredocs (`RUN <<EOF`) and an `# escape=` parser directive are refused outright --
-    a heredoc body parsed as instructions could hide anything;
+  * heredocs (`RUN <<EOF`) are refused outright -- a heredoc body parsed as
+    instructions could hide anything;
+  * for ENV, the LAST assignment of a variable in the final stage wins;
   * only the FINAL build stage (after the last FROM) counts for USER, the user-creation
     RUN and the tail rule: a later bare `FROM alpine` stage is what actually ships.
 
@@ -43,15 +50,21 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*[\"']?[A-Za-z_]")
 def _instructions(text: str) -> list[tuple[str, str]]:
     """(KEYWORD, arguments) per instruction, in order."""
     lines = text.splitlines()
-    if lines and re.match(r"#\s*escape\s*=", lines[0], re.I):
-        raise DockerfileParseError("an `# escape=` parser directive is not supported")
+    # Parser directives: `# key=value` lines at the very top, ending at the first line
+    # that is not one. `# escape=` can be anywhere in that block, not only on line 1.
+    for line in lines:
+        directive = re.match(r"#\s*([A-Za-z][\w-]*)\s*=", line)
+        if not directive:
+            break
+        if directive.group(1).lower() == "escape":
+            raise DockerfileParseError("an `# escape=` parser directive is not supported")
     out: list[tuple[str, str]] = []
     cur: str | None = None
     for raw in lines:
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue  # comment or blank line, also inside a continuation
-        cur = raw if cur is None else f"{cur} {raw}"
+        cur = raw if cur is None else cur + raw  # Docker inserts no separator
         if _CONTINUATION.search(cur):
             cur = _CONTINUATION.sub("", cur)
             continue
@@ -78,6 +91,25 @@ def _final_stage(text: str) -> list[tuple[str, str]]:
     if not froms:
         raise DockerfileParseError("no FROM instruction")
     return instructions[froms[-1] + 1:]
+
+
+def _final_env(stage: list[tuple[str, str]]) -> dict[str, str]:
+    """ENV as the final stage leaves it: later assignments overwrite earlier ones.
+
+    Handles `ENV K=V [K2=V2 ...]` (optionally double-quoted values) and the legacy
+    `ENV K V`; anything else is refused rather than guessed at."""
+    env: dict[str, str] = {}
+    for k, a in stage:
+        if k != "ENV":
+            continue
+        if re.match(r"[A-Za-z_]\w*=", a):
+            for m in re.finditer(r'([A-Za-z_]\w*)=("([^"]*)"|\S*)', a):
+                env[m.group(1)] = m.group(3) if m.group(3) is not None else m.group(2)
+        elif m := re.fullmatch(r"([A-Za-z_]\w*)\s+(.*)", a):
+            env[m.group(1)] = m.group(2)
+        else:
+            raise DockerfileParseError(f"cannot parse ENV {a!r}")
+    return env
 
 
 def final_user_problems(text: str) -> list[str]:
@@ -112,8 +144,9 @@ def user_creation_problems(text: str) -> list[str]:
     if not re.search(r"for d in [^;]*/usr/local/bin\b[^;]*; do .*"
                      r"-perm -0002 -o -perm -0020 .*-exec chmod go-w \{\} \+", run):
         problems.append(f"no group/other-write strip over the PATH directories: {run}")
-    if not any(k == "ENV" and re.fullmatch(r"PYTHONNOUSERSITE[= ]1", a) for k, a in stage):
-        problems.append("final stage does not set ENV PYTHONNOUSERSITE=1")
+    value = _final_env(stage).get("PYTHONNOUSERSITE")
+    if value != "1":
+        problems.append(f"final stage's last ENV PYTHONNOUSERSITE is {value!r}, want '1'")
     return problems
 
 
@@ -210,6 +243,13 @@ MUTATIONS = {
     "no_pythonnousersite": REAL.replace("ENV PYTHONNOUSERSITE=1", "ENV PYTHONNOUSERSITE="),
     "later_bare_stage": _append("FROM alpine:3.20"),
     "heredoc_run": _append("RUN <<EOF\nchmod -R 777 /app\nEOF"),
+    # Round 4: the three cheap parser bugs.
+    # Joined with a space, `07` + `77` reads as two harmless numbers; Docker reads 0777.
+    "continuation_glues_mode": REAL.replace(
+        "RUN addgroup", "RUN chmod -R 07\\\n77 /app/db\nRUN addgroup", 1),
+    "escape_directive_line2": "# syntax=docker/dockerfile:1\n# escape=`\n" + REAL,
+    "env_overridden_later": REAL.replace(
+        "ENV PYTHONNOUSERSITE=1", "ENV PYTHONNOUSERSITE=1\nENV PYTHONNOUSERSITE=0", 1),
 }
 
 

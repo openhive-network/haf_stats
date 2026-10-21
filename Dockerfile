@@ -99,9 +99,10 @@ RUN case "${GIT_HASH}" in \
 # pull from Docker Hub on every build; an octal --chmod applies to directories too, so
 # no single octal value suits both files and directories.
 #
-# The PATH directories (Alpine's default PATH, listed literally; check_runtime_user.sh
-# walks the RUNTIME $PATH, so a directory added there later fails CI rather than being
-# silently skipped here) get the same treatment, but only for the files that need it.
+# The PATH directories (Alpine's default PATH, listed literally; the docker-build image
+# checks scan the WHOLE filesystem, so anything writable that this misses -- here or
+# anywhere else -- fails CI rather than shipping) get the same treatment, but only for
+# the files that need it.
 # The base image (common-ci-configuration psql:14-3) ships haf_app_driver.py,
 # install_with_app_lock.py and run_with_reconnect.sh in /usr/local/bin as 0777, and
 # scripts/process_blocks.sh execs haf_app_driver.py from PATH -- so without this the

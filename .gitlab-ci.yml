@@ -662,18 +662,28 @@ docker-build:
     # for the #!/bin/bash scripts. One line settles both.
     docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
     echo "--- the image runs as the unprivileged haf_stats user, not root (#64) ---"
-    # scripts/ci-helpers/check_runtime_user.sh (in the image) checks uid, gid and NO
-    # supplementary groups; that every path under /app is readable; that nothing under
-    # /app, on PATH, in the home directory or in Python's user site is writable or owned
-    # by the runtime user; that the Python user site is off; no setuid/setgid file but
-    # sudo; no file capabilities; no sudo rule at all; and the startup-file write in /tmp.
-    # It runs as the image's default user -- no --user override.
-    CHECK=/app/scripts/ci-helpers/check_runtime_user.sh
-    timeout 120 docker run --rm --entrypoint "$CHECK" "$IMG"
-    echo "--- ...and the check FAILS on each way of getting that wrong (negative controls) ---"
+    # THE GUARANTEE is these three checks on the BUILT image, not anything about the
+    # Dockerfile text (tests/unit/test_dockerfile_user.py is only a fast lint):
+    #   check_image_config.sh  the final config: User, PYTHONNOUSERSITE, no PYTHONPATH /
+    #                          PYTHONHOME / PYTHONSTARTUP / LD_PRELOAD / LD_LIBRARY_PATH;
+    #   check_image_root.sh    as root, by mode bits: nothing world-writable or owned by
+    #                          10001 anywhere, setuid/setgid and capabilities byte-exact,
+    #                          `/usr/bin/sudo -l -U haf_stats` lists no rule;
+    #   check_runtime_user.sh  as the image's default user, by access(2): identity and
+    #                          groups, nothing writable on /, HOME and its ancestors,
+    #                          /app readable and walkable, user site off, startup file.
+    image_checks() {
+      rc=0
+      sh scripts/ci-helpers/check_image_config.sh "$1" || rc=1
+      timeout 300 docker run --rm --user 0 --entrypoint /app/scripts/ci-helpers/check_image_root.sh "$1" || rc=1
+      timeout 300 docker run --rm --entrypoint /app/scripts/ci-helpers/check_runtime_user.sh "$1" || rc=1
+      return "$rc"
+    }
+    image_checks "$IMG"
+    echo "--- ...and the checks FAIL on each way of getting that wrong (negative controls) ---"
     # Built on this job's daemon FROM the image just built, never pushed. Each mutant must
-    # make the check exit non-zero AND name the specific path or problem, so a check
-    # that died for an unrelated reason does not count as catching it. Usage:
+    # make the checks fail AND name the specific path or problem, so a check that died
+    # for an unrelated reason does not count as catching it. Usage:
     #   mutant NAME EXPECTED_OUTPUT_REGEX DOCKERFILE_LINE...
     # The lines run after `USER 0`, one argument per line, and the image then ends on
     # `USER 10001:10001` -- unless one of the lines is itself a USER, which then stands.
@@ -684,43 +694,54 @@ docker-build:
       { printf 'FROM %s\nUSER 0\n' "$IMG"; printf '%s\n' "$@"; [ -z "$tail_user" ] || printf '%s\n' "$tail_user"; } \
         | docker build -q -t "haf_stats_mutant_$name" - >/dev/null
       rc=0
-      timeout 120 docker run --rm --entrypoint "$CHECK" "haf_stats_mutant_$name" >/tmp/mut_out 2>&1 || rc=$?
+      image_checks "haf_stats_mutant_$name" >/tmp/mut_out 2>&1 || rc=$?
       cat /tmp/mut_out
-      if [ "$rc" != 1 ]; then
-        echo "FAIL: mutant $name was not caught (rc=$rc, wanted 1)" >&2; exit 1
+      if [ "$rc" = 0 ]; then
+        echo "FAIL: mutant $name was not caught (the checks passed)" >&2; exit 1
       fi
       if grep -q -- "$want" /tmp/mut_out; then :; else
-        echo "FAIL: mutant $name failed the check without naming '$want'" >&2; exit 1
+        echo "FAIL: mutant $name failed the checks without naming '$want'" >&2; exit 1
       fi
       docker rmi -f "haf_stats_mutant_$name" >/dev/null
       echo "mutant $name caught"
     }
-    # Round 1-2: writable / runtime-owned / unreadable /app content, a sudoers entry, the
-    # base image's 0777 haf_app_driver.py, a setuid interpreter, a non-searchable dir.
+    # Rounds 1-3.
     mutant writable_subdir '^/app/db$'                          'RUN chmod -R o+w /app/db'
     mutant runtime_owned   'owned by uid or gid 10001'          'RUN chown -R 10001:10001 /app/db'
     mutant unreadable_file '^/app/db/version.sql$'              'RUN chmod 0600 /app/db/version.sql'
-    mutant sudoers         'can sudo'                           'RUN echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers'
+    mutant sudoers         'sudo rules for haf_stats'           'RUN echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers'
     mutant path_0777       '^/usr/local/bin/haf_app_driver.py$' 'RUN chmod 0777 /usr/local/bin/haf_app_driver.py'
-    mutant setuid_python   'unexpected setuid/setgid files'     'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
+    mutant setuid_python   "setuid/setgid: b'/usr/bin/python3" 'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
     mutant nosearch_dir    '^/app/nosearch$'                    'RUN mkdir /app/nosearch && chmod 0644 /app/nosearch'
-    # Round 3: a home the runtime user owns; a planted usercustomize with the user site
-    # back on; a command-scoped sudo rule (passes `sudo -n true`); a file capability; a
-    # supplementary group; a setuid file NAMED like a glob of the allow-list; and an
-    # image that tries to widen the allow-list through its own environment.
     mutant writable_home   '^/nonexistent$'                     'RUN mkdir /nonexistent && chown 10001:10001 /nonexistent'
     mutant usercustomize   'user site is not disabled'          'ENV PYTHONNOUSERSITE=' \
       'RUN d="$(HOME=/nonexistent python3 -c "import site; print(site.getusersitepackages())")" && mkdir -p "$d" && echo "import sys" > "$d/usercustomize.py"'
-    mutant sudo_scoped     'has sudo rules'                     'RUN echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
-    mutant file_cap        'files with capabilities'            "RUN python3 -c 'import os, struct, sys; os.setxattr(os.path.realpath(sys.executable), \"security.capability\", struct.pack(\"<IIIII\", 0x02000001, 0x80, 0, 0, 0))'"
+    mutant sudo_scoped     'sudo rules for haf_stats'           'RUN echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
+    mutant file_cap        "capability: b'/usr/bin/python3"     "RUN python3 -c 'import os, struct, sys; os.setxattr(os.path.realpath(sys.executable), \"security.capability\", struct.pack(\"<IIIII\", 0x02000001, 0x80, 0, 0, 0))'"
     # `USER uid` WITHOUT a gid: with an explicit `uid:gid` (the real image's form) Docker
     # applies no /etc/group memberships at all -- pipeline 182889 showed groups=10001
     # despite the membership. A `user: haf_stats` override, --group-add or Kubernetes
     # supplementalGroups would add them, which is what this models.
     mutant extra_group     'groups are'                         'RUN addgroup haf_stats root' 'USER 10001'
-    mutant glob_named_suid 'unexpected setuid/setgid files'     'RUN cp /bin/busybox "/usr/bin/[s]udo" && chmod 4755 "/usr/bin/[s]udo"'
-    mutant env_allowlist   'unexpected setuid/setgid files'     'ENV SETID_ALLOWED=/usr/bin/python3.10' \
+    mutant glob_named_suid "setuid/setgid: b'/usr/bin/\[s\]udo'" 'RUN cp /bin/busybox "/usr/bin/[s]udo" && chmod 4755 "/usr/bin/[s]udo"'
+    mutant env_allowlist   "setuid/setgid: b'/usr/bin/python3"  'ENV SETID_ALLOWED=/usr/bin/python3.10' \
       'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
+    # Round 4: one per class, each aimed at a route the earlier, list-based checks missed.
+    mutant etc_passwd_0666 '^/etc/passwd$'                      'RUN chmod 0666 /etc/passwd'
+    mutant etc_dir_o_w     '^/etc$'                             'RUN chmod o+w /etc'
+    mutant site_pkgs_1777  'site-packages$'                     'RUN chmod 1777 "$(python3 -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")"'
+    mutant libpq_0666      'libpq.so'                           'RUN chmod 0666 "$(readlink -f "$(ls /usr/lib/libpq.so* | head -n 1)")"'
+    mutant hidden_setuid   "setuid/setgid: b'/opt/hidden/x'"    'RUN mkdir -p /opt/hidden && cp /bin/busybox /opt/hidden/x && chmod 4755 /opt/hidden/x && chmod 0711 /opt/hidden'
+    mutant newline_suid    "setuid/setgid: b'/usr/bin/sudo\\\\n'" "RUN python3 -c 'import os, shutil; p = \"/usr/bin/sudo\" + chr(10); shutil.copy(\"/bin/busybox\", p); os.chmod(p, 0o4755)'"
+    mutant fake_sudo       'sudo rules for haf_stats'           'RUN printf "#!/bin/sh\nexit 1\n" > /usr/local/bin/sudo && chmod 0755 /usr/local/bin/sudo' \
+      'RUN echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers'
+    mutant listpw_always   'sudo rules for haf_stats'           'RUN echo "Defaults listpw=always" >> /etc/sudoers && echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
+    mutant env_pythonpath  'image config sets PYTHONPATH=/tmp'  'ENV PYTHONPATH=/tmp'
+    mutant home_under_tmp  'HOME /tmp/a/b: ancestor /tmp is writable' 'ENV HOME=/tmp/a/b'
+    # The "find could not walk" sentinel: a directory that is searchable (so the
+    # per-directory -x rule passes) but not listable, with a file in it -- only the walk
+    # failing can report it, so deleting the sentinel turns this control red.
+    mutant unlistable_dir  'find could not walk /app'           'RUN mkdir /app/unlistable && touch /app/unlistable/f && chmod 0311 /app/unlistable'
     echo "--- entrypoint dispatches its own usage on stdout ---"
     expect_ok --help; grep -q "install_app" "$OUT"
     echo "--- unknown verb fails with the right message, not merely non-zero ---"
