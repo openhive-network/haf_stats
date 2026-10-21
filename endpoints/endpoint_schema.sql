@@ -1110,7 +1110,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed. Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than 15,000 ops is priced entirely with the estimate, to keep the call fast: a caller can tell by the op_count of a group_by=op_type response adding up to more than 15,000 (for app and category the custom_json counts come from a daily rollup, so near 15,000 that sum is only approximate). For group_by=app and group_by=category the custom_json buckets come from the per-account daily rollup: each day's row is exact where the rollup recorded it and the byte-aware estimate otherwise, with no op limit; the non-custom_json bucket is exact under the 15,000-op limit.",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed. Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than rc_exact_op_cap ops (15,000) is priced entirely with the estimate, to keep the call fast. For group_by=app and group_by=category the custom_json buckets come from the per-account daily rollup: each day's row is exact where the rollup recorded it and the byte-aware estimate otherwise, with no op limit; the non-custom_json bucket is exact under the op limit. Every row says which it got: rc_source (recorded, estimated or mixed), rc_exact_ops (how many of its ops were priced exactly), rc_exact_op_cap (the limit this node applies) and rc_over_cap (whether this window exceeded it), so a caller never has to infer it.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -1166,7 +1166,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)",
+                  "x-sql-datatype": "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC, rc_source TEXT, rc_exact_ops BIGINT, rc_exact_op_cap INT, rc_over_cap BOOLEAN)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -1187,6 +1187,27 @@ DECLARE
                           "null"
                         ],
                         "description": "Percentage of total RC consumed"
+                      },
+                      "rc_source": {
+                        "type": "string",
+                        "enum": [
+                          "recorded",
+                          "estimated",
+                          "mixed"
+                        ],
+                        "description": "How rc_consumed was priced: recorded when every op in the row was priced with its exact share of the RC its transaction recorded, estimated when none was, mixed otherwise"
+                      },
+                      "rc_exact_ops": {
+                        "type": "integer",
+                        "description": "How many of the row's op_count ops were priced exactly"
+                      },
+                      "rc_exact_op_cap": {
+                        "type": "integer",
+                        "description": "The most signed ops one call prices exactly on this node. A window with more is priced with the estimate (the custom_json buckets of group_by=app and group_by=category excepted, which come from the daily rollup)"
+                      },
+                      "rc_over_cap": {
+                        "type": "boolean",
+                        "description": "Whether the account signed more than rc_exact_op_cap ops in the window, so the per-op pricing fell back to the estimate. The same for every row of a response"
                       }
                     }
                   }
@@ -1206,7 +1227,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total when the account signed at most 15,000 ops in the window; above that rc-footprint is all estimate while each timeline event stays exact where recorded. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total when the account signed at most 15,000 ops in the window; above that rc-footprint is all estimate while each timeline event stays exact where recorded. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). rc_source says which pricing each event got. Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -1314,7 +1335,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)",
+                  "x-sql-datatype": "TABLE(\"timestamp\" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT, rc_source TEXT)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -1352,6 +1373,14 @@ DECLARE
                       "op_seq": {
                         "type": "integer",
                         "description": "Per-account operation sequence number (dense, monotonic with time); pass the last row's value as before_seq to fetch the next page"
+                      },
+                      "rc_source": {
+                        "type": "string",
+                        "enum": [
+                          "recorded",
+                          "estimated"
+                        ],
+                        "description": "recorded when rc_consumed is the op's exact share of the RC its transaction recorded, estimated when the node has no recorded cost for it"
                       }
                     }
                   }
@@ -1371,7 +1400,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account DApp footprint",
-        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. Defaults to the last 30 days.",
+        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. rc_source (recorded, estimated or mixed; null when there are no ops) and rc_exact_ops say which pricing the total and each category and DApp got. Defaults to the last 30 days.",
         "operationId": "haf_stats_endpoints.get_account_dapp_footprint",
         "parameters": [
           {
@@ -1431,6 +1460,23 @@ DECLARE
                       "type": "integer",
                       "description": "Total RC consumed, summed per day - exact where the rollup recorded it, else the calibrated estimate (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily). The name predates exact RC and is kept for compatibility"
                     },
+                    "rc_source": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "recorded",
+                        "estimated",
+                        "mixed",
+                        null
+                      ],
+                      "description": "How total_rc_estimated was priced: recorded when every op came from a daily row holding the recorded RC, estimated when none did, mixed otherwise; null when there are no ops"
+                    },
+                    "rc_exact_ops": {
+                      "type": "integer",
+                      "description": "How many of total_ops were priced with the recorded RC"
+                    },
                     "top_category": {
                       "type": [
                         "string",
@@ -1469,6 +1515,17 @@ DECLARE
                               "number",
                               "null"
                             ]
+                          },
+                          "rc_source": {
+                            "type": "string",
+                            "enum": [
+                              "recorded",
+                              "estimated",
+                              "mixed"
+                            ]
+                          },
+                          "rc_exact_ops": {
+                            "type": "integer"
                           }
                         }
                       }
@@ -1502,6 +1559,17 @@ DECLARE
                               "number",
                               "null"
                             ]
+                          },
+                          "rc_source": {
+                            "type": "string",
+                            "enum": [
+                              "recorded",
+                              "estimated",
+                              "mixed"
+                            ]
+                          },
+                          "rc_exact_ops": {
+                            "type": "integer"
                           }
                         }
                       }
@@ -1573,7 +1641,7 @@ DECLARE
           "Network"
         ],
         "summary": "Network RC utilization",
-        "description": "Time-series of total RC consumption across the network, broken down by operation type, aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before each day).",
+        "description": "Time-series of total RC consumption across the network, broken down by operation type, aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before each day). rc_source says which a period got.",
         "operationId": "haf_stats_endpoints.get_network_rc_utilization",
         "parameters": [
           {
@@ -1620,7 +1688,7 @@ DECLARE
             "content": {
               "application/json": {
                 "schema": {
-                  "x-sql-datatype": "TABLE(period TEXT, rc_total BIGINT, by_label JSONB)",
+                  "x-sql-datatype": "TABLE(period TEXT, rc_total BIGINT, by_label JSONB, rc_source TEXT)",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -1639,6 +1707,15 @@ DECLARE
                           "type": "integer"
                         },
                         "description": "RC per operation type or DApp"
+                      },
+                      "rc_source": {
+                        "type": "string",
+                        "enum": [
+                          "recorded",
+                          "estimated",
+                          "mixed"
+                        ],
+                        "description": "recorded when every (day, op type) row of the period holds the RC its operations recorded, estimated when none does, mixed otherwise"
                       }
                     }
                   }
@@ -4229,14 +4306,14 @@ $$;
       and for a multi-op transaction a share in proportion to the op-count estimate of each op.
       Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the
       calibrated rc_op_stats_daily rates). A window in which the account signed more than
-      15,000 ops is priced entirely with the estimate, to keep the call fast: a caller can tell
-      by the op_count of a group_by=op_type response adding up to more than 15,000 (for app and
-      category the custom_json counts come from a daily rollup, so near 15,000 that sum is only
-      approximate). For group_by=app and
+      rc_exact_op_cap ops (15,000) is priced entirely with the estimate, to keep the call fast.
+      For group_by=app and
       group_by=category the custom_json buckets come from the per-account daily rollup:
       each day's row is exact where the rollup recorded it and the byte-aware estimate
-      otherwise, with no op limit; the non-custom_json bucket is exact under the 15,000-op
-      limit.
+      otherwise, with no op limit; the non-custom_json bucket is exact under the op limit.
+      Every row says which it got: rc_source (recorded, estimated or mixed), rc_exact_ops (how
+      many of its ops were priced exactly), rc_exact_op_cap (the limit this node applies) and
+      rc_over_cap (whether this window exceeded it), so a caller never has to infer it.
     operationId: haf_stats_endpoints.get_account_rc_footprint
     parameters:
       - in: path
@@ -4280,7 +4357,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)"
+              x-sql-datatype: "TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC, rc_source TEXT, rc_exact_ops BIGINT, rc_exact_op_cap INT, rc_over_cap BOOLEAN)"
               type: array
               items:
                 type: object
@@ -4297,6 +4374,26 @@ $$;
                       - number
                       - "null"
                     description: Percentage of total RC consumed
+                  rc_source:
+                    type: string
+                    enum: [recorded, estimated, mixed]
+                    description: >-
+                      How rc_consumed was priced: recorded when every op in the row was priced with its exact share of the RC its
+                      transaction recorded, estimated when none was, mixed otherwise
+                  rc_exact_ops:
+                    type: integer
+                    description: How many of the row's op_count ops were priced exactly
+                  rc_exact_op_cap:
+                    type: integer
+                    description: >-
+                      The most signed ops one call prices exactly on this node. A window with
+                      more is priced with the estimate (the custom_json buckets of group_by=app
+                      and group_by=category excepted, which come from the daily rollup)
+                  rc_over_cap:
+                    type: boolean
+                    description: >-
+                      Whether the account signed more than rc_exact_op_cap ops in the window, so
+                      the per-op pricing fell back to the estimate. The same for every row of a response
       '400':
         $ref: '#/components/responses/BadRequest'
  */
@@ -4308,7 +4405,7 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint(
     "to_date" TEXT = NULL,
     "group_by" TEXT = 'op_type'
 )
-RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC)
+RETURNS TABLE(label TEXT, rc_consumed BIGINT, op_count BIGINT, pct NUMERIC, rc_source TEXT, rc_exact_ops BIGINT, rc_exact_op_cap INT, rc_over_cap BOOLEAN)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -4390,6 +4487,11 @@ BEGIN
                      ELSE ARRAY(SELECT s.operation_id FROM signed s WHERE s.operation_id IS NOT NULL)
                 END) e
         ),
+        cap_info AS MATERIALIZED (
+            -- The same count ex decides on, reported to the caller (#101).
+            SELECT haf_stats_app.exact_rc_op_cap() AS cap,
+                   (SELECT count(s.operation_id) FROM signed s) AS n
+        ),
         acct_ops AS (
             -- Per (op type, day): how many ops, how many of them were priced exactly, and the
             -- exact RC of those. The rest are priced with the estimate below.
@@ -4406,6 +4508,7 @@ BEGIN
                 COALESCE(replace(ot.name, 'hive::protocol::', ''),
                          'op_type_' || ao.op_type_id)                          AS label,
                 ao.op_count,
+                ao.exact_count,
                 (ao.exact_rc
                  + (ao.op_count - ao.exact_count)
                    * haf_stats_app.rc_avg_cost(ao.op_type_id, ao.day))::BIGINT AS rc
@@ -4414,14 +4517,19 @@ BEGIN
         ),
         agg AS (
             SELECT priced.label,
-                   SUM(priced.rc)::BIGINT       AS rc_consumed,
-                   SUM(priced.op_count)::BIGINT AS op_count
+                   SUM(priced.rc)::BIGINT          AS rc_consumed,
+                   SUM(priced.op_count)::BIGINT    AS op_count,
+                   SUM(priced.exact_count)::BIGINT AS exact_ops
             FROM priced GROUP BY priced.label
         ),
         tot AS (SELECT SUM(agg.rc_consumed) AS gt FROM agg)
         SELECT agg.label, agg.rc_consumed, agg.op_count,
-               ROUND(agg.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2)
-        FROM agg, tot t
+               ROUND(agg.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2),
+               haf_stats_app.rc_source_label(agg.exact_ops, agg.op_count),
+               agg.exact_ops,
+               ci.cap,
+               ci.n > ci.cap
+        FROM agg, tot t, cap_info ci
         ORDER BY agg.rc_consumed DESC, agg.label;
     ELSE
         -- group_by = 'app' or 'category': size-aware custom_json from the pre-aggregated
@@ -4440,7 +4548,9 @@ BEGIN
                         THEN haf_stats_app.resolve_dapp_category(acj.json_id)
                         ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END AS label,
                    SUM(acj.op_count)::BIGINT     AS op_count,
-                   SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed
+                   SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed,
+                   -- A day's row carries rc_exact only when all its ops had a recorded cost.
+                   COALESCE(SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL), 0)::BIGINT AS exact_ops
             FROM haf_stats_backend.account_custom_json_daily acj
             CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
             WHERE acj.account_id = _account_id
@@ -4489,7 +4599,8 @@ BEGIN
                    SUM(t.op_count)::BIGINT        AS op_count,
                    SUM(t.exact_rc
                        + (t.op_count - t.exact_count)
-                         * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed
+                         * haf_stats_app.rc_avg_cost(t.op_type_id, t.day))::BIGINT AS rc_consumed,
+                   SUM(t.exact_count)::BIGINT     AS exact_ops
             FROM (
                 SELECT s.op_type_id, s.day,
                        COUNT(*)::BIGINT                       AS op_count,
@@ -4501,13 +4612,18 @@ BEGIN
             ) t
         ),
         combined AS (
-            SELECT cj.label, cj.rc_consumed, cj.op_count FROM cj
+            SELECT cj.label, cj.rc_consumed, cj.op_count, cj.exact_ops FROM cj
             UNION ALL
-            SELECT noncj.label, noncj.rc_consumed, noncj.op_count FROM noncj WHERE noncj.op_count > 0
+            SELECT noncj.label, noncj.rc_consumed, noncj.op_count, noncj.exact_ops FROM noncj WHERE noncj.op_count > 0
         ),
         tot AS (SELECT SUM(combined.rc_consumed) AS gt FROM combined)
         SELECT combined.label, combined.rc_consumed, combined.op_count,
-               ROUND(combined.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2)
+               ROUND(combined.rc_consumed * 100.0 / NULLIF(t.gt, 0), 2),
+               haf_stats_app.rc_source_label(combined.exact_ops, combined.op_count),
+               combined.exact_ops,
+               haf_stats_app.exact_rc_op_cap(),
+               -- The same count noncj_ex decides on, so rc_over_cap says why that bucket is estimated.
+               (SELECT c.n FROM all_signed_count c) > haf_stats_app.exact_rc_op_cap()
         FROM combined, tot t
         ORDER BY combined.rc_consumed DESC, combined.label;
     END IF;
@@ -4536,7 +4652,8 @@ $$;
       where recorded. Optional op_type_filter / app_filter narrow the
       timeline to the events of one op type or DApp (the same events as the matching rc-footprint
       bucket; each event is still priced per op, so an app_filter sum matches the op_type total,
-      not the byte-aware group_by=app figure). Pages via limit_count/offset_start,
+      not the byte-aware group_by=app figure). rc_source says which pricing each event got.
+      Pages via limit_count/offset_start,
       or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
     parameters:
@@ -4629,7 +4746,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)'
+              x-sql-datatype: 'TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT, rc_source TEXT)'
               type: array
               items:
                 type: object
@@ -4663,6 +4780,12 @@ $$;
                     description: >-
                       Per-account operation sequence number (dense, monotonic with time); pass the
                       last row's value as before_seq to fetch the next page
+                  rc_source:
+                    type: string
+                    enum: [recorded, estimated]
+                    description: >-
+                      recorded when rc_consumed is the op's exact share of the RC its transaction
+                      recorded, estimated when the node has no recorded cost for it
       '400':
         $ref: '#/components/responses/BadRequest'
  */
@@ -4679,7 +4802,7 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_account_rc_footprint_timeline
     "offset_start" INT = 0,
     "before_seq" BIGINT = NULL
 )
-RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT)
+RETURNS TABLE("timestamp" TIMESTAMP, block_num INT, op_type TEXT, app TEXT, custom_json_id TEXT, rc_consumed BIGINT, op_seq BIGINT, rc_source TEXT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -4818,7 +4941,8 @@ BEGIN
             CASE WHEN page.op_type_id = 18 THEN ov.body -> 'value' ->> 'id' END,
             COALESCE(ex.rc_exact,
                      haf_stats_app.rc_avg_cost(page.op_type_id, bv.created_at::DATE)::BIGINT),
-            page.account_op_seq_no::BIGINT
+            page.account_op_seq_no::BIGINT,
+            haf_stats_app.rc_source_label((ex.rc_exact IS NOT NULL)::INT, 1)
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
         JOIN hafd.operation_types ot ON ot.id = page.op_type_id
@@ -4885,7 +5009,8 @@ BEGIN
             page.json_id,
             COALESCE(ex.rc_exact,
                      haf_stats_app.rc_avg_cost(18::SMALLINT, bv.created_at::DATE)::BIGINT),
-            page.account_op_seq_no::BIGINT
+            page.account_op_seq_no::BIGINT,
+            haf_stats_app.rc_source_label((ex.rc_exact IS NOT NULL)::INT, 1)
         FROM page
         JOIN hafd.blocks bv ON bv.num = page.block_num
         LEFT JOIN ex ON ex.operation_id = page.operation_id
@@ -4914,7 +5039,9 @@ $$;
       (custom_json operations signed by the account). RC figures add up the per-account daily
       rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A
       multi-signer op counts its whole RC for each signer, as it counts once per signer in
-      op_count. Defaults to the last 30 days.
+      op_count. rc_source (recorded, estimated or mixed; null when there are no ops) and
+      rc_exact_ops say which pricing the total and each category and DApp got. Defaults to the
+      last 30 days.
     operationId: haf_stats_endpoints.get_account_dapp_footprint
     parameters:
       - in: path
@@ -4959,6 +5086,18 @@ $$;
                 total_rc_estimated:
                   type: integer
                   description: Total RC consumed, summed per day - exact where the rollup recorded it, else the calibrated estimate (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily). The name predates exact RC and is kept for compatibility
+                rc_source:
+                  type:
+                    - string
+                    - "null"
+                  enum: [recorded, estimated, mixed, null]
+                  description: >-
+                    How total_rc_estimated was priced: recorded when every op came from a daily row
+                    holding the recorded RC, estimated when none did, mixed otherwise; null when
+                    there are no ops
+                rc_exact_ops:
+                  type: integer
+                  description: How many of total_ops were priced with the recorded RC
                 top_category:
                   type:
                     - string
@@ -4987,6 +5126,11 @@ $$;
                         type:
                           - number
                           - "null"
+                      rc_source:
+                        type: string
+                        enum: [recorded, estimated, mixed]
+                      rc_exact_ops:
+                        type: integer
                 dapps:
                   type: array
                   description: Per-app totals (registered app name), each tagged with its category (drill-down bars)
@@ -5009,6 +5153,11 @@ $$;
                         type:
                           - number
                           - "null"
+                      rc_source:
+                        type: string
+                        enum: [recorded, estimated, mixed]
+                      rc_exact_ops:
+                        type: integer
       '400':
         $ref: '#/components/responses/BadRequest'
  */
@@ -5039,7 +5188,8 @@ BEGIN
     IF _account_id IS NULL THEN
         RETURN jsonb_build_object(
             'account', "account", 'from_date', _from, 'to_date', _to,
-            'total_ops', 0, 'total_rc_estimated', 0, 'top_category', NULL, 'top_dapp', NULL,
+            'total_ops', 0, 'total_rc_estimated', 0, 'rc_source', NULL, 'rc_exact_ops', 0,
+            'top_category', NULL, 'top_dapp', NULL,
             'categories', '[]'::jsonb, 'dapps', '[]'::jsonb);
     END IF;
 
@@ -5079,7 +5229,9 @@ BEGIN
         SELECT
             acj.json_id,
             SUM(acj.op_count)::BIGINT AS op_count,
-            SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed
+            SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed,
+            -- A day's row carries rc_exact only when all its ops had a recorded cost (#101).
+            COALESCE(SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL), 0)::BIGINT AS exact_ops
         FROM haf_stats_backend.account_custom_json_daily acj
         JOIN day_rate dr ON dr.day = acj.day
         WHERE acj.account_id = _account_id
@@ -5091,7 +5243,8 @@ BEGIN
             COALESCE(r.category, 'Uncategorized') AS category,
             COALESCE(r.app_name, pj.json_id)      AS app_name,
             pj.op_count,
-            pj.rc_consumed
+            pj.rc_consumed,
+            pj.exact_ops
         FROM per_json pj
         LEFT JOIN LATERAL (
             SELECT reg.category, reg.app_name
@@ -5103,14 +5256,17 @@ BEGIN
         ) r ON TRUE
     ),
     per_app AS (
-        SELECT category, app_name, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
+        SELECT category, app_name, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed,
+               SUM(exact_ops)::BIGINT AS exact_ops
         FROM resolved GROUP BY category, app_name
     ),
     per_cat AS (
-        SELECT category, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed
+        SELECT category, SUM(op_count) AS op_count, SUM(rc_consumed) AS rc_consumed,
+               SUM(exact_ops)::BIGINT AS exact_ops
         FROM resolved GROUP BY category
     ),
-    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total, COALESCE(SUM(rc_consumed), 0) AS total_rc FROM resolved)
+    tot AS (SELECT COALESCE(SUM(op_count), 0) AS total, COALESCE(SUM(rc_consumed), 0) AS total_rc,
+                   COALESCE(SUM(exact_ops), 0)::BIGINT AS total_exact FROM resolved)
     SELECT jsonb_build_object(
         'account', "account",
         'from_date', _from,
@@ -5118,6 +5274,9 @@ BEGIN
         'total_ops', (SELECT total FROM tot),
         -- total_rc: exact per day where the rollup recorded it (#44), else the calibrated estimate.
         'total_rc_estimated', (SELECT total_rc FROM tot),
+        'rc_source', (SELECT CASE WHEN total = 0 THEN NULL
+                                  ELSE haf_stats_app.rc_source_label(total_exact, total::BIGINT) END FROM tot),
+        'rc_exact_ops', (SELECT total_exact FROM tot),
         'top_category', (SELECT category FROM per_cat ORDER BY op_count DESC, category LIMIT 1),
         'top_dapp', (SELECT app_name FROM per_app ORDER BY op_count DESC, app_name LIMIT 1),
         'categories', COALESCE((
@@ -5126,7 +5285,9 @@ BEGIN
                        'op_count', op_count,
                        'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2),
                        'rc_estimated', rc_consumed,
-                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2))
+                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2),
+                       'rc_source', haf_stats_app.rc_source_label(exact_ops, op_count::BIGINT),
+                       'rc_exact_ops', exact_ops)
                        ORDER BY op_count DESC, category)
             FROM per_cat), '[]'::jsonb),
         'dapps', COALESCE((
@@ -5136,7 +5297,9 @@ BEGIN
                        'op_count', op_count,
                        'pct', ROUND(op_count * 100.0 / NULLIF((SELECT total FROM tot), 0), 2),
                        'rc_estimated', rc_consumed,
-                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2))
+                       'rc_pct', ROUND(rc_consumed * 100.0 / NULLIF((SELECT total_rc FROM tot), 0), 2),
+                       'rc_source', haf_stats_app.rc_source_label(exact_ops, op_count::BIGINT),
+                       'rc_exact_ops', exact_ops)
                        ORDER BY op_count DESC, app_name)
             FROM per_app), '[]'::jsonb)
     ) INTO _result;
@@ -5225,7 +5388,7 @@ $$;
       Time-series of total RC consumption across the network, broken down by operation type,
       aggregated by the chosen granularity. Per (day, op type), each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE
       (op_count*base_rc + op_bytes*byte_rc from rc_op_stats_daily, the rate effective on/before
-      each day).
+      each day). rc_source says which a period got.
     operationId: haf_stats_endpoints.get_network_rc_utilization
     parameters:
       - in: query
@@ -5258,7 +5421,7 @@ $$;
         content:
           application/json:
             schema:
-              x-sql-datatype: "TABLE(period TEXT, rc_total BIGINT, by_label JSONB)"
+              x-sql-datatype: "TABLE(period TEXT, rc_total BIGINT, by_label JSONB, rc_source TEXT)"
               type: array
               items:
                 type: object
@@ -5274,6 +5437,12 @@ $$;
                     additionalProperties:
                       type: integer
                     description: RC per operation type or DApp
+                  rc_source:
+                    type: string
+                    enum: [recorded, estimated, mixed]
+                    description: >-
+                      recorded when every (day, op type) row of the period holds the RC its
+                      operations recorded, estimated when none does, mixed otherwise
       '400':
         $ref: '#/components/responses/BadRequest'
  */
@@ -5284,7 +5453,7 @@ CREATE OR REPLACE FUNCTION haf_stats_endpoints.get_network_rc_utilization(
     "to_date" TEXT = NULL,
     "granularity" TEXT = 'day'
 )
-RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB)
+RETURNS TABLE(period TEXT, rc_total BIGINT, by_label JSONB, rc_source TEXT)
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -5339,7 +5508,8 @@ BEGIN
             -- The day's exact RC where the rollup recorded it (#44), else the estimate.
             COALESCE(nod.rc_exact,
                      (nod.op_count  * COALESCE(ri.base_rc, 120000000)
-                      + nod.op_bytes * COALESCE(ri.byte_rc, 475000))::BIGINT) AS rc
+                      + nod.op_bytes * COALESCE(ri.byte_rc, 475000))::BIGINT) AS rc,
+            (nod.rc_exact IS NOT NULL)                                      AS is_exact
         FROM haf_stats_backend.network_op_daily nod
         LEFT JOIN LATERAL (
             SELECT pick.base_rc, pick.byte_rc
@@ -5368,14 +5538,19 @@ BEGIN
     ),
     per_label AS (
         -- Qualify period/label: bare "period" collides with the RETURNS TABLE OUT variable.
-        SELECT priced.period, priced.label, SUM(priced.rc)::BIGINT AS rc_label_total
+        SELECT priced.period, priced.label, SUM(priced.rc)::BIGINT AS rc_label_total,
+               COUNT(*) FILTER (WHERE priced.is_exact) AS exact_rows,
+               COUNT(*)                                AS all_rows
         FROM priced
         GROUP BY priced.period, priced.label
     )
     SELECT
         TO_CHAR(per_label.period, 'YYYY-MM-DD')                     AS period,
         SUM(per_label.rc_label_total)::BIGINT                       AS rc_total,
-        jsonb_object_agg(per_label.label, per_label.rc_label_total) AS by_label
+        jsonb_object_agg(per_label.label, per_label.rc_label_total) AS by_label,
+        -- Counted in daily ROWS, not ops: a rollup row is exact or estimated as a whole.
+        haf_stats_app.rc_source_label(SUM(per_label.exact_rows)::BIGINT,
+                                      SUM(per_label.all_rows)::BIGINT) AS rc_source
     FROM per_label
     GROUP BY per_label.period
     ORDER BY 1;

@@ -173,6 +173,8 @@ stages:
         to_date: !anything
         total_ops: !anyint
         total_rc_estimated: !anyint
+        rc_source: !anything
+        rc_exact_ops: !anyint
         top_category: !anything
         top_dapp: !anything
         categories: !anything
@@ -408,6 +410,8 @@ stages:
         to_date: "2020-06-30"
         total_ops: !anyint
         total_rc_estimated: !anyint
+        rc_source: !anything
+        rc_exact_ops: !anyint
         top_category: !anything
         top_dapp: !anything
         categories: !anything

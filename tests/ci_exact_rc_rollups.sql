@@ -152,6 +152,24 @@ BEGIN
         _bad := _bad || ' rc-footprint app;';
     END IF;
 
+    -- #101: each says how it was priced. 03-21: every row exact. 03-20: the custom_json row is
+    -- exact but the votes' row is not (op 1 has a NULL row), so the period is mixed.
+    IF (SELECT u.rc_source FROM haf_stats_endpoints.get_network_rc_utilization('2021-03-21', '2021-03-21', 'day') AS u)
+       IS DISTINCT FROM 'recorded' THEN _bad := _bad || ' rc-utilization 03-21 rc_source;'; END IF;
+    IF (SELECT u.rc_source FROM haf_stats_endpoints.get_network_rc_utilization('2021-03-20', '2021-03-20', 'day') AS u)
+       IS DISTINCT FROM 'mixed' THEN _bad := _bad || ' rc-utilization 03-20 rc_source;'; END IF;
+    IF _j ->> 'rc_source' IS DISTINCT FROM 'recorded'
+       OR (_j ->> 'rc_exact_ops')::BIGINT IS DISTINCT FROM (_j ->> 'total_ops')::BIGINT
+       OR _j -> 'dapps' -> 0 ->> 'rc_source' IS DISTINCT FROM 'recorded'
+       OR _j -> 'categories' -> 0 ->> 'rc_source' IS DISTINCT FROM 'recorded' THEN
+        _bad := _bad || format(' dapp-footprint 03-21 rc_source=%s/%s;', _j ->> 'rc_source', _j ->> 'rc_exact_ops');
+    END IF;
+    IF (SELECT string_agg(f.label || '=' || f.rc_source, ',' ORDER BY f.label)
+        FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-21', '2021-03-21', 'app') AS f)
+       IS DISTINCT FROM 'Splinterlands=recorded,non-custom_json=recorded' THEN
+        _bad := _bad || ' rc-footprint app 03-21 rc_source;';
+    END IF;
+
     IF _bad <> '' THEN
         RAISE EXCEPTION 'FAIL (#44): endpoints over the processed rollups:%', _bad;
     END IF;
@@ -279,6 +297,19 @@ BEGIN
         FROM haf_stats_endpoints.get_network_custom_json_usage('sm_claim_daily', '2021-03-20', '2021-03-21', 'week') AS u)
        IS DISTINCT FROM '2021-03-15=340128760' THEN
         _bad := _bad || ' custom-json-usage week;';
+    END IF;
+    -- #101: one exact day and one estimated day in the window is "mixed", for the account
+    -- rollups too; an account with no ops at all has no rc_source.
+    IF _j ->> 'rc_source' IS DISTINCT FROM 'mixed' THEN
+        _bad := _bad || format(' dapp-footprint rc_source=%s;', _j ->> 'rc_source');
+    END IF;
+    IF (SELECT f.rc_source FROM haf_stats_endpoints.get_account_rc_footprint('rcexact', '2021-03-20', '2021-03-21', 'app') AS f
+        WHERE f.label = 'Splinterlands') IS DISTINCT FROM 'mixed' THEN
+        _bad := _bad || ' rc-footprint app Splinterlands rc_source;';
+    END IF;
+    IF haf_stats_endpoints.get_account_dapp_footprint('nosuchaccount', '2021-03-20', '2021-03-21') -> 'rc_source'
+       IS DISTINCT FROM 'null'::JSONB THEN
+        _bad := _bad || ' dapp-footprint unknown account rc_source;';
     END IF;
     IF _bad <> '' THEN
         RAISE EXCEPTION 'FAIL (#44): exact and estimated rows in one window:%', _bad;

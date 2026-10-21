@@ -33,6 +33,8 @@ stages:
         to_date: "2020-06-30"
         total_ops: 65
         total_rc_estimated: 113000
+        rc_source: "estimated"
+        rc_exact_ops: 0
         top_category: "Gaming"
         top_dapp: "Splinterlands"
         categories:
@@ -41,21 +43,29 @@ stages:
             pct: 46.15
             rc_estimated: 6000
             rc_pct: 5.31
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "DeFi & Tokens"
             op_count: 20
             pct: 30.77
             rc_estimated: 7000
             rc_pct: 6.19
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "Social Graph"
             op_count: 10
             pct: 15.38
             rc_estimated: 15000
             rc_pct: 13.27
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "Uncategorized"
             op_count: 5
             pct: 7.69
             rc_estimated: 85000
             rc_pct: 75.22
+            rc_source: "estimated"
+            rc_exact_ops: 0
         dapps:
           - category: "Gaming"
             app_name: "Splinterlands"
@@ -63,21 +73,29 @@ stages:
             pct: 46.15
             rc_estimated: 6000
             rc_pct: 5.31
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "DeFi & Tokens"
             app_name: "Hive Engine (SSC)"
             op_count: 20
             pct: 30.77
             rc_estimated: 7000
             rc_pct: 6.19
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "Social Graph"
             app_name: "Hivemind Follow"
             op_count: 10
             pct: 15.38
             rc_estimated: 15000
             rc_pct: 13.27
+            rc_source: "estimated"
+            rc_exact_ops: 0
           - category: "Uncategorized"
             app_name: "mystery_app"
             op_count: 5
             pct: 7.69
             rc_estimated: 85000
             rc_pct: 75.22
+            rc_source: "estimated"
+            rc_exact_ops: 0
