@@ -566,18 +566,28 @@ dispatcher's own usage.
 ### Runtime user
 
 The image runs as `haf_stats`, **uid/gid 10001**, not root
-([#64](https://gitlab.syncad.com/hive/haf_stats/-/issues/64)). `/app` stays root-owned
-and read-only to it: the only file the processes write is the healthcheck's startup
-timestamp, `/tmp/block_processing_startup_time.txt`. If you point
-`HAF_STATS_STARTUP_TIME_FILE` (or the driver's `LOG_FILE`) at a mounted volume, that
-volume must be writable by uid 10001; a root-owned path now fails with `Permission
-denied`. The same goes for a root-owned volume mounted over `/tmp` itself, which
-breaks the default `/tmp/block_processing_startup_time.txt` with
-`HAF_STATS_STARTUP_TIME_FILE` unset. Likewise a node-local override that bind-mounts files into `/app` must leave
-them readable by uid 10001 -- a `0600` root-owned file used to work only because the
-image ran as root. Nothing binds a port, and every connection names
-its role explicitly (`POSTGRES_USER`), so the OS user does not reach the
-database -- only a `peer` rule in `pg_hba.conf` would make it matter.
+([#64](https://gitlab.syncad.com/hive/haf_stats/-/issues/64)), with no supplementary
+groups, no sudo rule and **no home directory** (`HOME=/nonexistent`, which it cannot
+create). `PYTHONNOUSERSITE=1` turns Python's per-user site off. `/app` and the PATH
+directories are root-owned and read-only to it.
+
+What the processes write:
+
+- the healthcheck's startup timestamp, `/tmp/block_processing_startup_time.txt`, via a
+  `.tmp.<pid>` file beside it that is renamed into place;
+- `haf_app_driver.py`'s log file, only if `LOG_FILE` is set (it is not by default).
+
+Operator overrides that used to work only because the image ran as root now fail with
+`Permission denied`:
+
+- `HAF_STATS_STARTUP_TIME_FILE` or `LOG_FILE` pointing at a root-owned path or volume;
+- a root-owned volume mounted over `/tmp` itself, which breaks the default startup file
+  when `HAF_STATS_STARTUP_TIME_FILE` is unset;
+- bind-mounting root-owned `0600` files into `/app` -- they must be readable by uid 10001.
+
+Nothing binds a port, and every connection names its role explicitly (`POSTGRES_USER`),
+so the OS user does not reach the database -- only a `peer` rule in `pg_hba.conf` would
+make it matter.
 
 ### Block-processing healthcheck
 

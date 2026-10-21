@@ -109,13 +109,20 @@ RUN case "${GIT_HASH}" in \
 # only the offending files are copied into this layer rather than all of /usr/bin.
 # Symlinks are skipped: their mode is meaningless and chmod would follow them.
 #
+# NO HOME DIRECTORY (-H, home /nonexistent under a root-owned /). A home owned by the
+# runtime user is a code path: haf_app_driver.py is `#!/usr/bin/env python3` without
+# -s, so ~/.local/lib/python3.*/site-packages/usercustomize.py -- or a planted psycopg2/
+# -- would run inside the block loop. PYTHONNOUSERSITE below disables the user site as
+# well, so neither defence depends on the other. Nothing here needs a home: psql runs
+# with -X and no history, libpq finds no ~/.pgpass, which is the intended state.
+#
 # This RUN is the LAST build step before USER: tests/unit/test_dockerfile_user.py
 # rejects any RUN/COPY/ADD after it, because a later COPY would land files with the
 # context's modes again. It is also AFTER the version.sql RUN on purpose:
 # tests/unit/test_version_provenance.py extracts that RUN with a non-greedy match from the
 # FIRST `^RUN`, so a RUN placed above it would be swept into the script it executes.
 RUN addgroup -S -g 10001 haf_stats \
- && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats \
+ && adduser -S -D -H -u 10001 -G haf_stats -h /nonexistent -s /bin/bash haf_stats \
  && for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do \
       if [ -d "$d" ]; then \
         find "$d" ! -type l \( -perm -0002 -o -perm -0020 \) -exec chmod go-w {} +; \
@@ -134,6 +141,10 @@ RUN addgroup -S -g 10001 haf_stats \
 # (see the script), so the existing `command: ["/app/scripts/process_blocks.sh"]` form
 # keeps working and an operator mid-migration is not stranded.
 ENTRYPOINT ["/app/docker_entrypoint.sh"]
+
+# Python's per-user site directory off for every python3 in the image (see the note on
+# the home directory above).
+ENV PYTHONNOUSERSITE=1
 
 # NUMERIC, so a runtime that enforces non-root (Kubernetes runAsNonRoot) can verify it
 # without resolving a name, and hadolint's DL3002/DL3066 no longer need ignoring.
