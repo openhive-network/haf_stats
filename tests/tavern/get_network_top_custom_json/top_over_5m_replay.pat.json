@@ -1,5 +1,5 @@
 [
-  { "json_id": "follow", "app_name": "Hivemind Follow", "category": "Social Graph", "op_count": 477697, "op_bytes": 81944073, "rc_estimate": 50115137820832 },
-  { "json_id": "booyah", "app_name": "booyah", "category": "Uncategorized", "op_count": 12, "op_bytes": 2118, "rc_estimate": 1287191472 },
-  { "json_id": "reblog", "app_name": "Hivemind Reblog", "category": "Social Graph", "op_count": 10, "op_bytes": 2158, "rc_estimate": 1259334560 }
+  { "json_id": "follow", "app_name": "Hivemind Follow", "category": "Social Graph", "op_count": 477697, "op_bytes": 81944073, "rc_estimate": 50115137820832, "rc_source": "estimated" },
+  { "json_id": "booyah", "app_name": "booyah", "category": "Uncategorized", "op_count": 12, "op_bytes": 2118, "rc_estimate": 1287191472, "rc_source": "estimated" },
+  { "json_id": "reblog", "app_name": "Hivemind Reblog", "category": "Social Graph", "op_count": 10, "op_bytes": 2158, "rc_estimate": 1259334560, "rc_source": "estimated" }
 ]

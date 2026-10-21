@@ -70,11 +70,11 @@ $guard$;
 -- be decided on the same 7-op array as group_by=op_type. Estimate: 5 votes * 97,278,897 =
 -- 486,394,485; 2 custom_json * 167,828,015 = 335,656,030.
 -- The shipped value first: the rest of this file lowers it, so nothing else pins it, and the README
--- and API text state it. NULL-safe: a NULL cap would make the check above it never fire.
+-- states it (the API returns it as rc_exact_op_cap). NULL-safe: a NULL cap would make the check above it never fire.
 DO $guard$
 BEGIN
     IF haf_stats_app.exact_rc_op_cap() IS DISTINCT FROM 15000 THEN
-        RAISE EXCEPTION 'FAIL (#44): exact_rc_op_cap() is %, but the README and the API description say 15,000', haf_stats_app.exact_rc_op_cap();
+        RAISE EXCEPTION 'FAIL (#44): exact_rc_op_cap() is %, but the README says 15,000', haf_stats_app.exact_rc_op_cap();
     END IF;
 END
 $guard$;
