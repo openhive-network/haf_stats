@@ -662,23 +662,38 @@ docker-build:
     # for the #!/bin/bash scripts. One line settles both.
     docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
     echo "--- the image runs as the unprivileged haf_stats user, not root (#64) ---"
-    # Each check is an `if ... then exit 1` or a plain command under set -e -- never a
-    # `! cmd` (see the end of this script) and never an `a && b` list, where set -e
-    # ignores a failing `a`. The read check
-    # cats every file under /app, so a COPY that lands a file this user cannot read
-    # fails HERE rather than as an install that cannot open its own SQL.
-    docker run --rm --entrypoint /bin/sh "$IMG" -c '
-      set -e
-      [ "$(id -u):$(id -g)" = "10001:10001" ] || { echo "running as $(id -u):$(id -g), want 10001:10001" >&2; exit 1; }
-      [ "$(id -un)" = "haf_stats" ] || { echo "uid 10001 is $(id -un), want haf_stats" >&2; exit 1; }
-      find /app -type f -exec cat {} + >/dev/null
-      f=/tmp/block_processing_startup_time.txt
-      echo probe > "$f.tmp.$$"
-      mv "$f.tmp.$$" "$f"
-      rm "$f"
-      if touch /app/write_probe 2>/dev/null; then echo "/app is writable by the runtime user" >&2; exit 1; fi
-      if sudo -n true 2>/dev/null; then echo "the runtime user can sudo" >&2; exit 1; fi
-      echo "runtime user ok: $(id)"'
+    # scripts/ci-helpers/check_runtime_user.sh (in the image) checks uid/gid and name,
+    # that EVERY path under /app is readable and none is writable or owned by the
+    # runtime user (recursive, via access(2) as that user), the startup-file write in
+    # /tmp, and no sudo. It runs as the image's default user -- no --user override.
+    CHECK=/app/scripts/ci-helpers/check_runtime_user.sh
+    timeout 60 docker run --rm --entrypoint "$CHECK" "$IMG"
+    echo "--- ...and the check FAILS on each way of getting that wrong (negative controls) ---"
+    # Built on this job's daemon FROM the image just built, never pushed. Each mutant must
+    # make the check exit non-zero AND name the specific path or problem, so a check
+    # that died for an unrelated reason does not count as catching it. These are the
+    # review's mutations: a writable subdirectory, a runtime-owned COPY, an unreadable
+    # file, and a separate sudoers RUN.
+    mutant() {
+      name="$1"; shift
+      printf 'FROM %s\nUSER 0\nRUN %s\nUSER 10001:10001\n' "$IMG" "$1" \
+        | docker build -q -t "haf_stats_mutant_$name" - >/dev/null
+      rc=0
+      timeout 60 docker run --rm --entrypoint "$CHECK" "haf_stats_mutant_$name" >/tmp/mut_out 2>&1 || rc=$?
+      cat /tmp/mut_out
+      if [ "$rc" != 1 ]; then
+        echo "FAIL: mutant $name was not caught (rc=$rc, wanted 1)" >&2; exit 1
+      fi
+      if grep -q -- "$2" /tmp/mut_out; then :; else
+        echo "FAIL: mutant $name failed the check without naming '$2'" >&2; exit 1
+      fi
+      docker rmi -f "haf_stats_mutant_$name" >/dev/null
+      echo "mutant $name caught"
+    }
+    mutant writable_subdir 'chmod -R o+w /app/db'                                  '^/app/db$'
+    mutant runtime_owned   'chown -R 10001:10001 /app/db'                          'owned by uid or gid 10001'
+    mutant unreadable_file 'chmod 0600 /app/db/version.sql'                        '^/app/db/version.sql$'
+    mutant sudoers         'echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers' 'can sudo'
     echo "--- entrypoint dispatches its own usage on stdout ---"
     expect_ok --help; grep -q "install_app" "$OUT"
     echo "--- unknown verb fails with the right message, not merely non-zero ---"
@@ -1086,6 +1101,19 @@ sync:
     echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
     "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  - |
+    # The block-processing healthcheck, run the way Docker runs it: inside the LIVE
+    # processor container, as the image's user (exec defaults to it), with the
+    # container's environment and the startup file process_blocks.sh wrote (#64).
+    # CI_FAST_HEALTHCHECK_SERVICES replaces the compose healthcheck on this service, so
+    # without this nothing in CI showed the real script passing as uid 10001 against a
+    # real HAF. In sync by now, so it must answer healthy; exit status is the assertion.
+    cd "${CI_PROJECT_DIR}/docker"
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    uid=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-process id -u)
+    [[ "$uid" == "10001" ]] || { echo "FAIL: haf-stats-process runs as uid '$uid', want 10001"; exit 1; }
+    docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-process /app/block-processing-healthcheck.sh
+    echo "block-processing healthcheck passed as uid $uid"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
     cd "${CI_PROJECT_DIR}/docker"

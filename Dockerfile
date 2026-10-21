@@ -83,9 +83,16 @@ RUN case "${GIT_HASH}" in \
 #
 # `chmod -R a+rX /app` because COPY keeps the BUILD CONTEXT's file modes, and those are
 # not always 644: scripts/openapi_rewrite.sh writes endpoints/rewrite_rules.conf through
-# mktemp, i.e. 0600, and CI's openapi-drift job runs it in the runner's shared checkout.
-# The first pipeline of this change built exactly that image -- a root-owned 0600 file
-# the runtime user could not read, invisible while the image ran as root.
+# mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
+# build directory -- git tracks only the exec bit, so a later fetch/checkout of the same
+# content never resets the mode. The first pipeline of this change built exactly that
+# image: a root-owned 0600 file the runtime user could not read, invisible while the
+# image ran as root (earlier published images likely carry it too, harmlessly).
+#
+# Cost: chmod copies /app into this layer once more, about 1 MB. `COPY --chmod=a+rX`
+# would avoid it but symbolic modes need the dockerfile:1.10 frontend, i.e. a `# syntax=`
+# pull from Docker Hub on every build; an octal --chmod applies to directories too, so
+# no single octal value suits both files and directories.
 #
 # Added AFTER the version.sql RUN on purpose: tests/unit/test_version_provenance.py
 # extracts that RUN with a non-greedy match from the FIRST `^RUN`, so a RUN placed above
