@@ -1,9 +1,8 @@
 # The REAL scripts/install_app.sh against a REAL PostgreSQL, in seconds. (#84)
 #
-# WHY THIS LANE EXISTS. Before it, every lane that ran `install_app.sh` needed a REPLAYED
+# WHY THIS LANE EXISTS. Every other lane that runs `install_app.sh` needs a REPLAYED
 # HAF -- `sync` starts haf-stats-setup, and `reinstall-test` compose-runs it but is gated
-# behind sync. Measured, sync runs 374.5-566.2s (6.2-9.4 min) across the six successful
-# runs in the project's last 100 jobs, plus find_haf_image and
+# behind sync, which alone takes 6-9 minutes on top of find_haf_image and
 # prepare_haf_data. Everything cheaper tests something adjacent instead --
 #
 #   tests/unit/*            runs the script against a STUB psql that exits 0 for
@@ -15,11 +14,9 @@
 #                           also never attempts db/haf_stats_app.sql or
 #                           db/builtin_roles.sql at all.
 #
-# So the cheapest way to run the real installer was to stand up a replayed HAF first.
-# That is how a `psql -c` bug -- `:'var'` is not substituted under -c, only under -f and
-# stdin -- got two red sync pipelines and an A/B across three of them to diagnose.
-#
-# This lane closes that: stub database, real script, seconds.
+# A failure only a real server shows -- e.g. `:'var'` is not substituted under `psql -c`,
+# only under -f and stdin -- would otherwise need a replayed HAF to surface. This lane is
+# stub database, real script, seconds.
 #
 # WHAT IT DELIBERATELY DOES NOT COVER. No block processing -- tests/ci_haf_stub.sql
 # is context bookkeeping only, not a HAF emulator. Op-type assertion is skipped (see the
@@ -31,12 +28,9 @@
 # volumes belonging to a running endpoint-tests stack.
 name: haf_stats_ci_install
 
-# THE DEFAULT BELOW IS DELIBERATELY UNRESOLVABLE, and it changed with #66.
-#
-# It used to be haf_stats:latest, which was safe only because no `latest` existed:
-# an unset HAF_STATS_IMAGE failed loudly on `manifest unknown`. #66 publishes
-# `latest` on every green develop pipeline, so that same mistake would now install
-# DEVELOP HEAD and go green -- a lane passing against a different commit than the
+# THE DEFAULT BELOW IS DELIBERATELY UNRESOLVABLE. #66 publishes `latest` on every green
+# develop pipeline, so a default of haf_stats:latest would let an unset HAF_STATS_IMAGE
+# install DEVELOP HEAD and go green -- a lane passing against a different commit than the
 # one under test, which is the one outcome that makes it worthless.
 #
 # docker-compose-ci-test.yml already reasons this way and uses the same shape; see
@@ -77,10 +71,9 @@ services:
   # INHERIT and GRANTs it hive_applications_owner_group -- so builtin_roles' CREATE ROLE
   # arms never ran, and its hard install-time assertion that haf_stats_owner holds
   # hive_applications_group was satisfied by the FIXTURE regardless of what the installer
-  # did. (Cited by statement rather than by line number on purpose: the line numbers an
-  # earlier revision gave here were wrong by 11, shifted by a comment block the very same
-  # commit inserted above them.) Concretely: the group grant could be deleted from db/builtin_roles.sql
-  # and this lane stayed green, while /sync-status answers 503 on a healthy node.
+  # did. Without the drop, the group grant could be deleted from db/builtin_roles.sql and
+  # this lane would stay green, while /sync-status answers 503 on a healthy node.
+  #
   # DROP OWNED BY first, because the roles hold grants and ALTER DEFAULT PRIVILEGES
   # entries that DROP ROLE alone refuses to step over. In a file rather than inline
   # because DROP OWNED BY raises 42704 on a role that does not exist, so it needs a guard
@@ -118,18 +111,16 @@ services:
       postgres:
         condition: service_healthy
 
-  # Shared by every install service below. (The "Install #1" this paragraph used to
-  # label is now further down, after reset-app -- there are five installs.)
-  #
-  # HAF_STATS_SKIP_OP_TYPE_ASSERT: the assertion compares hafd.operation_types against
-  # db/op_type_registry.sql, and ci_setup.sql seeds 5 rows (ids 1, 2, 18, 64, 86) with
-  # deliberately NON-mainnet ids so the shipped registry cannot pass against it by
-  # construction. Note the flag DOWNGRADES the assertion's three fatal arms to a WARNING
-  # rather than skipping the function: assert_op_types still runs ten times here
-  # (install_app.sh calls it twice, in each of the five installs). What is never
-  # exercised is its ABORT. The failure arms are covered by tests/ci_op_types.sql in the
-  # endpoint-tests lane; running it here would only assert that a stub disagrees with
+  # HAF_STATS_SKIP_OP_TYPE_ASSERT, set on every install service below: the assertion
+  # compares hafd.operation_types against db/op_type_registry.sql, and ci_setup.sql seeds 5
+  # rows (ids 1, 2, 18, 64, 86) with deliberately NON-mainnet ids so the shipped registry
+  # cannot pass against it by construction. Note the flag DOWNGRADES the assertion's three
+  # fatal arms to a WARNING rather than skipping the function: assert_op_types still runs
+  # ten times here (install_app.sh calls it twice, in each of the five installs). What is
+  # never exercised is its ABORT. The failure arms are covered by tests/ci_op_types.sql in
+  # the endpoint-tests lane; running it here would only assert that a stub disagrees with
   # mainnet.
+  #
   # THE BASELINE INSTALL -- what a real node is upgrading FROM. (#78)
   #
   # WHY THIS EXISTS. reinstall-test installs the SAME image twice, so it is an
@@ -137,15 +128,13 @@ services:
   # one #73 exists to prevent: `ERROR: cannot change return type of existing function`.
   # CREATE OR REPLACE of an UNCHANGED signature is already idempotent, so a second
   # install of the same commit exits 0 whether or not #73's nine DROPs are present --
-  # delete all nine and that lane still goes green. They shipped with no regression
-  # coverage at all.
+  # delete all nine and that lane still goes green. This pair is what covers them.
   #
-  # BASELINE SQL FROM GIT, NOT A BASELINE IMAGE. #78 proposed pulling
-  # ${CI_REGISTRY_IMAGE}:<develop-sha>. A git checkout is strictly better here: no
-  # dependency on that tag surviving registry cleanup, no dependency on #66 landing to
-  # make it robust, and no "skip loudly when the image cannot be pulled" path that could
-  # itself go quiet. .gitlab-ci.yml extracts the merge target's db/, endpoints/ and
-  # scripts/ into .baseline/ before the stack starts.
+  # BASELINE SQL FROM GIT, NOT A BASELINE IMAGE such as ${CI_REGISTRY_IMAGE}:<develop-sha>:
+  # a git checkout does not depend on a tag surviving registry cleanup, and has no "skip
+  # loudly when the image cannot be pulled" path that could itself go quiet.
+  # .gitlab-ci.yml extracts the merge target's db/, endpoints/ and scripts/ into
+  # .baseline/ before the stack starts.
   #
   # scripts/ IS MOUNTED TOO, and that is not optional. install_app.sh loads its SQL files
   # BY NAME; mounting only the baseline's db/ under the CURRENT script breaks the moment
@@ -153,7 +142,7 @@ services:
   # With scripts/ mounted this is the baseline application, running in the current
   # image's userland.
   #
-  # NOT DONE IN reinstall-test, where #78 was filed. That lane's datadir comes from sync
+  # NOT DONE IN reinstall-test. That lane's datadir comes from sync
   # with the CURRENT schema already installed (docker-compose-ci-test.yml says so), so a
   # baseline install there is a DOWNGRADE -- and if this commit legitimately changed a
   # return type, the downgrade hits the very error under test, in reverse, turning the
@@ -238,9 +227,8 @@ services:
   # Between the installs: prove #1 seeded the pointer, then move app_status ahead of the
   # context so #2 has something to repair.
   #
-  # Without this, install #2 took the `_ctx_block >= _seed` early return and was worth
-  # almost nothing -- it never called app_context_is_attached or app_set_current_block_num,
-  # and deleting the whole service left every assertion passing. hive_state.consistent_block
+  # Without this, install #2 would take the `_ctx_block >= _seed` early return and never
+  # call app_context_is_attached or app_set_current_block_num. hive_state.consistent_block
   # is 6000, so a 5000 app_status clamps to 5000 rather than being rejected, and the final
   # pointer becomes a number only hive.app_set_current_block_num can have produced.
   seed-repair:
@@ -257,11 +245,11 @@ services:
 
   # UNDO all 14 guarded upgrades, so the next install runs the DDL inside every one. (#96)
   #
-  # Without it this lane ran the DDL of one of them: comment_registry.community's ADD COLUMN,
-  # which a fresh install needs because the CREATE TABLE lacks the column. Every other guard met
-  # a table that was already upgraded, so a typo in its DDL -- or a catalog test that is wrongly
-  # always-FALSE -- would ship green. install-again redoes all 14, and ci_install_verify.sql
-  # asserts each one. See tests/ci_break_schema.sql for the list.
+  # Without it this lane would run the DDL of only one of them: comment_registry.community's
+  # ADD COLUMN, which a fresh install needs because the CREATE TABLE lacks the column. Every
+  # other guard met a table that was already upgraded, so a typo in its DDL -- or a catalog
+  # test that is wrongly always-FALSE -- would ship green. install-again redoes all 14, and
+  # ci_install_verify.sql asserts each one. See tests/ci_break_schema.sql for the list.
   break-schema:
     image: postgres:14-alpine
     entrypoint: ["/bin/sh", "-c"]
@@ -279,14 +267,12 @@ services:
   # has to READ the state the first run wrote.
   #
   # It takes the REPAIR branch, because seed-repair above arranged for it to: the context
-  # is at 0 and app_status is at 5000, so `_ctx_block >= _seed` is false. (An earlier
-  # revision of this comment said the opposite -- that install #2 takes the early return
-  # and the repair branch is unreachable. That was true before seed-repair existed, and
-  # seed-repair exists precisely because it made this service worth almost nothing.)
-  # The job trace confirms it: `install-again-1 | WARNING: HAF context haf_stats repaired:
-  # block 0 -> 5000`.
+  # is at 0 and app_status is at 5000, so `_ctx_block >= _seed` is false. The job log
+  # shows it: `install-again-1 | WARNING: HAF context haf_stats repaired: block 0 -> 5000`.
+  #
   # It and install-under-lock are the only places the installer's own idempotency is exercised
-  # against a real server outside the replayed-HAF lanes (sync carries an explicit timeout: 2h; reinstall-test inherits the project's 3600s).
+  # against a real server outside the replayed-HAF lanes (sync carries an explicit timeout:
+  # 2h; reinstall-test inherits the project's 3600s).
   install-again:
     image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
     command: ["install_app"]
@@ -352,11 +338,10 @@ services:
       lock-holder:
         condition: service_healthy
 
-  # Teardown, which no lane covered at all: NOTHING IN CI HAD EVER RUN uninstall_app.sh
-  # AGAINST A DATABASE. (tests/unit/test_uninstall_app.py has ~75 tests, but they stub psql,
-  # so none of them reaches a server.) It costs ~2s here, and it
-  # is also what makes hive.app_remove_context in the shim live code rather than a
-  # function whose only caller is the shim's own self-test.
+  # Teardown. This is the only place CI runs uninstall_app.sh AGAINST A DATABASE
+  # (tests/unit/test_uninstall_app.py stubs psql, so it never reaches a server). It costs
+  # ~2s here, and it is also what makes hive.app_remove_context in the shim live code
+  # rather than a function whose only caller is the shim's own self-test.
   #
   # --force because there is no TTY; uninstall_app.sh refuses the interactive confirmation
   # without it.

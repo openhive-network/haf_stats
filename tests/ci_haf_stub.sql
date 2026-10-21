@@ -1,14 +1,10 @@
 -- A minimal HAF shim, so the REAL scripts/install_app.sh can run against a plain
 -- PostgreSQL. (#84)
 --
--- WHY THIS EXISTS. Every lane that runs `install_app.sh` needs a REPLAYED HAF: `sync`
--- starts haf-stats-setup, and `reinstall-test` compose-runs it but is gated behind sync.
--- Measured, `sync` runs 374.5-566.2s (6.2-9.4 min) across the six successful runs in
--- the project's last 100 jobs, on top of find_haf_image and
--- prepare_haf_data. Everything cheaper tests something adjacent: the unit suite stubs
--- psql, so it cannot fail the way PostgreSQL does, and the `endpoint-tests` lane loads
--- the SQL files directly without the installer. That is how a `psql -c` bug no unit test
--- could see cost two red sync pipelines.
+-- WHY THIS EXISTS. Every other lane that runs `install_app.sh` needs a REPLAYED HAF (see
+-- docker/docker-compose-ci-install.yml for the cost). Everything cheaper tests something
+-- adjacent: the unit suite stubs psql, so it cannot fail the way PostgreSQL does, and the
+-- `endpoint-tests` lane loads the SQL files directly without the installer.
 --
 -- tests/ci_setup.sql stubs enough HAF for the files the endpoint-tests lane loads:
 -- hafd.contexts, hafd.hive_state, hafd.operation_types, hafd.blocks,
@@ -26,9 +22,8 @@
 -- app_get_current_block_num and app_remove_context -- which the shim's own smoke test,
 -- tests/ci_install_verify.sql and the teardown step use, plus hive.can_impersonate,
 -- which scripts/uninstall_app.sh calls directly, and hafd.live_stage(). 13 functions,
--- and the
--- invariants they reason about. A processor cannot run against it: there is no block
--- streaming here, only context bookkeeping.
+-- and the invariants they reason about. A processor cannot run against it: there is no
+-- block streaming here, only context bookkeeping.
 --
 -- ON FIDELITY. A shim that accepts everything makes the lane green while the real thing
 -- would fail, which is worse than no lane. So each function below ENFORCES the rule the
@@ -41,8 +36,8 @@
 --
 -- ci_setup.sql creates the app's own roles and the two hive_applications groups, but not
 -- haf_admin -- HAF's superrole, which db/builtin_roles.sql:63 grants haf_stats_owner to.
--- The first run of this lane failed there, which is the gap it exists to find: on a real
--- node HAF has already created it, so nothing in this repo ever noticed the dependency.
+-- On a real node HAF has already created it, so the dependency is invisible to every lane
+-- that runs against one.
 --
 -- NOLOGIN is enough: the install only ever GRANTs INTO this role, it never connects as
 -- it. Kept deliberately unprivileged rather than SUPERUSER so the lane cannot pass by
@@ -68,8 +63,7 @@ $$;
 -- ---------------------------------------------------------------------------
 
 -- HAF's domain is `TEXT NOT NULL CONSTRAINT non_empty_context CHECK (LENGTH(VALUE) != 0)`
--- (hive/haf context_rewind/data_schema.sql). There is no length rule to model -- an
--- earlier version of this comment claimed one, and contradicted the inner comment below.
+-- (hive/haf context_rewind/data_schema.sql). There is no length rule to model.
 --
 -- NOT MODELLED, deliberately: HAF also rejects names outside [a-zA-Z0-9_], but it does so
 -- in hive.context_create (rewind_api.sql), not in the domain. The installer hardcodes
@@ -88,12 +82,10 @@ END
 $$;
 
 -- haf_stats_app.main() DECLAREs a variable of this type, and plpgsql resolves declared
--- types at CREATE time -- so without it db/haf_stats_app.sql cannot even load. That file
--- had never been loaded in a HAF-LESS lane: install_app.sh:184 loads it unconditionally,
--- so sync and reinstall-test always have -- but only ever against a real HAF, where the
--- type exists. The endpoint-tests lane hand-creates app_status and app_version in
--- ci_setup.sql instead of running that file, so the dependency was invisible to anything
--- cheap.
+-- types at CREATE time -- so without it db/haf_stats_app.sql cannot even load. This is the
+-- only HAF-LESS lane that loads that file: sync and reinstall-test load it against a real
+-- HAF, where the type exists, and the endpoint-tests lane hand-creates app_status and
+-- app_version in ci_setup.sql instead of running it.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
@@ -154,9 +146,8 @@ BEGIN
                    WHERE n.nspname = 'hafd' AND t.typname = 'application_stage') THEN
         -- hafd.application_stage, which is what HAF actually calls it
         -- (application_loop/stages.sql:8). There is NO type named hive.stage upstream --
-        -- only the FUNCTION of that name. An earlier revision of this shim invented the
-        -- type because db/haf_stats_app.sql used to declare variables of it; #87 moved
-        -- that file onto the canonical names, so the invention is no longer needed.
+        -- only the FUNCTION of that name (the DO block above drops a stale composite
+        -- of that name left by an older load of this file).
         CREATE TYPE hafd.application_stage AS (
             name                        hafd.stage_name,
             min_head_block_distance     hafd.blocks_distance,
@@ -184,8 +175,8 @@ BEGIN
     -- The THIRD alias. compatibility_with_old_haf_apps.sql defines three domains, not
     -- two; hive.contexts_group is the argument type of the group overloads of
     -- app_context_attach/detach/set_non_forking that this shim's comments already cite.
-    -- Nothing here calls them, but leaving the domain out made "the shim reproduces the
-    -- compat aliases" false.
+    -- Nothing here calls them; the domain is reproduced so the shim's compat aliases
+    -- match HAF's.
     IF NOT EXISTS (SELECT FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
                    WHERE n.nspname = 'hive' AND t.typname = 'contexts_group') THEN
         CREATE DOMAIN hive.contexts_group AS hafd.context_name[] NOT NULL
@@ -206,12 +197,11 @@ $$;
 -- ---------------------------------------------------------------------------
 
 -- ATTACHMENT IS THE WRONG SHAPE HERE, AND IT IS A LIVE TRAP -- not a cosmetic one.
--- Measured on the live node by a parallel review: hafd.contexts_attachment EXISTS, and
--- hafd.contexts has NO is_attached column at all. Upstream that table carries its own
--- REVOKE UPDATE(owner), its own ENABLE ROW LEVEL SECURITY and its own four policies
--- (authorization.sql:81-112) -- so the sp_applications_*_hive_context policies this file
--- transcribes verbatim do NOT guard attach/detach on a node, and the ones that do are
--- absent here.
+-- On a node hafd.contexts_attachment EXISTS, and hafd.contexts has NO is_attached column
+-- at all. Upstream that table carries its own REVOKE UPDATE(owner), its own ENABLE ROW
+-- LEVEL SECURITY and its own four policies (authorization.sql:81-112) -- so the
+-- sp_applications_*_hive_context policies this file transcribes verbatim do NOT guard
+-- attach/detach on a node, and the ones that do are absent here.
 --
 -- Already reachable: tests/parity/context_vs_app_status.sql:146 does
 -- `UPDATE hafd.contexts_attachment SET is_attached = FALSE`. Nothing routes through that
@@ -220,8 +210,7 @@ $$;
 -- with `relation "hafd.contexts_attachment" does not exist`.
 --
 -- Not fixed here: splitting the table means re-transcribing four more policies and
--- changing every attachment call path. Recorded in the MR's Scope and limits, and it
--- belongs with the drift guard in #87.
+-- changing every attachment call path. It belongs with the drift guard in #87.
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS is_attached  BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS is_forking   BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
@@ -232,8 +221,8 @@ ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
 -- install_app.sh runs `SET ROLE haf_stats_owner` before calling
 -- create_context_if_not_exists(), so the shim's functions execute as that role, not as
 -- the superuser that created them. ci_setup.sql grants the group SELECT only, and its RLS
--- policy is FOR SELECT -- so the install failed with `permission denied for table
--- contexts` until this existed.
+-- policy is FOR SELECT -- so without this section the install fails with `permission
+-- denied for table contexts`.
 --
 -- Modelled on the real node rather than waved through. The production topology:
 -- hive_applications_group holds ALL on hafd.contexts (TRUNCATE, INSERT, UPDATE...) and
@@ -249,11 +238,10 @@ ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
 -- Transcribed from authorization.sql:68 and :78 -- including the fact that the REVOKE is
 -- INERT. PostgreSQL resolves the relation ACL first and consults per-column ACLs only for
 -- bits the relation ACL does not supply, so a column REVOKE cannot cut back a preceding
--- table-level GRANT ALL. It reports plain `REVOKE` and emits NO warning at all -- checked
--- in job 3271957's db-setup output, because an earlier version of this comment asserted a
--- `no privileges could be revoked` warning that PostgreSQL does not produce here (that
--- one appears when the role holds no privileges on the object; this role holds ALL).
--- So the statement is not merely inert, it is silently inert.
+-- table-level GRANT ALL. It reports plain `REVOKE` and emits NO warning at all (the `no
+-- privileges could be revoked` warning appears only when the role holds no privileges on
+-- the object; this role holds ALL). So the statement is not merely inert, it is silently
+-- inert.
 --
 -- DO NOT "FIX" THIS BY ENUMERATING PRIVILEGES. It is inert on a real node too, and HAF
 -- proves it: hive.app_context_set_non_forking is not SECURITY DEFINER and runs
@@ -261,11 +249,11 @@ ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
 -- for every HAF app in existence if the revoke bit. A stricter stub would turn a working
 -- install red.
 --
--- An earlier version of this comment claimed the revoke modelled a node-side denial. It
--- does not. It reproduces HAF's exact ACL, and the consequence to be aware of is that
--- NEITHER this shim NOR a node provides column-level protection on is_forking or owner.
--- Choosing GRANT ALL over enumeration still matters for a different reason: enumeration
--- omitted TRUNCATE, which is the privilege db/builtin_roles.sql's second leak probe tests.
+-- The revoke does not model a node-side denial. It reproduces HAF's exact ACL, and the
+-- consequence to be aware of is that NEITHER this shim NOR a node provides column-level
+-- protection on is_forking or owner. Choosing GRANT ALL over enumeration also matters for
+-- a different reason: enumeration omits TRUNCATE, which is the privilege
+-- db/builtin_roles.sql's second leak probe tests.
 GRANT ALL ON hafd.contexts TO hive_applications_group;
 REVOKE UPDATE (is_forking, owner) ON hafd.contexts FROM hive_applications_group;
 GRANT CREATE ON SCHEMA hafd TO hive_applications_group;
@@ -289,11 +277,11 @@ WITH CHECK (current_user = owner);
 -- hive.can_impersonate, VERBATIM from hive/haf src/hive_fork_manager/authorization.sql.
 -- Copied rather than approximated because scripts/uninstall_app.sh calls it DIRECTLY --
 -- its guard 2 asks the question the DELETE policy asks -- and because it is not the same
--- predicate as pg_has_role(..., 'MEMBER'), which an earlier revision of this shim used:
--- pg_has_role reports TRUE for a SUPERUSER that was never granted the role, and
--- can_impersonate does not. A stub that said TRUE where HAF says FALSE would let
--- uninstall's guard pass for a role the node's policy then refuses, and the DELETE would
--- match zero rows WITHOUT ERROR -- the exact silent failure that guard exists to prevent.
+-- predicate as pg_has_role(..., 'MEMBER'): pg_has_role reports TRUE for a SUPERUSER that
+-- was never granted the role, and can_impersonate does not. A stub that said TRUE where HAF
+-- says FALSE would let uninstall's guard pass for a role the node's policy then refuses,
+-- and the DELETE would match zero rows WITHOUT ERROR -- the exact silent failure that guard
+-- exists to prevent.
 CREATE OR REPLACE FUNCTION hive.can_impersonate(_role_to_check IN TEXT, _required_role IN TEXT)
 RETURNS BOOLEAN
 LANGUAGE 'plpgsql'
@@ -326,12 +314,11 @@ END
 $$;
 
 -- The write policies, also verbatim. Note HAF's UPDATE is `USING(TRUE) WITH CHECK(...)`,
--- not a restricted USING: that distinction is load-bearing and the earlier revision had it
--- backwards. Under a RESTRICTED USING, an UPDATE of a row you cannot impersonate simply
--- does not SEE the row -- zero rows updated, no error, caller proceeds. Under HAF's form
--- the row is visible and the WITH CHECK RAISES. So the old shim turned a node's hard
--- failure into a silent no-op, which is the single failure mode this whole lane exists to
--- rule out.
+-- not a restricted USING, and that distinction is load-bearing. Under a RESTRICTED USING,
+-- an UPDATE of a row you cannot impersonate simply does not SEE the row -- zero rows
+-- updated, no error, caller proceeds. Under HAF's form the row is visible and the WITH
+-- CHECK RAISES. A restricted USING here would turn a node's hard failure into a silent
+-- no-op, which is the single failure mode this whole lane exists to rule out.
 DROP POLICY IF EXISTS sp_applications_hive_context_update ON hafd.contexts;
 DROP POLICY IF EXISTS sp_applications_update_hive_context ON hafd.contexts;
 CREATE POLICY sp_applications_update_hive_context ON hafd.contexts
@@ -351,19 +338,19 @@ USING (hive.can_impersonate(current_user, owner));
 
 -- Parameter names, domain-typed arguments and the 4th argument DEFAULT all match
 -- hive/haf application_loop/stages_functions.sql:124-128. The default matters:
--- hive.stage(<name>, 0, 1) is a valid three-argument call on a node and was an error here
--- while this function required four. Typing the arguments as the domains rather than as
--- INT/TEXT is what makes the CHECKs fire at the CALL, as they do upstream, instead of at
--- the cast inside.
--- Retired signatures. CREATE OR REPLACE cannot remove an overload, and both of these
--- changed shape after the file had already been loaded on some databases: hive.stage was
--- (TEXT, INT, INT, INTERVAL) and hive.app_context_attach took a second _block_num. On a
--- fresh CI postgres this is a no-op; locally, `docker compose up` without `down -v`
--- across a branch switch would leave the old ones behind, and
--- hive.app_context_attach('haf_stats') would then be AMBIGUOUS against a 2-arg overload
--- with a defaulted second parameter. Every other object in this file is written to
--- survive a re-run (IF NOT EXISTS on all 10 type objects, 6 DROP POLICY IF EXISTS before
--- 3 CREATE POLICY); these 7 now are too.
+-- hive.stage(<name>, 0, 1) is a valid three-argument call on a node, so it must be here.
+-- Typing the arguments as the domains rather than as INT/TEXT is what makes the CHECKs fire
+-- at the CALL, as they do upstream, instead of at the cast inside.
+--
+-- Retired signatures. CREATE OR REPLACE cannot remove an overload, and both of these changed shape after the
+-- file had already been loaded on some databases: hive.stage was (TEXT, INT, INT, INTERVAL)
+-- and hive.app_context_attach took a second _block_num. On a fresh CI postgres this is a
+-- no-op; locally, `docker compose up` without `down -v` across a branch switch would leave
+-- the old ones behind, and hive.app_context_attach('haf_stats') would then be AMBIGUOUS
+-- against a 2-arg overload with a defaulted second parameter. Every other object in this
+-- file is written to survive a re-run (IF NOT EXISTS on all 10 type objects, 6 DROP POLICY
+-- IF EXISTS before 3 CREATE POLICY), and these DROP FUNCTIONs (with the two before
+-- app_create_context) make the functions survive one too.
 DROP FUNCTION IF EXISTS hive.stage(TEXT, INT, INT, INTERVAL);
 -- The DOMAIN-TYPED signature too, and this one is not optional. #87 changed this
 -- function's RETURN type from hive.stage to hafd.application_stage, and CREATE OR
@@ -389,10 +376,10 @@ AS $$ SELECT ROW(_name, _min_head_block_distance, _blocks_limit_in_group,
 -- is the compat wrapper that just calls it. Both modelled, because db/haf_stats_app.sql
 -- now calls the canonical one and the wrapper is what #87 is watching for removal.
 -- Routed through hive.stage(), as upstream is (application_loop/stages.sql:15-24):
--- plpgsql, IMMUTABLE, body `RETURN hive.stage('live', 0, 1, '3 seconds')`. An earlier
--- revision built the ROW directly in LANGUAGE sql. Same value, but the dependency is the
--- point: on a node hafd.live_stage() goes through hive.stage() and therefore through the
--- domain CHECKs, and a shim that bypasses them accepts a stage a node would reject.
+-- plpgsql, IMMUTABLE, body `RETURN hive.stage('live', 0, 1, '3 seconds')`. Building the
+-- ROW directly would give the same value, but the dependency is the point: on a node
+-- hafd.live_stage() goes through hive.stage() and therefore through the domain CHECKs, and
+-- a shim that bypasses them accepts a stage a node would reject.
 CREATE OR REPLACE FUNCTION hafd.live_stage()
 RETURNS hafd.application_stage
 LANGUAGE plpgsql IMMUTABLE
@@ -411,14 +398,12 @@ AS $$ SELECT EXISTS (SELECT 1 FROM hafd.contexts AS c WHERE c.name = _name) $$;
 -- Refuses a duplicate, like the real one: install_app.sh only calls this inside
 -- `IF NOT app_context_exists`, so a shim that silently upserted would hide a caller that
 -- lost that guard.
--- FOUR arguments, the fourth defaulted -- measured on the live node, where the staged
--- overload is
+-- FOUR arguments, the fourth defaulted, as on a node, where the staged overload is
 --   (_name hafd.context_name, _schema text, _stages hafd.application_stages,
 --    _is_forking boolean DEFAULT true)
--- The shim had three. db/haf_stats_app.sql's call passes _name/_schema/_stages by NAME and
--- so resolves against both, which is why this never showed up -- verified by PREPAREing
--- that exact call shape against the node. But a caller passing _is_forking => FALSE would
--- work on a node and fail here with "function does not exist".
+-- db/haf_stats_app.sql's call passes _name/_schema/_stages by NAME and so would also
+-- resolve against a three-argument form, but a caller passing _is_forking => FALSE needs
+-- the fourth. The first DROP below retires that older three-argument signature.
 DROP FUNCTION IF EXISTS hive.app_create_context(hafd.context_name, TEXT, hive.application_stages);
 DROP FUNCTION IF EXISTS hive.app_create_context(hafd.context_name, TEXT, hive.application_stages, BOOLEAN);
 CREATE OR REPLACE FUNCTION hive.app_create_context(
@@ -435,10 +420,9 @@ BEGIN
         RAISE EXCEPTION 'context % created with no stages', _name;
     END IF;
     -- DETACHED, like HAF: its staged app_create_context passes _is_attached = False.
-    -- An earlier revision inserted TRUE, which cancelled out against the equally-wrong
-    -- set_non_forking below for the install's current call ORDER -- so the lane was green
-    -- on a model that would have failed for any reordering of
-    -- create_context_if_not_exists().
+    -- Inserting TRUE can cancel out against an equally-wrong set_non_forking for the
+    -- install's current call ORDER, leaving the lane green on a model that fails for any
+    -- reordering of create_context_if_not_exists().
     INSERT INTO hafd.contexts (name, owner, current_block_num, irreversible_block,
                                is_attached, is_forking, app_schema)
     VALUES (_name, CURRENT_USER, 0, 0, FALSE, _is_forking, _schema);
@@ -505,11 +489,10 @@ $$;
 -- create_context_if_not_exists() reasons about exactly this ("app_context_attach raises
 -- if current_block_num > consistent_block"), and clamps its seed with LEAST to avoid it.
 -- Enforced so that the clamp is a live requirement here, not decoration.
--- ONE ARGUMENT, like HAF. An earlier revision took an optional _block_num, which HAF has
--- on neither overload (app_api.sql offers app_context_attach(hive.contexts_group) and
--- app_context_attach(hafd.context_name)) -- so a future two-argument call would have been
--- green here and `function hive.app_context_attach(unknown, integer) does not exist` on a
--- node.
+-- ONE ARGUMENT, like HAF, which has no _block_num on either overload (app_api.sql offers
+-- app_context_attach(hive.contexts_group) and app_context_attach(hafd.context_name)) -- a
+-- second parameter here would let a two-argument call pass that fails on a node with
+-- `function hive.app_context_attach(unknown, integer) does not exist`.
 CREATE OR REPLACE FUNCTION hive.app_context_attach(_name TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -587,26 +570,22 @@ $$;
 -- function to PUBLIC by default, so in CI every role -- including haf_stats_user, which
 -- backs the UNAUTHENTICATED PostgREST connection -- could call every hive.* function.
 --
--- MEASURED AGAINST THE LIVE NODE, and the answer is more complicated than either this
--- comment or the commit that added it first said.
---
--- On testapi, PUBLIC EXECUTE on schema hive is NOT fully revoked: of 376 hive.* functions,
--- 4 carry the default NULL ACL and 133 carry an explicit PUBLIC entry. HAF's
--- `REVOKE ... FROM PUBLIC` (authorization.sql:159) is a SNAPSHOT, so anything created
--- after it keeps the default grant. This shim's revoke is therefore STRICTER than the node
--- in absolute terms -- but strictly in the safe direction: it can only make the lane red
--- for a missing grant, never green for one a node lacks.
+-- ON A NODE THE PICTURE IS LESS TIDY. On testapi, PUBLIC EXECUTE on schema hive is NOT
+-- fully revoked: of 376 hive.* functions, 4 carry the default NULL ACL and 133 carry an
+-- explicit PUBLIC entry. HAF's `REVOKE ... FROM PUBLIC` (authorization.sql:159) is a
+-- SNAPSHOT, so anything created after it keeps the default grant. This shim's revoke is
+-- therefore STRICTER than the node in absolute terms -- but strictly in the safe direction:
+-- it can only make the lane red for a missing grant, never green for one a node lacks.
 --
 -- The node's own ACL for the functions haf_stats actually calls is explicit, not PUBLIC:
 --   hive.is_instance_ready  -> haf_admin=X, hive_applications_group=X, haf_maintainer=X,
 --                              haf_stats_owner=X, haf_stats_user=X
 -- i.e. db/builtin_roles.sql:81 and :86 have both run there and are visible in pg_proc.proacl.
 --
--- WHAT THIS DOES AND DOES NOT BUY -- stated precisely, because the commit that added it
--- overclaimed. It makes db/builtin_roles.sql:86 falsifiable: haf_stats_user is NOINHERIT
--- and in no group, so without :86 it has no EXECUTE at all, and install_app.sh's
--- `SET ROLE haf_stats_user; ... hive.is_instance_ready()` step fails the install.
--- tests/ci_install_verify.sql asserts it directly as well.
+-- WHAT THIS DOES AND DOES NOT BUY. It makes db/builtin_roles.sql:86 falsifiable:
+-- haf_stats_user is NOINHERIT and in no group, so without :86 it has no EXECUTE at all, and
+-- install_app.sh's `SET ROLE haf_stats_user; ... hive.is_instance_ready()` step fails the
+-- install. tests/ci_install_verify.sql asserts it directly as well.
 --
 -- It does NOT make :81 falsifiable. haf_stats_owner inherits EXECUTE through
 -- hive_applications_group via the GRANT below, so deleting :81 changes nothing here --
@@ -619,33 +598,23 @@ $$;
 -- That installer removes the group edge, after which only the INHERIT flag still differs.
 -- db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group, so this
 -- lane models a FRESH install, while the node carries a role an UNMERGED revision of that
--- file created (9a77508: "LOGIN INHERIT IN ROLE hive_applications_group"). An earlier
--- revision of this comment blamed HAF's create_haf_app_role.sh; its default group is the
--- owner one.
+-- file created (9a77508: "LOGIN INHERIT IN ROLE hive_applications_group").
 -- Consequence for :86: load-bearing in the state this lane models -- and on that node too,
 -- once the group edge is gone. It was redundant there only while the group supplied EXECUTE.
 --
--- The same divergence meant this lane never reached db/builtin_roles.sql's LEAK PROBE or,
--- since #88, the revoke before it. tests/ci_break_schema.sql now grants the group to
--- haf_stats_user before install-again, so the revoke runs on every pipeline and
--- ci_install_verify.sql asserts it worked. Before #88, on testapi -- measured:
--- pg_has_role(haf_stats_user, hive_applications_group, MEMBER) = t, and
--- has_table_privilege(haf_stats_user, hafd.contexts, TRUNCATE/DELETE/INSERT) = t, t, t.
--- So the anon PostgREST role can write hafd.contexts there, gated for UPDATE/DELETE by
--- RLS (can_impersonate(haf_stats_user, haf_stats_owner) = f) but NOT for TRUNCATE, which
--- row-level security does not cover. haf_fyp_user was taken out of that group in haf_fyp!41;
--- the installer takes haf_stats_user out too (#88), the next time it runs there.
---
--- What the revoke is really for: without it PostgreSQL's default PUBLIC grant lets EVERY
--- role call EVERY hive.* function, including haf_stats_user, which backs the
--- UNAUTHENTICATED PostgREST connection. That is a privilege topology no node has.
+-- Because of that divergence a fresh install never reaches db/builtin_roles.sql's LEAK
+-- PROBE or the #88 revoke before it, so tests/ci_break_schema.sql grants the group to
+-- haf_stats_user before install-again; the revoke then runs on every pipeline and
+-- ci_install_verify.sql asserts it worked. It matters because a member of that group has
+-- TRUNCATE/DELETE/INSERT on hafd.contexts, gated for UPDATE/DELETE by RLS
+-- (can_impersonate(haf_stats_user, haf_stats_owner) = f) but NOT for TRUNCATE, which
+-- row-level security does not cover.
 --
 -- PLACEMENT IS LOAD-BEARING. `ON ALL FUNCTIONS` is a SNAPSHOT, not a standing rule, so
 -- this must come after every CREATE FUNCTION above -- including hive.can_impersonate, and
 -- including the hive.* functions tests/ci_setup.sql created earlier in the same db-setup
 -- step. The install itself is unaffected: scripts/install_app.sh loads
--- db/builtin_roles.sql at line 181, well before its first `SET ROLE haf_stats_owner` at
--- line 251.
+-- db/builtin_roles.sql well before its first `SET ROLE haf_stats_owner`.
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA hive FROM PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO hive_applications_group;
 
@@ -664,9 +633,7 @@ BEGIN
         RAISE EXCEPTION 'shim: app_create_context did not create a context';
     END IF;
 
-    -- HAF creates a staged context DETACHED. This probe asserted the opposite until the
-    -- semantics were corrected, and then failed -- which is the smoke test doing its job:
-    -- a change to the contract should break the thing that documents the contract.
+    -- HAF creates a staged context DETACHED.
     IF hive.app_context_is_attached(_probe) THEN
         RAISE EXCEPTION 'shim: app_create_context left the context ATTACHED; HAF creates it detached';
     END IF;
@@ -715,8 +682,7 @@ BEGIN
     -- THE DOMAIN CHECKS, which nothing else can fail. No call site in this repo passes
     -- an invalid stage -- db/haf_stats_app.sql's two are both valid -- so every CHECK on
     -- hafd.stage_name / blocks_distance / blocks_count could be STRIPPED and the lane
-    -- would stay green, despite the comment above them justifying their existence at
-    -- length. These three arms are what make that comment true.
+    -- would stay green without these three arms.
     BEGIN
         PERFORM hive.stage('MASSIVE PROCESSING', 101, 10000, '20 seconds');
         RAISE EXCEPTION 'shim: hafd.stage_name accepted a name with a space';
@@ -736,11 +702,10 @@ BEGIN
         WHEN check_violation THEN NULL;
     END;
 
-    -- THE COMPAT ALIASES, which nothing else here touches any more. #87 moved
-    -- db/haf_stats_app.sql onto the canonical hafd.* names, so hive.application_stages /
-    -- hive.live_stage() / hive.context_name / hive.contexts_group became pure
-    -- transcription -- present, and asserted by nothing. These four arms mean a wrong
-    -- alias is caught here rather than on a node, and they are cheap.
+    -- THE COMPAT ALIASES, which nothing else here touches: db/haf_stats_app.sql uses the
+    -- canonical hafd.* names (#87), so hive.application_stages / hive.live_stage() /
+    -- hive.context_name / hive.contexts_group are otherwise asserted by nothing. These
+    -- four arms catch a wrong alias here rather than on a node, and they are cheap.
     IF (SELECT hafd.live_stage()) IS DISTINCT FROM (SELECT hive.live_stage()) THEN
         RAISE EXCEPTION 'shim: hive.live_stage() and hafd.live_stage() disagree; upstream defines the former as a wrapper round the latter';
     END IF;
