@@ -243,7 +243,7 @@ services:
       install:
         condition: service_completed_successfully
 
-  # UNDO all 17 guarded upgrades, so the next install runs the DDL inside every one. (#96)
+  # UNDO all 17 guarded upgrades, so the next install runs the statement inside every one. (#96)
   #
   # Without it this lane would run the DDL of only one of them: comment_registry.community's
   # ADD COLUMN, which a fresh install needs because the CREATE TABLE lacks the column. Every

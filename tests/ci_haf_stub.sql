@@ -592,15 +592,15 @@ $$;
 -- and nothing on a node either, where HAF issues the same group grant. :81 is
 -- belt-and-braces, and no assertion can defend a grant that nothing needs.
 --
--- AND THE ROLE TOPOLOGY HERE IS NOT NECESSARILY THE NODE'S. A node whose role predates
--- the #88 installer carries
+-- AND THE ROLE TOPOLOGY HERE IS NOT EVERY NODE'S. A role created by an UNMERGED revision of
+-- db/builtin_roles.sql (9a77508: "LOGIN INHERIT IN ROLE hive_applications_group"), as
+-- testapi's was, carries
 --   haf_stats_user  rolinherit = t, LOGIN, and a DIRECT member of hive_applications_group
--- That installer removes the group edge, after which only the INHERIT flag still differs.
--- db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group, so this
--- lane models a FRESH install, while the node carries a role an UNMERGED revision of that
--- file created (9a77508: "LOGIN INHERIT IN ROLE hive_applications_group").
--- Consequence for :86: load-bearing in the state this lane models -- and on that node too,
--- once the group edge is gone. It was redundant there only while the group supplied EXECUTE.
+-- The #88 installer removes the group edge, after which only the INHERIT flag still
+-- differs. db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group,
+-- so this lane models a FRESH install, or any node whose role that file created.
+-- Consequence for :86: load-bearing in the state this lane models -- and on a node with the
+-- 9a77508 role too, once the group edge is gone. It was redundant there only while the group supplied EXECUTE.
 --
 -- Because of that divergence a fresh install never reaches db/builtin_roles.sql's LEAK
 -- PROBE or the #88 revoke before it, so tests/ci_break_schema.sql grants the group to
