@@ -520,10 +520,9 @@ hadolint:
   image: hadolint/hadolint:latest-alpine
   needs: []
   script:
-    # DL3066 (non-numeric user-id): "USER root" is deliberate (DL3002 is already
-    # ignored for the same reason); the rule appeared in a newer hadolint and the
-    # unpinned latest-alpine image made it start failing without a repo change.
-  - hadolint --ignore DL3006 --ignore DL3002 --ignore DL3066 Dockerfile
+    # DL3002 (last USER is root) and DL3066 (non-numeric user-id) are NOT ignored any
+    # more: the image ends on `USER 10001:10001` (#64), so both rules now guard that.
+  - hadolint --ignore DL3006 Dockerfile
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
@@ -662,6 +661,24 @@ docker-build:
     # base is Alpine (so `date` is BusyBox and has no --iso-8601), and that bash exists
     # for the #!/bin/bash scripts. One line settles both.
     docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
+    echo "--- the image runs as the unprivileged haf_stats user, not root (#64) ---"
+    # Each check is an `if ... then exit 1` or a plain command under set -e -- never a
+    # `! cmd` (see the end of this script) and never an `a && b` list, where set -e
+    # ignores a failing `a`. The read check
+    # cats every file under /app, so a COPY that lands a file this user cannot read
+    # fails HERE rather than as an install that cannot open its own SQL.
+    docker run --rm --entrypoint /bin/sh "$IMG" -c '
+      set -e
+      [ "$(id -u):$(id -g)" = "10001:10001" ] || { echo "running as $(id -u):$(id -g), want 10001:10001" >&2; exit 1; }
+      [ "$(id -un)" = "haf_stats" ] || { echo "uid 10001 is $(id -un), want haf_stats" >&2; exit 1; }
+      find /app -type f -exec cat {} + >/dev/null
+      f=/tmp/block_processing_startup_time.txt
+      echo probe > "$f.tmp.$$"
+      mv "$f.tmp.$$" "$f"
+      rm "$f"
+      if touch /app/write_probe 2>/dev/null; then echo "/app is writable by the runtime user" >&2; exit 1; fi
+      if sudo -n true 2>/dev/null; then echo "the runtime user can sudo" >&2; exit 1; fi
+      echo "runtime user ok: $(id)"'
     echo "--- entrypoint dispatches its own usage on stdout ---"
     expect_ok --help; grep -q "install_app" "$OUT"
     echo "--- unknown verb fails with the right message, not merely non-zero ---"

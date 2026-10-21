@@ -1,8 +1,11 @@
 # Real-data value verification
 
-`tests/tavern-mainnet/test_real_data.tavern.yaml` asserts **exact** values for the
-2016-04 window. Those values were originally produced by *running the endpoints*, so
-on their own the tavern assertions only prove the endpoints are **deterministic** —
+The tavern pattern suite asserts **exact** values for the 2016-04 window: each
+`tests/tavern/<endpoint>/<endpoint>.tavern.yaml` compares the response with its sibling
+`<endpoint>.pat.json` (layout in `tests/tavern/README.md`), and the CI `pattern-test`
+job runs it against the cached replay stack. Those values were originally produced by
+*running the endpoints*, so on their own the tavern assertions only prove the
+endpoints are **deterministic** —
 not that the numbers are **correct** (the oracle-circularity problem: "what if we
 miscalculated the expected value?").
 
@@ -14,8 +17,9 @@ hardcoded constants as truth; each derives the value by an independent route.
 | `tests/parity/mainnet_metrics_parity.sql` | btracker `tests/parity/impacted_balances_parity.sql` | The raw `hafd.operations` stream, re-aggregated by *different* SQL (window-function first-occurrence, etc.) that shares none of the processor's code or `haf_stats_backend` tables | Endpoint output == an independent in-DB derivation. RAISEs on any mismatch. |
 | `tests/regression/` | btracker `tests/regression/` | An **external canonical hived node** (`condenser_api.get_account_history` via `api.hive.blog`), captured to `account_metrics_dump.json.gz` | Account-scoped endpoint output == a source entirely outside our DB and code. |
 
-Both run in CI inside the integration stack (`scripts/run_verification.sh`, invoked by
-the `integration-tests` job) and fail the job on any divergence.
+Both run in CI against the same cached replay stack as `pattern-test`
+(`scripts/run_verification.sh`, invoked by the `regression-test` job) and fail the job
+on any divergence.
 
 ## Verified against a full 5,000,000-block replay
 

@@ -1,5 +1,7 @@
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3
 
+# Root for the BUILD steps only: WORKDIR creates /app root-owned and the RUN below writes
+# /app/db/version.sql into it. The runtime user is dropped to at the end of this file.
 USER root
 
 WORKDIR /app
@@ -60,6 +62,30 @@ RUN case "${GIT_HASH}" in \
  && echo "TRUNCATE haf_stats_app.app_version; INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('${GIT_HASH_BAKED}');" \
     > /app/db/version.sql
 
+# Runtime user (#64): a dedicated, unprivileged account with a FIXED uid/gid, 10001.
+#
+# Not the base image's haf_admin, although nft_tracker runs as that: the base gives
+# haf_admin passwordless sudo (Dockerfile.psql in hive/common-ci-configuration), so
+# running as it is root one `sudo` away. Not uid 1000 either -- that is haf_admin's in
+# the base (Alpine's first adduser), so `adduser -u 1000` would collide.
+#
+# Nothing at runtime writes under /app, so /app stays ROOT-owned and read-only to this
+# user; nothing here is chowned to it. The only things the image's processes write are:
+#   * /tmp/block_processing_startup_time.txt (+ a .tmp.$$ beside it, renamed into place)
+#     -- scripts/process_blocks.sh, read back by /app/block-processing-healthcheck.sh;
+#     overridable with HAF_STATS_STARTUP_TIME_FILE. /tmp is 1777.
+#   * mktemp files under /tmp (tests/ci_install_no_upgrade.sh, scripts/check_haf_drift.sh).
+#   * haf_app_driver.py's LOG_FILE, only if that env var is set (unset everywhere here).
+# No port is bound (the API is postgrest and the rewriter, separate images), and every
+# connection names its role (POSTGRES_USER), so the OS user only matters to a `peer`
+# pg_hba rule, which neither this repo's stacks nor haf_api_node use for app containers.
+#
+# Added AFTER the version.sql RUN on purpose: tests/unit/test_version_provenance.py
+# extracts that RUN with a non-greedy match from the FIRST `^RUN`, so a RUN placed above
+# it would be swept into the script it executes.
+RUN addgroup -S -g 10001 haf_stats \
+ && adduser -S -D -u 10001 -G haf_stats -h /home/haf_stats -s /bin/bash haf_stats
+
 # Verb dispatcher: install_app | process_blocks | uninstall_app (#57). Every other
 # haf_api_node app image exposes that trio, which is what lets a module file say
 # `command: [install_app]` instead of naming a script path inside someone else's image.
@@ -71,6 +97,10 @@ RUN case "${GIT_HASH}" in \
 # (see the script), so the existing `command: ["/app/scripts/process_blocks.sh"]` form
 # keeps working and an operator mid-migration is not stranded.
 ENTRYPOINT ["/app/docker_entrypoint.sh"]
+
+# NUMERIC, so a runtime that enforces non-root (Kubernetes runAsNonRoot) can verify it
+# without resolving a name, and hadolint's DL3002/DL3066 no longer need ignoring.
+USER 10001:10001
 
 # NO `HEALTHCHECK` instruction here, deliberately. Upstream does not -- reputation_tracker's
 # and balance_tracker's Dockerfiles ship the script and let each app's compose attach it

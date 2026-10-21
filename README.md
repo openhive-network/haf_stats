@@ -563,6 +563,17 @@ Anything that is not a verb but *is* runnable is still executed, so the previous
 starting with `-` goes to bash — except `--help`, `-h`, `-?`, which print the
 dispatcher's own usage.
 
+### Runtime user
+
+The image runs as `haf_stats`, **uid/gid 10001**, not root
+([#64](https://gitlab.syncad.com/hive/haf_stats/-/issues/64)). `/app` stays root-owned
+and read-only to it: the only file the processes write is the healthcheck's startup
+timestamp, `/tmp/block_processing_startup_time.txt`. If you point
+`HAF_STATS_STARTUP_TIME_FILE` (or the driver's `LOG_FILE`) at a mounted volume, that
+volume must be writable by uid 10001. Nothing binds a port, and every connection names
+its role explicitly (`POSTGRES_USER`), so the OS user does not reach the
+database -- only a `peer` rule in `pg_hba.conf` would make it matter.
+
 ### Block-processing healthcheck
 
 The image ships `/app/block-processing-healthcheck.sh` — the path
