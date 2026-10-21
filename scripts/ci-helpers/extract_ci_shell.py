@@ -42,8 +42,10 @@ Also:
     linted as sh, which is stricter, not laxer.
   * shellcheck does not raise SC2164 (unchecked cd) in a block that already runs
     `set -e`, since errexit covers it.
-  * A python image is bash only as `python:<tag>`, optionally `docker.io/[library/]`
-    prefixed and/or `@sha256:` pinned. Any other registry path is linted as sh.
+  * A python image is bash only as `python:<version>[-slim|-bookworm|...]`, optionally
+    prefixed `docker.io/`, `library/` or `docker.io/library/` and/or `@sha256:` pinned.
+    Any other registry path, and tags without a version (`python:latest`,
+    `python:slim`) or other variants (`-buster`), are linted as sh, which is stricter.
 
 Usage: extract_ci_shell.py [CI_FILE] OUT_DIR
 """
@@ -147,7 +149,8 @@ def shell_for(jobs: dict, name: str) -> str:
     if name in JOB_SHELLS:
         return JOB_SHELLS[name]
     image = _image(jobs, name)
-    return "bash" if image and BASH_IMAGES.match(image) else "sh"
+    # fullmatch: `$` alone would also match before a trailing newline.
+    return "bash" if image and BASH_IMAGES.fullmatch(image) else "sh"
 
 
 def _render(keys: dict, members, total: int):

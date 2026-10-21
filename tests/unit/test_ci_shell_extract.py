@@ -247,6 +247,13 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ("koalaman/shellcheck-alpine:v0.11.0", "sh"),
         ("docker.io/library/python:3.12-slim", "bash"),
         ("python:3.12-slim@sha256:" + "0" * 64, "bash"),
+        ("docker.io/python:3", "bash"),
+        ("library/python:3.12-slim", "bash"),
+        # A tag that only LOOKS like a version, a malformed digest, a trailing newline.
+        ("python:alpine3.20", "sh"),
+        ("python:3.12@sha256:abc", "sh"),
+        ("python@sha256:abc", "sh"),
+        ('"python:3.12-slim\\n"', "sh"),  # YAML escape: the value ends in a real newline
         # Any other registry path is unknown, so it gets the stricter shell.
         ("registry.example/python:3.12-slim", "sh"),
     ],
