@@ -141,10 +141,70 @@ def test_names_that_sanitise_alike_do_not_overwrite(ex):
     assert sorted(out) == ["job_x.script.sh", "job_x~2.script.sh"]
 
 
+def test_three_names_that_sanitise_alike_all_survive(ex):
+    # Two would pass with `if` instead of `while`; the third is what needs the loop.
+    ci = "# h\n" + "".join(f"{n}:\n  script:\n  - echo {i}\n"
+                           for i, n in enumerate(("a b", "a_b", "a/b")))
+    out = ex.extract(ci)
+    assert sorted(out) == ["a_b.script.sh", "a_b~2.script.sh", "a_b~3.script.sh"]
+    assert all(any(f"echo {i}" in text for text in out.values()) for i in range(3))
+
+
 def test_merge_keys_are_followed(files):
     merged = files["job-merge.script.sh"]
     assert at(merged, 37) == "echo from anchor"
     assert merged.startswith("# shellcheck shell=sh\n")  # python:*-alpine is not bash
+
+
+MERGES = """\
+# h
+.a: &a
+  script:
+  - echo first
+.b: &b
+  script:
+  - echo second
+.base: &base
+  script:
+  - echo base
+.mid: &mid
+  <<: *base
+  image: docker:24
+two-anchors:
+  <<: [*a, *b]
+own-wins:
+  <<: *a
+  script:
+  - echo own
+nested:
+  <<: *mid
+"""
+
+
+@pytest.fixture(scope="module")
+def merges(ex):
+    return ex.extract(MERGES)
+
+
+def test_the_first_of_several_merged_anchors_wins(merges):
+    text = merges["two-anchors.script.sh"]
+    assert "echo first" in text and "echo second" not in text
+
+
+def test_a_jobs_own_key_beats_a_merged_one(merges):
+    text = merges["own-wins.script.sh"]
+    assert "echo own" in text and "echo first" not in text
+
+
+def test_a_merge_inside_a_merged_anchor_is_followed(merges):
+    assert "echo base" in merges["nested.script.sh"]
+
+
+def test_a_block_at_end_of_file_without_newline_stays_in_place(ex):
+    # No trailing newline: the end mark is mid-line, not at column 0 of the next line.
+    out = ex.extract("# h\njob:\n  script:\n  - |\n    echo a\n    echo b")["job.script.sh"]
+    assert [at(out, 5), at(out, 6)] == ["echo a", "echo b"]
+    assert "# .gitlab-ci.yml:" not in out
 
 
 def test_an_item_that_spills_moves_alone(files):
@@ -185,6 +245,9 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ("postgres:14-alpine", "sh"),
         ("docker:24", "sh"),
         ("koalaman/shellcheck-alpine:v0.11.0", "sh"),
+        ("docker.io/library/python:3.12-slim", "bash"),
+        ("python:3.12-slim@sha256:" + "0" * 64, "bash"),
+        # Any other registry path is unknown, so it gets the stricter shell.
         ("registry.example/python:3.12-slim", "sh"),
     ],
 )

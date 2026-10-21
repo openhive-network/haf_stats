@@ -16,20 +16,34 @@ the line after their | or > indicator; a folded block is joined by YAML, so only
 first line is exact. An item that cannot sit on its own lines (a quoted "a\\nb" that
 expands past its source line, or one anchored node used twice in the same shell) is
 appended after the last CI line, under a `# .gitlab-ci.yml:N` comment, and only that
-item loses alignment.
+item loses alignment. Spilled items come after ALL in-place items of the file, so
+flow-sensitive checks (unset variables, unreachable code, cd-then-use) see them out of
+order.
 
 NOT linted -- shell this repo runs but the extractor cannot see:
   * `!reference [...]` items. They point at templates included from
     hive/common-ci-configuration, which is not in this repo, and are skipped. Today
-    that is 8 items in 5 places: find_haf_image, prepare_haf_data, sync
+    that is 8 items in 4 jobs: find_haf_image, prepare_haf_data, sync
     (before_script x2, script, after_script) and pattern-test (before_script x2).
   * before_script/script/after_script inherited through `extends` from an included
-    template, e.g. regression-test and reinstall-test get their before_script from
-    .haf_app_dind_complete_test.
+    template. At the pinned include ref that is: detect_changes (before_script and
+    script -- the whole job is template), regression-test and reinstall-test
+    (before_script and after_script, from .haf_app_dind_complete_test), pattern-test
+    (after_script), prepare_haf_data (after_script), publish_images (before_script and
+    script) and cache_cleanup (script).
   * The template block that runs before prepare_haf_data's own block in the same shell,
     so prepare_haf_data is linted without the context that precedes it.
-Also: find_haf_image runs bash (its image comes from the included template) but is
-linted as sh, which is stricter, not laxer.
+  * Templates extended WITHIN this file are linted as their own unit, not merged into
+    the job: haf-drift's before_script is in template.haf_drift_template.script.sh, and
+    haf-drift.script.sh holds only its own script.
+  * `sh -c '...'` / `bash -c '...'` bodies are strings to shellcheck, not code.
+Also:
+  * find_haf_image runs bash (its image comes from the included template) but is
+    linted as sh, which is stricter, not laxer.
+  * shellcheck does not raise SC2164 (unchecked cd) in a block that already runs
+    `set -e`, since errexit covers it.
+  * A python image is bash only as `python:<tag>`, optionally `docker.io/[library/]`
+    prefixed and/or `@sha256:` pinned. Any other registry path is linted as sh.
 
 Usage: extract_ci_shell.py [CI_FILE] OUT_DIR
 """
@@ -49,7 +63,8 @@ SCRIPT_KEYS = ("before_script", "script", "after_script")
 # docker:24, alpine, postgres:*-alpine and python:*-alpine are busybox ash, and an image
 # inherited from an included template is unknown here.
 BASH_IMAGES = re.compile(
-    r"^(python:\d+(\.\d+)*(-(slim|bookworm|bullseye|trixie))*"
+    r"^((docker\.io/)?(library/)?python:\d+(\.\d+)*(-(slim|bookworm|bullseye|trixie))*"
+    r"(@sha256:[0-9a-f]{64})?"
     r"|\$\{?HAF_APP_TEST_RUNNER_IMAGE\}?)$"
 )
 

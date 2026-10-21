@@ -487,7 +487,7 @@ shell-lint:
     # the MR. Matches balance_tracker.
   - if: $CI_COMMIT_BRANCH
 
-# shell-lint, for the shell embedded in THIS file (#90): 26 `- |` blocks, which nothing
+# shell-lint, for the shell embedded in THIS file (#90): 26 block scalars, which nothing
 # shellchecked. The extractor writes one file per job, linted as bash or sh by the job's
 # image, and line-aligned so a finding's line number is the line in .gitlab-ci.yml.
 #
@@ -496,12 +496,15 @@ shell-lint:
 # taken from the image, those reduce to 2 SC3010 in prepare_haf_data, whose image comes
 # from an included template (see JOB_SHELLS in the extractor).
 #
-# NOT linted (the extractor's docstring has the detail): the 8 `!reference` items in
-# find_haf_image, prepare_haf_data, sync and pattern-test, and any script inherited via
-# `extends` from an included template (e.g. regression-test and reinstall-test's
-# before_script from .haf_app_dind_complete_test). prepare_haf_data is linted without the
-# template block that runs before it in the same shell. find_haf_image runs bash but is
-# linted as sh, which is stricter.
+# NOT linted (the extractor's docstring has the detail): the 8 `!reference` items in 4
+# jobs (find_haf_image, prepare_haf_data, sync, pattern-test); script keys inherited via
+# `extends` from included templates (detect_changes, regression-test, reinstall-test,
+# pattern-test, prepare_haf_data, publish_images, cache_cleanup); and `sh -c '...'`
+# bodies. prepare_haf_data is linted without the template block that runs before it in
+# the same shell. A template extended within this file is linted as its own file, apart
+# from the job. Items that cannot keep their line are appended at the end of the file,
+# so flow-sensitive checks see them out of order. SC2164 is not raised under `set -e`.
+# find_haf_image runs bash but is linted as sh, which is stricter.
 ci-shell-lint:
   stage: lint
   # Same pinned shellcheck as shell-lint, so the two jobs cannot disagree on a rule.
