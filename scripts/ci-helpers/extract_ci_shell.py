@@ -67,7 +67,7 @@ SCRIPT_KEYS = ("before_script", "script", "after_script")
 BASH_IMAGES = re.compile(
     r"^((docker\.io/)?(library/)?python:\d+(\.\d+)*(-(slim|bookworm|bullseye|trixie))*"
     r"(@sha256:[0-9a-f]{64})?"
-    r"|\$\{?HAF_APP_TEST_RUNNER_IMAGE\}?)$"
+    r"|\$(HAF_APP_TEST_RUNNER_IMAGE|\{HAF_APP_TEST_RUNNER_IMAGE\}))$"
 )
 
 # Jobs whose image is inherited from an included template, so the table above cannot
@@ -128,7 +128,10 @@ def _mapping(node):
 
 
 def _image(jobs: dict, name: str, seen=()):
-    """The job's image, following `extends` within this file; None if not found here."""
+    """The job's image, following `extends` within this file; None if not found here.
+
+    With several parents GitLab lets the LAST one win, so they are searched in reverse.
+    """
     job = jobs.get(name)
     if not isinstance(job, dict) or name in seen:
         return None
@@ -138,7 +141,7 @@ def _image(jobs: dict, name: str, seen=()):
     if image:
         return str(image)
     parents = job.get("extends") or []
-    for parent in [parents] if isinstance(parents, str) else parents:
+    for parent in reversed([parents] if isinstance(parents, str) else parents):
         found = _image(jobs, parent, seen + (name,))
         if found:
             return found

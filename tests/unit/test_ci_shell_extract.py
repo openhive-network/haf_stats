@@ -200,6 +200,16 @@ def test_a_merge_inside_a_merged_anchor_is_followed(merges):
     assert "echo base" in merges["nested.script.sh"]
 
 
+def test_with_several_extends_parents_the_last_image_wins(ex):
+    # GitLab merges parents in order, so a later parent's image overrides an earlier one.
+    ci = ("# h\n.sh-img:\n  image: docker:24\n.bash-img:\n  image: python:3.12-slim\n"
+          "last-bash:\n  extends: [.sh-img, .bash-img]\n  script:\n  - true\n"
+          "last-sh:\n  extends: [.bash-img, .sh-img]\n  script:\n  - true\n")
+    out = ex.extract(ci)
+    assert out["last-bash.script.sh"].startswith("# shellcheck shell=bash\n")
+    assert out["last-sh.script.sh"].startswith("# shellcheck shell=sh\n")
+
+
 def test_a_block_at_end_of_file_without_newline_stays_in_place(ex):
     # No trailing newline: the end mark is mid-line, not at column 0 of the next line.
     out = ex.extract("# h\njob:\n  script:\n  - |\n    echo a\n    echo b")["job.script.sh"]
@@ -254,6 +264,13 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ("python:3.12@sha256:abc", "sh"),
         ("python@sha256:abc", "sh"),
         ('"python:3.12-slim\\n"', "sh"),  # YAML escape: the value ends in a real newline
+        ("python:3.12.4-slim", "bash"),
+        ("python:3.12-buster", "sh"),
+        # The runner variable only as itself: a longer name or unbalanced braces is not it.
+        ("$HAF_APP_TEST_RUNNER_IMAGE_ALPINE", "sh"),
+        ('"${HAF_APP_TEST_RUNNER_IMAGE_X}"', "sh"),
+        ('"${HAF_APP_TEST_RUNNER_IMAGE"', "sh"),
+        ('"$HAF_APP_TEST_RUNNER_IMAGE}"', "sh"),
         # Any other registry path is unknown, so it gets the stricter shell.
         ("registry.example/python:3.12-slim", "sh"),
     ],
