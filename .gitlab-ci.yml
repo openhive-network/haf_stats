@@ -675,10 +675,13 @@ docker-build:
     # make the check exit non-zero AND name the specific path or problem, so a check
     # that died for an unrelated reason does not count as catching it. Usage:
     #   mutant NAME EXPECTED_OUTPUT_REGEX DOCKERFILE_LINE...
-    # The lines run between `USER 0` and `USER 10001:10001`, one argument per line.
+    # The lines run after `USER 0`, one argument per line, and the image then ends on
+    # `USER 10001:10001` -- unless one of the lines is itself a USER, which then stands.
     mutant() {
       name="$1"; want="$2"; shift 2
-      { printf 'FROM %s\nUSER 0\n' "$IMG"; printf '%s\n' "$@"; printf 'USER 10001:10001\n'; } \
+      tail_user='USER 10001:10001'
+      for l in "$@"; do case "$l" in "USER "*) tail_user='' ;; esac; done
+      { printf 'FROM %s\nUSER 0\n' "$IMG"; printf '%s\n' "$@"; [ -z "$tail_user" ] || printf '%s\n' "$tail_user"; } \
         | docker build -q -t "haf_stats_mutant_$name" - >/dev/null
       rc=0
       timeout 120 docker run --rm --entrypoint "$CHECK" "haf_stats_mutant_$name" >/tmp/mut_out 2>&1 || rc=$?
@@ -710,7 +713,11 @@ docker-build:
       'RUN d="$(HOME=/nonexistent python3 -c "import site; print(site.getusersitepackages())")" && mkdir -p "$d" && echo "import sys" > "$d/usercustomize.py"'
     mutant sudo_scoped     'has sudo rules'                     'RUN echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
     mutant file_cap        'files with capabilities'            "RUN python3 -c 'import os, struct, sys; os.setxattr(os.path.realpath(sys.executable), \"security.capability\", struct.pack(\"<IIIII\", 0x02000001, 0x80, 0, 0, 0))'"
-    mutant extra_group     'groups are'                         'RUN addgroup haf_stats root'
+    # `USER uid` WITHOUT a gid: with an explicit `uid:gid` (the real image's form) Docker
+    # applies no /etc/group memberships at all -- pipeline 182889 showed groups=10001
+    # despite the membership. A `user: haf_stats` override, --group-add or Kubernetes
+    # supplementalGroups would add them, which is what this models.
+    mutant extra_group     'groups are'                         'RUN addgroup haf_stats root' 'USER 10001'
     mutant glob_named_suid 'unexpected setuid/setgid files'     'RUN cp /bin/busybox "/usr/bin/[s]udo" && chmod 4755 "/usr/bin/[s]udo"'
     mutant env_allowlist   'unexpected setuid/setgid files'     'ENV SETID_ALLOWED=/usr/bin/python3.10' \
       'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
