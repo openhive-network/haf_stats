@@ -38,6 +38,10 @@ NOT linted -- shell this repo runs but the extractor cannot see:
     haf-drift.script.sh holds only its own script.
   * `sh -c '...'` / `bash -c '...'` bodies are strings to shellcheck, not code.
 Also:
+  * A job whose winning `extends` parent (the last one that could set an image) is an
+    included template has an unknown image and is linted as sh, even if an earlier
+    in-file parent names a bash image.
+  * `default: image:` is not read; no job here relies on it today.
   * find_haf_image runs bash (its image comes from the included template) but is
     linted as sh, which is stricter, not laxer.
   * shellcheck does not raise SC2164 (unchecked cd) in a block that already runs
@@ -127,13 +131,21 @@ def _mapping(node):
     return {**merged, **own}
 
 
-def _image(jobs: dict, name: str, seen=()):
-    """The job's image, following `extends` within this file; None if not found here.
+UNKNOWN = object()  # an included template might set the image; this file cannot tell
 
-    With several parents GitLab lets the LAST one win, so they are searched in reverse.
+
+def _image(jobs: dict, name: str, seen=()):
+    """The job's image, following `extends` within this file.
+
+    None when nothing in the chain sets one; UNKNOWN when a parent that would win is
+    outside this file. With several parents GitLab lets the LAST one win, so they are
+    searched in reverse -- and an unresolvable parent stops the search rather than
+    letting an earlier in-file parent's image through (that would fail open to bash).
     """
     job = jobs.get(name)
-    if not isinstance(job, dict) or name in seen:
+    if not isinstance(job, dict):
+        return UNKNOWN
+    if name in seen:  # an extends cycle: GitLab rejects it, so do not recurse forever
         return None
     image = job.get("image")
     if isinstance(image, dict):
@@ -143,7 +155,7 @@ def _image(jobs: dict, name: str, seen=()):
     parents = job.get("extends") or []
     for parent in reversed([parents] if isinstance(parents, str) else parents):
         found = _image(jobs, parent, seen + (name,))
-        if found:
+        if found is not None:
             return found
     return None
 
@@ -152,8 +164,10 @@ def shell_for(jobs: dict, name: str) -> str:
     if name in JOB_SHELLS:
         return JOB_SHELLS[name]
     image = _image(jobs, name)
+    if image is None or image is UNKNOWN:
+        return "sh"
     # fullmatch: `$` alone would also match before a trailing newline.
-    return "bash" if image and BASH_IMAGES.fullmatch(image) else "sh"
+    return "bash" if BASH_IMAGES.fullmatch(image) else "sh"
 
 
 def _render(keys: dict, members, total: int):

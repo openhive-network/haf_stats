@@ -210,6 +210,27 @@ def test_with_several_extends_parents_the_last_image_wins(ex):
     assert out["last-sh.script.sh"].startswith("# shellcheck shell=sh\n")
 
 
+def test_an_unresolvable_winning_parent_makes_the_image_unknown(ex):
+    # .included is not in this file and comes last, so it decides the image; the bash
+    # image of the earlier in-file parent must not leak through. Same one level down.
+    ci = ("# h\n.local-bash:\n  image: python:3.12-slim\n"
+          "direct:\n  extends: [.local-bash, .included]\n  script:\n  - true\n"
+          ".mid:\n  extends: .included\n"
+          "nested:\n  extends: [.local-bash, .mid]\n  script:\n  - true\n"
+          "control:\n  extends: [.included, .local-bash]\n  script:\n  - true\n")
+    out = ex.extract(ci)
+    assert out["direct.script.sh"].startswith("# shellcheck shell=sh\n")
+    assert out["nested.script.sh"].startswith("# shellcheck shell=sh\n")
+    # A later in-file parent that sets an image still wins over the unresolvable one.
+    assert out["control.script.sh"].startswith("# shellcheck shell=bash\n")
+
+
+def test_an_extends_cycle_terminates(ex):
+    ci = ("# h\n.a:\n  extends: .b\n.b:\n  extends: .a\n"
+          "job:\n  extends: .a\n  script:\n  - true\n")
+    assert ex.extract(ci)["job.script.sh"].startswith("# shellcheck shell=sh\n")
+
+
 def test_a_block_at_end_of_file_without_newline_stays_in_place(ex):
     # No trailing newline: the end mark is mid-line, not at column 0 of the next line.
     out = ex.extract("# h\njob:\n  script:\n  - |\n    echo a\n    echo b")["job.script.sh"]
