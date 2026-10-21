@@ -49,6 +49,8 @@ job-a:
     one
     two
   - single
+  - "quoted item"
+  - 'single quoted'
   after_script: !reference [.included, after_script]
 job-b:
   image: docker:24
@@ -59,37 +61,136 @@ job-b:
   - [nested]
   after_script:
   - cleanup
+job-c:
+  image:
+    name: python:3.12-slim
+  script: echo single string
+tmpl:
+  image: alpine:3.20
+  script:
+  - echo plain twin
+.anchored: &anchored
+  image: python:3.12-alpine
+  script:
+  - echo from anchor
+job-merge:
+  <<: *anchored
+job-spill:
+  image: docker:24
+  script:
+  - "echo a\\necho b"
+  - echo after spill
+job-alias:
+  image: docker:24
+  before_script: &shared
+  - echo shared
+  script: *shared
 not-a-job:
   FOO: bar
 """
 
 
-def test_blocks_are_line_aligned_with_the_ci_file(ex):
-    lines = ex.extract(SAMPLE)["job-a.script.sh"].splitlines()
-    assert lines[10:13] == ["one", "two", "single"]  # CI lines 11-13
+@pytest.fixture(scope="module")
+def files(ex):
+    return ex.extract(SAMPLE)
 
 
-def test_before_script_and_script_share_a_file_after_script_does_not(ex):
-    files = ex.extract(SAMPLE)
-    assert "echo before" in files["tmpl.script.sh"]
+def at(text: str, n: int) -> str:
+    """Line n (1-based, as an editor counts .gitlab-ci.yml) of an extracted file."""
+    return text.splitlines()[n - 1]
+
+
+def test_items_are_line_aligned_with_the_ci_file(files):
+    a = files["job-a.script.sh"]
+    assert [at(a, n) for n in (11, 12, 13)] == ["one", "two", "single"]
+    # Quoted items are items too, and sit on their own line.
+    assert at(a, 14) == "quoted item"
+    assert at(a, 15) == "single quoted"
+
+
+def test_a_folded_block_starts_on_the_line_after_its_indicator(files):
+    assert at(files["job-b.script.sh"], 21) == "folded line"
+
+
+def test_a_single_string_script_is_linted(files):
+    assert at(files["job-c.script.sh"], 29) == "echo single string"
+
+
+def test_before_script_and_script_share_a_file_after_script_does_not(files):
+    assert at(files["template.tmpl.script.sh"], 5) == "echo before"
     assert "cleanup" not in files["job-b.script.sh"]
-    assert "cleanup" in files["job-b.after_script.sh"]
+    assert at(files["job-b.after_script.sh"], 25) == "cleanup"
 
 
-def test_references_are_skipped_not_linted_as_text(ex):
-    files = ex.extract(SAMPLE)
+def test_references_are_skipped_not_linted_as_text(files):
     assert ".included" not in files["job-a.script.sh"]
     # A whole-key !reference must not produce a file of template names.
     assert "job-a.after_script.sh" not in files
-    assert "not-a-job.script.sh" not in files
+    assert not any(name.startswith("not-a-job") for name in files)
 
 
-def test_the_shell_follows_the_image_including_through_extends(ex):
-    files = ex.extract(SAMPLE)
+def test_a_hidden_template_and_a_job_of_the_same_name_both_survive(files):
+    assert "echo before" in files["template.tmpl.script.sh"]
+    assert "echo plain twin" in files["tmpl.script.sh"]
+    assert files["template.tmpl.script.sh"].startswith("# shellcheck shell=bash\n")
+    assert files["tmpl.script.sh"].startswith("# shellcheck shell=sh\n")
+
+
+def test_names_that_sanitise_alike_do_not_overwrite(ex):
+    out = ex.extract("# h\njob x:\n  script:\n  - echo one\njob_x:\n  script:\n  - echo two\n")
+    assert sorted(out) == ["job_x.script.sh", "job_x~2.script.sh"]
+
+
+def test_merge_keys_are_followed(files):
+    merged = files["job-merge.script.sh"]
+    assert at(merged, 37) == "echo from anchor"
+    assert merged.startswith("# shellcheck shell=sh\n")  # python:*-alpine is not bash
+
+
+def test_an_item_that_spills_moves_alone(files):
+    spill = files["job-spill.script.sh"]
+    # The quoted item expands to two lines but owns one; it moves after the last CI
+    # line, and the item below it keeps its own line number.
+    assert at(spill, 44) == "echo after spill"
+    assert spill.splitlines()[-3:] == ["# .gitlab-ci.yml:43", "echo a", "echo b"]
+
+
+def test_one_node_used_twice_in_a_shell_is_linted_twice_without_shifting(files):
+    alias = files["job-alias.script.sh"]
+    assert at(alias, 48) == "echo shared"
+    assert alias.splitlines()[-2:] == ["# .gitlab-ci.yml:48", "echo shared"]
+    assert len(alias.splitlines()) == len(SAMPLE.splitlines()) + 2
+
+
+def test_the_shell_follows_the_image_including_through_extends(files):
     assert files["job-a.script.sh"].startswith("# shellcheck shell=bash\n")
     assert files["job-b.script.sh"].startswith("# shellcheck shell=sh\n")
-    assert "folded line" in files["job-b.script.sh"]
+    assert files["job-c.script.sh"].startswith("# shellcheck shell=bash\n")  # image: {name:}
     assert "nested" in files["job-b.script.sh"]
+
+
+@pytest.mark.parametrize(
+    "image, shell",
+    [
+        ("python:3.11-slim", "bash"),
+        ("python:3.12-slim", "bash"),
+        ("python:3.12", "bash"),
+        ("python:3.12-slim-bookworm", "bash"),
+        ('"${HAF_APP_TEST_RUNNER_IMAGE}"', "bash"),
+        ("$HAF_APP_TEST_RUNNER_IMAGE", "bash"),
+        # busybox ash: linting these as bash would hide every SC3xxx finding.
+        ("python:3.12-alpine", "sh"),
+        ("python:3.12-alpine3.20", "sh"),
+        ("alpine:3.20", "sh"),
+        ("postgres:14-alpine", "sh"),
+        ("docker:24", "sh"),
+        ("koalaman/shellcheck-alpine:v0.11.0", "sh"),
+        ("registry.example/python:3.12-slim", "sh"),
+    ],
+)
+def test_image_to_shell(ex, image, shell):
+    ci = f"# h\njob:\n  image: {image}\n  script:\n  - true\n"
+    assert ex.extract(ci)["job.script.sh"].startswith(f"# shellcheck shell={shell}\n")
 
 
 def test_every_literal_block_in_the_real_ci_file_is_extracted_in_place(ex):

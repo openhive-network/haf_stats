@@ -495,6 +495,13 @@ shell-lint:
 # `|| exit 1`) plus 38 SC3xxx that came only from linting bash jobs as sh; with the shell
 # taken from the image, those reduce to 2 SC3010 in prepare_haf_data, whose image comes
 # from an included template (see JOB_SHELLS in the extractor).
+#
+# NOT linted (the extractor's docstring has the detail): the 8 `!reference` items in
+# find_haf_image, prepare_haf_data, sync and pattern-test, and any script inherited via
+# `extends` from an included template (e.g. regression-test and reinstall-test's
+# before_script from .haf_app_dind_complete_test). prepare_haf_data is linted without the
+# template block that runs before it in the same shell. find_haf_image runs bash but is
+# linted as sh, which is stricter.
 ci-shell-lint:
   stage: lint
   # Same pinned shellcheck as shell-lint, so the two jobs cannot disagree on a rule.
