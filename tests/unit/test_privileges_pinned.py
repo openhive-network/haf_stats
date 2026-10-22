@@ -70,10 +70,18 @@ CANDIDATE = re.compile(
     + r"\b(?:(?!\b(?:TO|FROM)\b)[^;'])*?\bON\b[^;']*?\bhaf_stats_(?:app|backend|endpoints)\b",
     re.IGNORECASE,
 )
-# A GRANT/REVOKE ... ON whose object is filled in at run time (format('... ON %s ...')).
-# The object cannot be resolved statically, so it is reported rather than trusted.
-DYNAMIC = re.compile(r"'[^']*\b(?:GRANT|REVOKE)\b[^']*\bON\b[^']*%[sIL][^']*'", re.IGNORECASE)
-RUN_SQL = re.compile(r'run_sql_file(?:_atomic)?\s+"\$\{SCRIPT_DIR\}/(?:\.\./)?([A-Za-z0-9_/]+\.sql)"')
+# A GRANT/REVOKE ... ON whose object is filled in at run time: inside a string literal
+# (single- or dollar-quoted), ON is followed by a format() placeholder (%s, %I, %L, %1$s)
+# or by the end of the literal ('... ON ' || name). The object cannot be resolved
+# statically, so it is reported rather than trusted.
+LITERAL = re.compile(r"'(?:[^']|'')*'|\$([A-Za-z_]*)\$.*?\$\1\$", re.DOTALL)
+DYNAMIC_IN_LITERAL = re.compile(
+    r"\b(?:GRANT|REVOKE)\b[^;]*?\bON\s+"
+    r"(?:(?:FUNCTION|PROCEDURE|ROUTINE|TABLE|SEQUENCE|SCHEMA|ALL\s+\w+\s+IN\s+SCHEMA)\s+)?"
+    r"(?:%(?:\d+\$)?[sIL]|\s*(?:'|\$[A-Za-z_]*\$)$)",
+    re.IGNORECASE,
+)
+RUN_SQL = re.compile(r'^\s*run_sql_file(?:_atomic)?\s+"\$\{SCRIPT_DIR\}/((?:\.\./)?[A-Za-z0-9_/]+\.sql)"', re.MULTILINE)
 
 
 @dataclass
@@ -128,7 +136,9 @@ def parse(text: str, where: str) -> tuple[list[Stmt], list[str]]:
         for c in CANDIDATE.finditer(text)
         if not any(a <= c.start() < b for a, b in spans)
     ]
-    unparsed += ["(object built at run time) " + " ".join(d.group(0).split())[:160] for d in DYNAMIC.finditer(text)]
+    for lit in LITERAL.finditer(text):
+        for d in DYNAMIC_IN_LITERAL.finditer(lit.group(0)):
+            unparsed.append("(object built at run time) " + " ".join(d.group(0).split())[:160])
     return stmts, unparsed
 
 
@@ -136,18 +146,22 @@ def _install_order() -> list:
     """The installed .sql files in the order install_app.sh's run_sql_file lines run them."""
     body = INSTALL_SH.read_text(encoding="utf-8")
     order = {}
-    for m in RUN_SQL.finditer(body):
-        order.setdefault(m.group(1), m.start())
+    for m in RUN_SQL.finditer(body):  # anchored at line start: a commented-out run line does not count
+        rel = m.group(1)
+        rel = rel[3:] if rel.startswith("../") else "scripts/" + rel  # ${SCRIPT_DIR} is scripts/
+        order.setdefault(rel, m.start())
     files = _installed_sql_files()
-    missing = [f for f in files if f.relative_to(ROOT).as_posix() not in order and f.name not in {"version.sql"}]
+    missing = [f for f in files if f.relative_to(ROOT).as_posix() not in order]
     assert not missing, f"installed .sql files with no run_sql_file line to order them by: {missing}"
     return sorted((f for f in files if f.relative_to(ROOT).as_posix() in order),
                   key=lambda f: order[f.relative_to(ROOT).as_posix()])
 
 
 def _install_sh_sql() -> str:
-    """install_app.sh with its shell comments removed: the SQL it inlines (psql_cmd -c "...")."""
-    return "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
+    """install_app.sh with its shell comments, then SQL comments, removed: the SQL it inlines
+    (psql_cmd -c "..."), so a commented-out GRANT inside an inline block is not replayed."""
+    shell = "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
+    return _strip_comments(shell)
 
 
 def source_statements() -> tuple[list[Stmt], list[str]]:
@@ -345,6 +359,9 @@ def test_inconsistent_sources_fail(sql, needle):
         "GRANT SELECT (day) ON haf_stats_backend.t TO PUBLIC;",
         "REVOKE GRANT OPTION FOR SELECT ON haf_stats_backend.t FROM haf_stats_user;",
         "EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM public', 'haf_stats_app.f(INT)');",
+        "EXECUTE format('GRANT INSERT ON %1$s TO haf_stats_user', 'haf_stats_backend.t');",
+        "EXECUTE format($f$GRANT INSERT ON %s TO haf_stats_user$f$, 'haf_stats_backend.t');",
+        "EXECUTE 'GRANT INSERT ON ' || 'haf_stats_backend.t' || ' TO haf_stats_user';",
     ],
 )
 def test_an_unparseable_statement_is_reported_not_skipped(sql):
