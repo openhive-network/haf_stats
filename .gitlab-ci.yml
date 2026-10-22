@@ -1361,6 +1361,35 @@ reinstall-test:
       head -200 schema.diff
       exit 1
     fi
+  - |
+    cd "${CI_PROJECT_DIR}/docker"
+    # #82: every function's owner, SECURITY DEFINER flag and ACL against a COMMITTED list.
+    # The diff above compares the node with itself across two installs, so a GRANT that a
+    # DROP-and-recreate discards on every install (or a REVOKE it undoes) is lost on both
+    # and the diff stays empty. tests/function_acls.sql explains the format.
+    # A change to the list is a privilege change: regenerate it from this job's
+    # function-acls-actual.txt artifact and let review see the diff.
+    # psql is not reliably on PATH in the haf image either; take it from pg_dump's directory
+    # (PG_DUMP is set by the first script block of this job).
+    PSQL="$(dirname "${PG_DUMP}")/psql"
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PSQL" -U haf_admin -d haf_block_log -X -At -v ON_ERROR_STOP=1 -f - < ../tests/function_acls.sql | LC_ALL=C sort > function-acls-actual.txt
+    ACL_LINES=$(wc -l < function-acls-actual.txt)
+    echo "function-acls-actual.txt: ${ACL_LINES} functions"
+    if [[ "${ACL_LINES}" -lt 50 ]]; then
+      echo "FAIL: only ${ACL_LINES} functions listed; the query or the install did not run."
+      exit 1
+    fi
+    if diff -u ../tests/expected_function_acls.txt function-acls-actual.txt > function-acls.diff; then
+      echo "OK: all ${ACL_LINES} haf_stats functions have the committed owner, SECURITY DEFINER flag and ACL."
+      rm -f function-acls-actual.txt function-acls.diff
+    else
+      echo "FAIL: function owners/ACLs differ from tests/expected_function_acls.txt (#82)."
+      echo "'-' lines are what the list expects, '+' lines what the install produced. A GRANT"
+      echo "lost to a DROP shows as an ACL narrowed to <default> or to fewer roles; a REVOKE"
+      echo "undone shows PUBLIC:EXECUTE reappearing."
+      cat function-acls.diff
+      exit 1
+    fi
   artifacts:
     # `artifacts:` is a HASH, not a list -- one `when:` for the whole job, so the dumps
     # cannot be declared on_failure separately from the logs. Instead the success path
@@ -1375,6 +1404,8 @@ reinstall-test:
     - docker/schema.diff
     - docker/schema-before.sql
     - docker/schema-after.sql
+    - docker/function-acls-actual.txt
+    - docker/function-acls.diff
     expire_in: 1 week
 
 # =============================================================================

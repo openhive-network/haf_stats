@@ -1,0 +1,91 @@
+haf_stats_app.account_custom_json_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.account_op_seq_range(_account_id integer, _from_block integer, _to_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.allow_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.apply_schema_migration(_needed boolean, _ddl text, _what text, _lock_timeout text, _attempts integer) | owner=haf_stats_owner | secdef=false | acl=haf_stats_owner:EXECUTE
+haf_stats_app.assert_op_types(_fatal_scan_includes_endpoints boolean, _bypass_fatal boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.backfill_rc_exact(_day date) | owner=haf_stats_owner | secdef=false | acl=haf_stats_owner:EXECUTE
+haf_stats_app.backfill_rollup_if_column_null(_rollup regclass, _sentinel_col text, _refresh_call text) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.backfill_rollup_if_empty(_rollup regclass, _source regclass, _refresh_call text) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.block_range_for_dates(_from date, _to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.continue_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.create_context_if_not_exists() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.expected_op_type_names() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.get_required_authorities_safe(_body jsonb) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.is_community_name(_name text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.main(IN _context hafd.context_name) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.max_interaction_ops() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.network_custom_json_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.network_op_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.prepare_batch_authored_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.prepare_batch_exact_rc(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.prepare_community_batch_stage() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_account_cohorts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_active_users(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_block_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_blocks(IN _block_range hive.blocks_range) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_community_registry(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_content_cohorts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_content_stats(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_content_volume(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_financial(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_network_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_network_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.process_witness_blocks(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.rc_avg_cost(_op_type_id smallint, _day date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.rc_cost_available() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.rc_rate(_op_type_id smallint, _day date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.rc_source_label(_exact bigint, _total bigint) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.refresh_account_cohort_retention(_as_of timestamp without time zone, _from_month date, _to_month date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_active_users_account_monthly(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_active_users_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_author_cohort_retention(_as_of timestamp without time zone, _from_month date, _to_month date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_engagement_full() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_engagement_touched() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_financial_monthly(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_governance_concentration() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE
+haf_stats_app.refresh_hp_distribution_snapshot() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE
+haf_stats_app.refresh_network_content_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_network_vote_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.refresh_rc_op_stats() | owner=haf_admin | secdef=false | acl=PUBLIC:EXECUTE,haf_admin:EXECUTE,haf_stats_owner:EXECUTE
+haf_stats_app.refresh_top_accounts_alltime() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE
+haf_stats_app.resolve_community_batch() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.resolve_dapp_category(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.resolve_dapp_name(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
+haf_stats_app.sync_status() | owner=haf_stats_owner | secdef=true | acl=haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.to_filter_date(_input text, _default date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.top_accounts_window(_from date, _to date, _now date, OUT lead_from date, OUT lead_to date, OUT trail_from date, OUT trail_to date, OUT mm_from date, OUT mm_to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_app.try_jsonb(_txt text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_community_activity(account text, from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_content_stats(account text, from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_dapp_footprint(account text, from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_financial_summary(account text, from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_interactions(account text, from_date text, to_date text, top_n integer, type_filter text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_rc_footprint(account text, from_date text, to_date text, group_by text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_account_rc_footprint_timeline(account text, from_date text, to_date text, op_type_filter text, app_filter text, category_filter text, limit_count integer, offset_start integer, before_seq bigint) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_custom_json_app_registry() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_daily_active_users(from_date text, to_date text, granularity text, operation_types text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_governance_influence_concentration() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_health() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_account_funnel(from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_author_retention(from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_content_volume(from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_custom_json_usage(json_id text, from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_engagement(from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_hp_distribution() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_rc_utilization(from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_top_accounts(metric text, from_date text, to_date text, limit_count integer, order_by text, order_direction text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_top_custom_json(from_date text, to_date text, limit_count integer, group_by text, order_by text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_network_vote_stats(from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_sync_status() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_version() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.get_witness_missed_blocks(from_date text, to_date text, witness text, granularity text, order_by text, limit_count integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
+haf_stats_endpoints.root() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE,haf_stats_user:EXECUTE
