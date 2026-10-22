@@ -133,7 +133,7 @@ ALTER FUNCTION haf_stats_app.sync_status() OWNER TO haf_stats_owner;
 -- PostgreSQL grants EXECUTE to PUBLIC on creation and schema haf_stats_app has no
 -- ALTER DEFAULT PRIVILEGES entry, so both statements are needed. haf_stats_app is not
 -- PostgREST-exposed (PGRST_DB_SCHEMA=haf_stats_endpoints), so this is not itself an RPC.
-REVOKE ALL ON FUNCTION haf_stats_app.sync_status() FROM public;
+-- NEGATIVE CONTROL (#82): line removed
 GRANT EXECUTE ON FUNCTION haf_stats_app.sync_status() TO haf_stats_user;
 
 COMMIT;

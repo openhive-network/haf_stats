@@ -84,7 +84,7 @@ AS $$
     END
 $$;
 
-GRANT EXECUTE ON FUNCTION haf_stats_app.rc_source_label(BIGINT, BIGINT) TO haf_stats_user;
+-- NEGATIVE CONTROL (#82): line removed
 
 -- Exact RC share of each given operation. Returns one row per operation it can price: a
 -- non-virtual operation whose transaction has a recorded rc_cost. An operation it cannot
