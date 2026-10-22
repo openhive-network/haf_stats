@@ -5,15 +5,16 @@
 -- install, and DROP FUNCTION discards the ACL where CREATE OR REPLACE keeps it. A GRANT
 -- that runs before its DROP, or a REVOKE ... FROM PUBLIC above a DROP, is then lost on
 -- EVERY install -- identically on both installs, so the lane's before/after schema diff
--- cannot see it. tests/unit/test_privileges_pinned.py checks the other direction: every
--- GRANT/REVOKE in the install sources is reflected in the committed list, so the list
--- cannot quietly absorb a privilege the sources say should not exist.
+-- cannot see it. tests/unit/test_privileges_pinned.py checks the sources against this
+-- list: what the install sources grant must appear in it, and a REVOKE of PUBLIC EXECUTE
+-- must hold, so the list cannot quietly absorb a REVOKE the install undoes.
 --
 -- Covered: functions (owner, SECURITY DEFINER, ACL), tables / partitioned tables /
--- sequences / materialized views (owner, ACL), the three schemas (owner, ACL), haf_stats'
--- default privileges, and role memberships involving a haf_stats role. Left out: views --
--- haf_stats creates none; the ones in haf_stats_app are HAF's context views, which follow
--- the HAF version, not this repo. There are no column grants.
+-- sequences / materialized views (owner, ACL), column grants (none today), the three
+-- schemas (owner, ACL), default privileges set by a haf_stats role or inside a haf_stats
+-- schema, and role memberships involving a haf_stats role (with admin/inherit/set, which
+-- needs PostgreSQL 16+). Left out: views -- haf_stats creates none; the ones in
+-- haf_stats_app are HAF's context views, which follow the HAF version, not this repo.
 --
 -- ACL entries are grantee:privilege, with * for WITH GRANT OPTION, sorted by grantee and
 -- privilege. Left out: the grantor (it depends on which role ran the installer, not on
@@ -73,15 +74,35 @@ SELECT line FROM (
     LEFT JOIN acl AS a ON a.kind = 'n' AND a.objid = n.oid
     WHERE n.nspname IN ('haf_stats_app', 'haf_stats_backend', 'haf_stats_endpoints')
     UNION ALL
+    -- Column-level grants: none today, so any line here is new and shows in the diff.
+    SELECT 'column ' || n.nspname || '.' || c.relname || '.' || att.attname
+           || ' | acl=' || (SELECT string_agg(y.entry, ',' ORDER BY y.entry COLLATE "C")
+                            FROM (SELECT CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END
+                                         || ':' || x.privilege_type
+                                         || CASE WHEN x.is_grantable THEN '*' ELSE '' END AS entry
+                                  FROM aclexplode(att.attacl) AS x) AS y)
+    FROM pg_attribute AS att
+    JOIN pg_class AS c ON c.oid = att.attrelid
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname IN ('haf_stats_app', 'haf_stats_backend', 'haf_stats_endpoints')
+      AND att.attacl IS NOT NULL
+    UNION ALL
+    -- Default privileges set BY a haf_stats role anywhere, or by ANY role inside a haf_stats
+    -- schema. defaclnamespace 0 means "every schema"; its regnamespace text is '-'.
     SELECT 'default-privileges for=' || pg_get_userbyid(d.defaclrole)
-           || ' in=' || COALESCE(d.defaclnamespace::REGNAMESPACE::TEXT, '<all schemas>')
+           || ' in=' || CASE WHEN d.defaclnamespace = 0 THEN '<all schemas>' ELSE d.defaclnamespace::REGNAMESPACE::TEXT END
            || ' on=' || d.defaclobjtype::TEXT
            || ' | acl=' || COALESCE(a.txt, '<owner only>')
     FROM pg_default_acl AS d
     LEFT JOIN acl AS a ON a.kind = 'd' AND a.objid = d.oid
     WHERE pg_get_userbyid(d.defaclrole) LIKE 'haf\_stats\_%'
+       OR (d.defaclnamespace <> 0
+           AND d.defaclnamespace::REGNAMESPACE::TEXT IN ('haf_stats_app', 'haf_stats_backend', 'haf_stats_endpoints'))
     UNION ALL
-    SELECT 'membership ' || m.rolname || ' in ' || r.rolname || ' | admin=' || am.admin_option
+    -- inherit/set options (PostgreSQL 16+): a NOINHERIT membership is how haf_stats_owner
+    -- loses hive_applications_group's rights, and sync_status() then sees zero rows (#55).
+    SELECT 'membership ' || m.rolname || ' in ' || r.rolname
+           || ' | admin=' || am.admin_option || ' | inherit=' || am.inherit_option || ' | set=' || am.set_option
     FROM pg_auth_members AS am
     JOIN pg_roles AS r ON r.oid = am.roleid
     JOIN pg_roles AS m ON m.oid = am.member

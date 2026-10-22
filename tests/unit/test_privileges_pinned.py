@@ -9,23 +9,32 @@ through it: a new `REVOKE ... FROM public` placed above a DROP-and-recreate (und
 every install), and a blanket REVOKE at the top of a schema. Both leave the install, and
 therefore a regenerated list, unchanged.
 
-This test closes that loop statically, with no database: it replays every GRANT/REVOKE in
-the install sources, in install order, and requires the committed list to show the
-result. A REVOKE the install silently undoes now disagrees with the list, whichever way
-the list was produced.
+This test closes that loop statically, with no database: it replays every GRANT/REVOKE on
+a haf_stats object in the install sources -- the .sql files install_app.sh runs, in the
+order its run_sql_file lines run them, then the SQL inlined in install_app.sh itself --
+and requires the committed list to show the result. A REVOKE the install silently undoes
+now disagrees with the list, whichever way the list was produced.
+
+It checks ONE direction: what the sources grant must be in the list, and a REVOKE of
+PUBLIC EXECUTE must hold. It cannot see a GRANT deleted from the sources (reinstall-test
+then fails: the list still has it) or an extra entry in the list (that is a reviewed
+diff of tests/expected_privileges.txt).
 
 Scope and limits, stated rather than implied:
   * objects in haf_stats_app / haf_stats_backend / haf_stats_endpoints only -- grants on
     HAF's own schemas (hive, hafd) follow the HAF version;
   * function names are matched without their argument list. No haf_stats function is
-    overloaded today; test_function_names_are_not_overloaded fails the day one is, so the
-    matching can be tightened then;
-  * a grant to an object's own owner is not checked, because tests/privileges.sql leaves
-    owner entries out;
+    overloaded today; test_function_names_are_not_overloaded fails the day one is;
+  * `ON ALL FUNCTIONS/TABLES IN SCHEMA` is applied to every listed object of that kind,
+    including ones created after the statement runs; the install's own first-install
+    check in reinstall-test is what sees an object such a grant never reached;
+  * a grant to an object's own owner is not checked (tests/privileges.sql leaves owner
+    entries out);
   * role memberships (db/builtin_roles.sql) are conditional DO blocks; the committed list
     pins them, this test does not replay them;
-  * an unparseable GRANT/REVOKE on a haf_stats object FAILS the test instead of being
-    skipped: a blind spot that reports nothing is worse than no test.
+  * a GRANT/REVOKE on a haf_stats object that the parser cannot read -- a column list,
+    GRANT OPTION FOR, a quoted role, a statement built with format() -- FAILS the test
+    instead of being skipped: a blind spot that reports nothing is worse than no test.
 """
 
 from __future__ import annotations
@@ -40,6 +49,8 @@ from tests.unit.test_sql_idempotency import INSTALL_SH, ROOT, _installed_sql_fil
 EXPECTED = ROOT / "tests" / "expected_privileges.txt"
 SCHEMAS = ("haf_stats_app", "haf_stats_backend", "haf_stats_endpoints")
 ALL_TABLE_PRIVS = {"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"}
+ALL_SEQUENCE_PRIVS = {"USAGE", "SELECT", "UPDATE"}
+PRIV_WORD = r"(?:ALL|EXECUTE|SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|USAGE|CREATE|MAINTAIN)"
 
 STATEMENT = re.compile(
     r"\b(?P<verb>GRANT|REVOKE)\s+(?P<privs>(?:ALL(?:\s+PRIVILEGES)?|[A-Z]+)(?:\s*,\s*[A-Z]+)*)\s+"
@@ -49,15 +60,20 @@ STATEMENT = re.compile(
     r"(?P<dir>TO|FROM)\s+(?P<roles>[a-z_][a-z0-9_]*(?:\s*,\s*[a-z_][a-z0-9_]*)*)",
     re.IGNORECASE,
 )
-# Anything shaped like a GRANT/REVOKE (privilege list, then ON) touching a haf_stats object.
-# Compared with what STATEMENT parsed, so a statement the parser cannot read is reported,
-# not skipped. Requiring "<privileges> ON" keeps prose in RAISE messages and OpenAPI
-# descriptions ("grant SELECT to haf_stats_user on ...") out.
+# Anything shaped like a GRANT/REVOKE touching a haf_stats object: an optional GRANT OPTION
+# FOR, a privilege word, anything (column lists included) up to ON with no TO/FROM before
+# it, then a haf_stats schema. Compared with what STATEMENT parsed, so a statement the
+# parser cannot read is reported, not skipped. "no TO/FROM before ON" keeps prose in RAISE
+# messages and OpenAPI descriptions ("grant SELECT to haf_stats_user on ...") out.
 CANDIDATE = re.compile(
-    r"\b(GRANT|REVOKE)\s+(?:ALL|EXECUTE|SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|USAGE|CREATE)"
-    r"\b[A-Z ,]*?\s+ON\b[^;']*?\bhaf_stats_(?:app|backend|endpoints)\b",
+    r"\b(?:GRANT|REVOKE)\s+(?:GRANT\s+OPTION\s+FOR\s+)?" + PRIV_WORD
+    + r"\b(?:(?!\b(?:TO|FROM)\b)[^;'])*?\bON\b[^;']*?\bhaf_stats_(?:app|backend|endpoints)\b",
     re.IGNORECASE,
 )
+# A GRANT/REVOKE ... ON whose object is filled in at run time (format('... ON %s ...')).
+# The object cannot be resolved statically, so it is reported rather than trusted.
+DYNAMIC = re.compile(r"'[^']*\b(?:GRANT|REVOKE)\b[^']*\bON\b[^']*%[sIL][^']*'", re.IGNORECASE)
+RUN_SQL = re.compile(r'run_sql_file(?:_atomic)?\s+"\$\{SCRIPT_DIR\}/(?:\.\./)?([A-Za-z0-9_/]+\.sql)"')
 
 
 @dataclass
@@ -75,7 +91,6 @@ class Listing:
     acl: dict = field(default_factory=dict)      # key -> set of "grantee:PRIV" (grant option stripped)
     owner: dict = field(default_factory=dict)    # key -> owner
     default: set = field(default_factory=set)    # keys printed as <default>
-    functions_by_schema: dict = field(default_factory=dict)
 
 
 def _norm_kind(kind: str | None) -> str:
@@ -86,7 +101,13 @@ def _norm_kind(kind: str | None) -> str:
 def _privs(raw: str, kind: str) -> frozenset:
     p = {x.strip().upper() for x in raw.split(",")}
     if p & {"ALL", "ALL PRIVILEGES"}:
-        return frozenset({"EXECUTE"} if "FUNCTION" in kind else {"USAGE", "CREATE"} if kind == "SCHEMA" else ALL_TABLE_PRIVS)
+        if "FUNCTION" in kind:
+            return frozenset({"EXECUTE"})
+        if kind == "SCHEMA":
+            return frozenset({"USAGE", "CREATE"})
+        if kind == "SEQUENCE":
+            return frozenset(ALL_SEQUENCE_PRIVS)
+        return frozenset(ALL_TABLE_PRIVS)
     return frozenset(p)
 
 
@@ -107,27 +128,38 @@ def parse(text: str, where: str) -> tuple[list[Stmt], list[str]]:
         for c in CANDIDATE.finditer(text)
         if not any(a <= c.start() < b for a, b in spans)
     ]
+    unparsed += ["(object built at run time) " + " ".join(d.group(0).split())[:160] for d in DYNAMIC.finditer(text)]
     return stmts, unparsed
 
 
 def _install_order() -> list:
+    """The installed .sql files in the order install_app.sh's run_sql_file lines run them."""
     body = INSTALL_SH.read_text(encoding="utf-8")
+    order = {}
+    for m in RUN_SQL.finditer(body):
+        order.setdefault(m.group(1), m.start())
     files = _installed_sql_files()
+    missing = [f for f in files if f.relative_to(ROOT).as_posix() not in order and f.name not in {"version.sql"}]
+    assert not missing, f"installed .sql files with no run_sql_file line to order them by: {missing}"
+    return sorted((f for f in files if f.relative_to(ROOT).as_posix() in order),
+                  key=lambda f: order[f.relative_to(ROOT).as_posix()])
 
-    def pos(p):
-        rel = p.relative_to(ROOT).as_posix()
-        i = body.find(rel)
-        return i if i >= 0 else body.find(p.name)
 
-    return sorted(files, key=pos)
+def _install_sh_sql() -> str:
+    """install_app.sh with its shell comments removed: the SQL it inlines (psql_cmd -c "...")."""
+    return "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
 
 
 def source_statements() -> tuple[list[Stmt], list[str]]:
     stmts, unparsed = [], []
     for f in _install_order():
-        s, u = parse(_strip_comments(f.read_text(encoding="utf-8")), f.relative_to(ROOT).as_posix())
+        rel = f.relative_to(ROOT).as_posix()
+        s, u = parse(_strip_comments(f.read_text(encoding="utf-8")), rel)
         stmts += s
-        unparsed += [f"{f.relative_to(ROOT).as_posix()}: {x}" for x in u]
+        unparsed += [f"{rel}: {x}" for x in u]
+    s, u = parse(_install_sh_sql(), "scripts/install_app.sh")
+    stmts += s
+    unparsed += [f"scripts/install_app.sh: {x}" for x in u]
     return stmts, unparsed
 
 
@@ -140,9 +172,7 @@ def read_listing(lines: list[str]) -> Listing:
             continue
         if kind == "function":
             obj = obj.split("(")[0]
-            schema = obj.split(".")[0]
-            out.functions_by_schema.setdefault(schema, []).append(obj)
-        key = (kind if kind in ("function", "schema") else "table", obj)
+        key = ("table" if kind == "matview" else kind, obj)
         f = dict(x.split("=", 1) for x in fields)
         out.owner[key] = f.get("owner")
         acl = f.get("acl", "")
@@ -155,26 +185,25 @@ def read_listing(lines: list[str]) -> Listing:
     return out
 
 
-def _key(st: Stmt):
-    if st.kind == "FUNCTION":
-        return ("function", st.obj)
-    if st.kind == "SCHEMA":
-        return ("schema", st.obj)
-    return ("table", st.obj)
+def _keys(st: Stmt, listing: Listing) -> list:
+    if st.kind == "ALL FUNCTIONS IN SCHEMA":
+        return [k for k in listing.acl if k[0] == "function" and k[1].split(".")[0] == st.obj]
+    if st.kind == "ALL TABLES IN SCHEMA":
+        # PostgreSQL's ALL TABLES covers tables, views and matviews -- not sequences.
+        return [k for k in listing.acl if k[0] == "table" and k[1].split(".")[0] == st.obj]
+    kind = {"FUNCTION": "function", "SCHEMA": "schema", "SEQUENCE": "sequence"}.get(st.kind, "table")
+    if kind == "table" and ("sequence", st.obj) in listing.acl:
+        kind = "sequence"  # GRANT ... ON name (no keyword) may name a sequence
+    return [(kind, st.obj)]
 
 
 def check(stmts: list[Stmt], listing: Listing) -> list[str]:
     """Replay stmts in order and report every way the listing disagrees with the result."""
-    want: dict = {}          # key -> {grantee: set(privs)} as the sources leave it
-    revoked_public: dict = {}  # key -> statement that revoked from PUBLIC and was not re-granted
+    want: dict = {}            # key -> {grantee: set(privs)} as the sources leave it
+    revoked_public: dict = {}  # key -> statement that revoked EXECUTE from PUBLIC, not re-granted
     errors = []
     for st in stmts:
-        if st.kind in ("ALL FUNCTIONS IN SCHEMA", "ALL TABLES IN SCHEMA"):
-            kind = "function" if "FUNCTIONS" in st.kind else "table"
-            keys = [(kind, o) for (k, o) in listing.acl if k == kind and o.split(".")[0] == st.obj]
-        else:
-            keys = [_key(st)]
-        for key in keys:
+        for key in _keys(st, listing):
             if key not in listing.acl:
                 errors.append(f"{st.where}: {st.verb} on {key[1]}, which tests/expected_privileges.txt does not list")
                 continue
@@ -226,6 +255,14 @@ def test_every_haf_stats_grant_or_revoke_in_the_sources_is_parsed():
     assert not unparsed, "GRANT/REVOKE statements the parser could not read:\n" + "\n".join(unparsed)
 
 
+def test_files_replay_in_installer_order():
+    """db/haf_stats_app.sql is named in a comment above db/builtin_roles.sql's run line; the
+    order must come from the run lines, where builtin_roles.sql runs first."""
+    names = [f.name for f in _install_order()]
+    assert names.index("builtin_roles.sql") < names.index("haf_stats_app.sql")
+    assert names[-1] == "endpoint_schema.sql"
+
+
 def test_the_committed_list_is_sorted_and_unique():
     lines = _expected_lines()
     assert lines == sorted(lines, key=lambda s: s.encode()), "tests/expected_privileges.txt must be in C (byte) order"
@@ -246,6 +283,8 @@ LISTING = [
     "function haf_stats_endpoints.e() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE",
     "function haf_stats_app.locked() | owner=haf_stats_owner | secdef=false | acl=<owner only>",
     "table haf_stats_backend.t | owner=haf_stats_owner | acl=haf_stats_user:SELECT",
+    "table haf_stats_app.a | owner=haf_stats_owner | acl=haf_stats_user:SELECT",
+    "sequence haf_stats_app.s | owner=haf_stats_owner | acl=<default>",
     "schema haf_stats_app | owner=haf_stats_owner | acl=haf_stats_user:USAGE",
 ]
 
@@ -266,6 +305,10 @@ def _run(sql: str) -> list[str]:
         "GRANT USAGE ON SCHEMA haf_stats_app TO haf_stats_user;",
         "EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.f(INT) TO haf_stats_owner';",  # owner: not checked
         "REVOKE EXECUTE ON FUNCTION haf_stats_app.g() FROM public; GRANT EXECUTE ON FUNCTION haf_stats_app.g() TO public;",
+        # ALL TABLES does not reach the <default> sequence in the same schema.
+        "GRANT SELECT ON ALL TABLES IN SCHEMA haf_stats_app TO haf_stats_user;",
+        # Prose, not a statement: no TO/FROM may come before ON.
+        "RAISE NOTICE 'grant SELECT to haf_stats_user on whichever haf_stats_backend table applies';",
     ],
 )
 def test_consistent_sources_pass(sql):
@@ -281,7 +324,9 @@ def test_consistent_sources_pass(sql):
         # A grant the list does not show (lost to a DROP, or the list regenerated over it).
         ("GRANT EXECUTE ON FUNCTION haf_stats_app.g() TO haf_stats_user;", "grant EXECUTE to haf_stats_user"),
         ("GRANT INSERT ON haf_stats_backend.t TO haf_stats_user;", "grant INSERT to haf_stats_user"),
+        ("GRANT ALL ON haf_stats_backend.t TO haf_stats_user;", "grant INSERT to haf_stats_user"),
         ("GRANT CREATE ON SCHEMA haf_stats_app TO haf_stats_user;", "grant CREATE to haf_stats_user"),
+        ("GRANT USAGE ON SEQUENCE haf_stats_app.s TO haf_stats_user;", "grant USAGE to haf_stats_user"),
         ("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA haf_stats_app TO haf_stats_user;", "haf_stats_app.g"),
         ("EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.g() TO haf_stats_user';", "grant EXECUTE to haf_stats_user"),
         # A statement about an object the list does not have at all.
@@ -293,6 +338,15 @@ def test_inconsistent_sources_fail(sql, needle):
     assert any(needle in e for e in errors), errors
 
 
-def test_an_unparseable_statement_is_reported_not_skipped():
-    _, unparsed = parse("GRANT EXECUTE ON FUNCTION haf_stats_app.f(INT) TO \"Quoted Role\";", "fixture.sql")
-    assert unparsed
+@pytest.mark.parametrize(
+    "sql",
+    [
+        'GRANT EXECUTE ON FUNCTION haf_stats_app.f(INT) TO "Quoted Role";',
+        "GRANT SELECT (day) ON haf_stats_backend.t TO PUBLIC;",
+        "REVOKE GRANT OPTION FOR SELECT ON haf_stats_backend.t FROM haf_stats_user;",
+        "EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM public', 'haf_stats_app.f(INT)');",
+    ],
+)
+def test_an_unparseable_statement_is_reported_not_skipped(sql):
+    _, unparsed = parse(sql, "fixture.sql")
+    assert unparsed, sql

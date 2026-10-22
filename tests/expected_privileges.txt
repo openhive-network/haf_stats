@@ -91,9 +91,9 @@ function haf_stats_endpoints.get_sync_status() | owner=haf_stats_owner | secdef=
 function haf_stats_endpoints.get_version() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_endpoints.get_witness_missed_blocks(from_date text, to_date text, witness text, granularity text, order_by text, limit_count integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_endpoints.root() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
-membership haf_admin in haf_stats_owner | admin=false
-membership haf_stats_owner in haf_stats_user | admin=false
-membership haf_stats_owner in hive_applications_owner_group | admin=false
+membership haf_admin in haf_stats_owner | admin=false | inherit=true | set=true
+membership haf_stats_owner in haf_stats_user | admin=false | inherit=true | set=true
+membership haf_stats_owner in hive_applications_owner_group | admin=false | inherit=true | set=true
 schema haf_stats_app | owner=haf_stats_owner | acl=haf_stats_user:USAGE
 schema haf_stats_backend | owner=haf_stats_owner | acl=haf_stats_user:USAGE
 schema haf_stats_endpoints | owner=haf_stats_owner | acl=haf_stats_user:USAGE
