@@ -13,6 +13,10 @@
 --     day, and on 03-03 ora-b also writes 60 comments. haf_stats counts ONE more comment
 --     than hivemind on 03-03: 63 vs 62, and floor(62 * 2%) = 1, the hivemind#394 tolerance
 --     at its edge.
+--   * 2025-02-10 (block 9000050): ora-a 1 post, inside the 30-day author window but not
+--     the last week, so a narrowed window loses it.
+--   * the 2025-03-02 block is at 00:00:01: hivemind's created_at (3 s earlier) falls on
+--     03-01, so selecting hivemind rows by created_at day instead of block disagrees.
 --   * every day of 2023-06, one block per day, ora-a 1 post + 1 comment: whatever day of
 --     the month the guard's monthly sample rotates to, it has content to compare.
 --   * hafd ids (81001/81002) differ from hivemind's (91001/91002): authors map by name.
@@ -49,12 +53,15 @@ CREATE TABLE hivemind_app.hive_state (last_completed_block_num INT NOT NULL);
 INSERT INTO hivemind_app.hive_accounts (id, name) VALUES (91001, 'ora-a'), (91002, 'ora-b');
 INSERT INTO hafd.accounts (id, name) VALUES (81001, 'ora-a'), (81002, 'ora-b');
 
--- Blocks: 2023-06-01..30 -> 9000001..30; 2025-03-01..05 -> 9000101..105; head 9000106 on
--- 2025-03-06, so 2025-03-05 is the last complete day.
+-- Blocks: 2023-06-01..30 -> 9000001..30; 2025-02-10 -> 9000050; 2025-03-01..05 ->
+-- 9000101..105; head 9000106 on 2025-03-06, so 2025-03-05 is the last complete day.
 INSERT INTO hafd.blocks (num, created_at)
 SELECT 9000000 + d, TIMESTAMP '2023-05-31 12:00:00' + d * INTERVAL '1 day' FROM generate_series(1, 30) AS d
 UNION ALL
+SELECT 9000050, TIMESTAMP '2025-02-10 12:00:00'
+UNION ALL
 SELECT 9000100 + d, TIMESTAMP '2025-02-28 12:00:00' + d * INTERVAL '1 day' FROM generate_series(1, 6) AS d;
+UPDATE hafd.blocks SET created_at = TIMESTAMP '2025-03-02 00:00:01' WHERE num = 9000102;
 
 -- hivemind rows: created_at 3 s before the block, as hivemind records it.
 INSERT INTO hivemind_app.hive_posts (id, author_id, community_id, depth, counter_deleted, created_at, block_num_created)
@@ -62,6 +69,8 @@ SELECT 900000 + row_number() OVER (), x.author_id, NULL, x.depth, 0, b.created_a
 FROM (
     SELECT 9000000 + d AS num, 91001 AS author_id, k AS depth
     FROM generate_series(1, 30) AS d, generate_series(0, 1) AS k
+    UNION ALL
+    SELECT 9000050, 91001, 0
     UNION ALL
     SELECT 9000100 + d, 91001, k FROM generate_series(1, 5) AS d, (VALUES (0), (1), (2)) AS v(k)
     UNION ALL

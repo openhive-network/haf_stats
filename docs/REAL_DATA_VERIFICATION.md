@@ -11,14 +11,15 @@ endpoints are **deterministic** —
 not that the numbers are **correct** (the oracle-circularity problem: "what if we
 miscalculated the expected value?").
 
-To close that gap we mirror balance_tracker's two correctness guards. Neither uses the
-hardcoded constants as truth; each derives the value by an independent route.
+To close that gap we mirror balance_tracker's two correctness guards, plus a hivemind
+cross-check for production nodes. None uses the hardcoded constants as truth; each
+derives the value by an independent route.
 
 | Guard | Mirrors | Source of truth | What it proves |
 |-------|---------|-----------------|----------------|
 | `tests/parity/mainnet_metrics_parity.sql` | btracker `tests/parity/impacted_balances_parity.sql` | The raw `hafd.operations` stream, re-aggregated by *different* SQL (window-function first-occurrence, etc.) that shares none of the processor's code or `haf_stats_backend` tables | Endpoint output == an independent in-DB derivation. RAISEs on any mismatch. |
 | `tests/regression/` | btracker `tests/regression/` | An **external canonical hived node** (`condenser_api.get_account_history` via `api.hive.blog`), captured to `account_metrics_dump.json.gz` | Account-scoped endpoint output == a source entirely outside our DB and code. |
-| `tests/parity/content_vs_hivemind.sql` | - | **hivemind**, where co-located (`hivemind_app.hive_posts`): an independent app counting the same creations | Posts == hivemind's exactly; comments >= hivemind's and at most 2% above it (hivemind [#394](https://gitlab.syncad.com/hive/hivemind/-/issues/394) drops some re-created replies in massive sync). Per day (the last 365 + one a month back to 2016) and per author. The only guard that reaches 2020-2025 data, where #42 and #45 lived. Read-only; meant for production nodes, run as a standalone file. |
+| `tests/parity/content_vs_hivemind.sql` | - | **hivemind**, where co-located (`hivemind_app.hive_posts`): an independent app counting the same creations | Posts == hivemind's exactly; comments >= hivemind's and at most 2% above it (hivemind [#394](https://gitlab.syncad.com/hive/hivemind/-/issues/394) drops some re-created replies in massive sync). Per day (the last 365 + one a month back to 2016) and per author. The only post/comment count check that reaches 2020-2025 data, where #42 and #45 lived. Read-only; meant for production nodes, run as a standalone file. |
 
 The first two run in CI against the same cached replay stack as `pattern-test`
 (`scripts/run_verification.sh`, invoked by the `regression-test` job) and fail the job

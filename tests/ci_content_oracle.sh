@@ -31,9 +31,9 @@ run_case() {
 }
 
 # Baseline: everything agrees, the one in-tolerance excess is reported, and both halves ran
-# (5 recent days + the sampled 2023-06 day; ora-a and ora-b over 30 days + ora-a that day).
+# (6 recent days + the sampled 2023-06 day; ora-a and ora-b over 30 days + ora-a that day).
 run_case 'baseline agrees' 0 \
-    'content oracle: 6 days and 3 account checks agree with hivemind' ''
+    'content oracle: 7 days and 3 account checks agree with hivemind' ''
 run_case 'baseline reports the hivemind#394 excess' 0 \
     '2025-03-03: +1 comments' ''
 
@@ -56,8 +56,17 @@ run_case 'old account posts +1 (monthly sample)' 3 \
     "UPDATE haf_stats_backend.account_content_daily SET posts = posts + 1 WHERE account_id = 81001 AND day BETWEEN DATE '2023-06-01' AND DATE '2023-06-30';"
 # The recent 30-day window: comments below hivemind for one author (network untouched).
 run_case 'recent account comments -1' 3 \
-    'account ora-a (2025-02-04..2025-03-05): posts 5 vs hivemind 5, comments 9 vs hivemind 10' \
+    'account ora-a (2025-02-04..2025-03-05): posts 6 vs hivemind 6, comments 9 vs hivemind 10' \
     "UPDATE haf_stats_backend.account_content_daily SET comments = comments - 1 WHERE account_id = 81001 AND day = DATE '2025-03-04';"
+# Per author, comments above hivemind are bounded by the network's excess on the same days
+# (1, on 03-03): +2 for ora-a cannot be hivemind#394.
+run_case 'account comments above the network excess' 3     'account ora-a (2025-02-04..2025-03-05): posts 6 vs hivemind 6, comments 12 vs hivemind 10'     "UPDATE haf_stats_backend.account_content_daily SET comments = comments + 2 WHERE account_id = 81001 AND day = DATE '2025-03-04';"
+# A sampled author HAF does not know is a broken mapping, not a skip.
+run_case 'unmapped author' 3     'not found in hafd.accounts by name: ora-b'     'DELETE FROM hafd.accounts WHERE id = 81002;'
+# Bound by hivemind's completion marker, not only the context heads.
+run_case 'hivemind completion marker bounds the last day' 0     '6 days and 3 account checks agree with hivemind (posts exact, comments >= and within 2%), through 2025-03-04'     'UPDATE hivemind_app.hive_state SET last_completed_block_num = 9000105;'
+# Recent checks alone are not a pass: the monthly half is what sees old account rows (#45).
+run_case 'no monthly day comparable fails' 3     'compared 6 days (0 monthly) and 2 account checks (0 monthly)'     'DELETE FROM hafd.blocks WHERE num <= 9000030;'
 # Nothing to compare must not read as a pass.
 run_case 'empty comparison fails' 3 \
     'a zero means a half of this check did not run' \
