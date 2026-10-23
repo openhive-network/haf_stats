@@ -31,8 +31,8 @@ BEGIN
     SELECT count(DISTINCT p.proname) INTO _n
       FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
      WHERE ns.nspname = 'haf_stats_endpoints';
-    -- Exact, not a floor: `>= 20` let five endpoints vanish silently, and the count is
-    -- printed in the NOTICE below anyway.
+    -- Exact, not a floor, so a vanished endpoint fails; the count is printed in the NOTICE
+    -- below anyway.
     IF _n <> 25 THEN
         RAISE EXCEPTION 'install: % distinct functions in haf_stats_endpoints, expected '
                         '25. IF YOU ADDED OR REMOVED AN ENDPOINT THIS IS THE NUMBER TO '
@@ -94,8 +94,7 @@ BEGIN
     -- could have lived in the shim's own probe.
     --
     -- AND BE CLEAR ABOUT WHAT THESE COVER. They test the FUNCTION, not the policies it is
-    -- used in. Nothing in this lane enforces the UPDATE or DELETE policy on hafd.contexts
-    -- -- see the note in the MR and in docker-compose-ci-install.yml's uninstall service.
+    -- used in. Nothing in this lane enforces the UPDATE or DELETE policy on hafd.contexts.
     -- The INSERT policy IS enforced, and the owner assertion below is what catches it.
     IF NOT hive.can_impersonate('haf_stats_owner', 'haf_stats_owner') THEN
         RAISE EXCEPTION 'install: can_impersonate is false for the trivial self case';
@@ -129,8 +128,7 @@ BEGIN
     -- haf_stats_owner inherits EXECUTE through hive_applications_group (ci_setup.sql
     -- creates hive_applications_owner_group IN ROLE hive_applications_group;
     -- db/builtin_roles.sql:53-54 grants it to the owner), so deleting :81 changes
-    -- nothing -- here OR on a node, where HAF grants the group too. An earlier commit
-    -- message claimed the PUBLIC revoke made both falsifiable. It made one.
+    -- nothing -- here OR on a node, where HAF grants the group too.
     IF NOT has_function_privilege('haf_stats_user', 'hive.is_instance_ready()', 'EXECUTE') THEN
         RAISE EXCEPTION 'install: haf_stats_user cannot EXECUTE hive.is_instance_ready(). '
                         'db/builtin_roles.sql:86 grants that, and without it GET '
@@ -142,7 +140,7 @@ BEGIN
     -- A missing grant is a 401/permission-denied on a live node, not an install failure.
     -- NOT asserting EXECUTE on root(): PostgreSQL grants EXECUTE to PUBLIC by default for
     -- every function and nothing here revokes it, so that check passes no matter what the
-    -- installer does. It read like coverage and was none.
+    -- installer does.
     IF NOT has_table_privilege('haf_stats_user', 'haf_stats_app.app_config', 'SELECT') THEN
         RAISE EXCEPTION 'install: haf_stats_user cannot SELECT app_config (#70 would 500)';
     END IF;
@@ -164,16 +162,12 @@ BEGIN
     -- 5000, not 0. install #1 seeds 0 (asserted by the seed-repair step); that step then
     -- moves app_status to 5000, so install #2 takes the REPAIR branch and calls
     -- hive.app_set_current_block_num. 5000 is therefore a value only that call can have
-    -- produced -- where 0 was also the shim's INSERT default, making the old assertion
-    -- true whether or not the installer seeded anything.
+    -- produced -- whereas 0 is also the shim's INSERT default, so asserting 0 would hold
+    -- whether or not the installer seeded anything.
     --
-    -- This assertion earned its place on the lane's third run: ci_setup.sql pre-seeds a
-    -- haf_stats context at block 6000, so the installer was taking its "already exists"
-    -- branch and never calling hive.app_create_context at all. The lane was green-adjacent
-    -- while covering none of context creation. docker-compose-ci-install.yml now deletes
-    -- that row -- and seed-repair then moved app_status to 5000, which is why the
-    -- expectation is 5000 and not 0. (An earlier version of this line still said 0, three
-    -- lines above an assertion on 5000.) Both halves matter: the delete is what makes
+    -- It also depends on db-setup deleting the haf_stats context ci_setup.sql pre-seeds at
+    -- block 6000: with that row present the installer takes its "already exists" branch and
+    -- never calls hive.app_create_context. Both halves matter: the delete is what makes
     -- install #1 create, and seed-repair is what makes install #2 repair.
     IF _ctx_block <> 5000 THEN
         RAISE EXCEPTION 'install: context pointer is %, expected 5000. install #2 should '
@@ -181,9 +175,7 @@ BEGIN
                         _ctx_block;
     END IF;
 
-    -- THE CHECK THAT KEEPS THE PRIVILEGE MODEL ALIVE. An earlier revision selected the
-    -- owner, printed it in the NOTICE below, and never compared it -- which left the
-    -- lane's central claim undefended.
+    -- THE CHECK THAT KEEPS THE PRIVILEGE MODEL ALIVE.
     --
     -- haf_stats_app.create_context_if_not_exists() is plain LANGUAGE plpgsql with no
     -- SECURITY DEFINER, so install_app.sh's `SET ROLE haf_stats_owner` is the ONLY thing
@@ -193,18 +185,15 @@ BEGIN
     -- not FORCE, so the owner bypasses every policy. The context is created with the
     -- wrong owner and every other assertion here still passes.
     --
-    -- WHY THIS IS WORSE THAN IT LOOKS. An earlier version of this comment said a real
-    -- node would then fail with `permission denied for table contexts`. It would NOT --
-    -- measured on the live node by a parallel review: hafd.contexts is owned by
-    -- haf_admin, relrowsecurity = t, relforcerowsecurity = f. So the node's installer
-    -- ALSO bypasses RLS as the owner, silently creates a mis-owned context, and the
-    -- damage surfaces much later as the RLS loop in hive.app_next_block, where the
-    -- processor cannot see its own context row.
+    -- WHY THIS IS WORSE THAN IT LOOKS. A real node would NOT fail with `permission denied
+    -- for table contexts` either: there hafd.contexts is owned by haf_admin,
+    -- relrowsecurity = t, relforcerowsecurity = f. So the node's installer ALSO bypasses
+    -- RLS as the owner, silently creates a mis-owned context, and the damage surfaces much
+    -- later as the RLS loop in hive.app_next_block, where the processor cannot see its own
+    -- context row.
     --
-    -- So this assertion is the single most valuable line in the lane, and for a stronger
-    -- reason than the one first given: on a node the failure it catches is SILENT, not
-    -- loud. (Run 4 of this lane's failure table was loud only because in CI the table is
-    -- owned by postgres while the install had already SET ROLE to a non-owner.)
+    -- So this assertion is the single most valuable line in the lane: on a node the
+    -- failure it catches is SILENT, not loud.
     IF _owner <> 'haf_stats_owner' THEN
         RAISE EXCEPTION 'install: the context is owned by %, not haf_stats_owner. The '
                         'installer did not SET ROLE, so the grants and RLS this lane '
@@ -241,7 +230,7 @@ $verify$;
 --
 -- It asserts only that such an entry EXISTS, deliberately not its spelling: 30000,
 -- '30000ms' and '30s' are the same setting but are stored as written, and comparing the
--- stored text made an equivalent value fail here while the login probe passed -- measured.
+-- stored text would fail an equivalent value here that the login probe accepts.
 DO $timeout$
 DECLARE
     _cluster_wide INT;
@@ -323,9 +312,9 @@ $shim$;
 --
 -- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: twelve columns
 -- dropped, rc_estimated put back, the pre-canonical income/expense CHECK restored NOT VALID, and
--- one 'income' and one 'incoming' row written. Without break-schema only one of the 14 DDL strings
--- (comment_registry.community's ADD COLUMN) ever ran in CI, so a typo in any other, or a catalog
--- test that is wrongly always-FALSE, shipped green. install-under-lock then proves the opposite
+-- one 'income' and one 'incoming' row written. Without break-schema only one of the 17 migration statements
+-- (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or a catalog
+-- test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
 DO $upgraded$
 DECLARE

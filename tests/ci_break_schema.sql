@@ -1,8 +1,8 @@
 -- Put the schema back to a PRE-UPGRADE state, so install-again runs every guarded upgrade. (#96)
 --
--- Without this, CI ran the DDL of one guarded statement out of 14: comment_registry.community's
+-- Without this, CI ran one guarded statement out of 17: comment_registry.community's
 -- ADD COLUMN, which every fresh install needs because its CREATE TABLE lacks the column. The other
--- 13 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
+-- 16 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
 -- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 17 (#44 added three); install-again
 -- has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
 --
