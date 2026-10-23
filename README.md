@@ -1041,7 +1041,8 @@ Both were over 2020–2025, which the 2016 CI replay cannot reach. Where hivemin
 Run the file on its own, as `haf_admin`, from the root of a checkout of this repository (the image does not ship `tests/`). With haf_api_node:
 
 ```bash
-docker exec -i haf-haf-1 psql -U haf_admin -d haf_block_log -X -v ON_ERROR_STOP=1 \n    -f - < tests/parity/content_vs_hivemind.sql
+docker exec -i haf-haf-1 psql -U haf_admin -d haf_block_log -X -v ON_ERROR_STOP=1 \
+    -f - < tests/parity/content_vs_hivemind.sql
 ```
 
 Don't run `scripts/run_verification.sh` on a production node for this: its other guards take locks and rewrite tables inside rolled-back transactions.
@@ -1062,10 +1063,11 @@ How it behaves:
 To run it regularly, call that command from the host's cron. psql writes warnings and notices to stderr, so capture it, and alert on a non-zero exit or a `NOT RUN` warning:
 
 ```bash
-out=$(docker exec -i haf-haf-1 psql -U haf_admin -d haf_block_log -X -v ON_ERROR_STOP=1     -f - < tests/parity/content_vs_hivemind.sql 2>&1); rc=$?
-if [ "$rc" -ne 0 ] || printf '%s
-' "$out" | grep -q 'NOT RUN'; then printf '%s
-' "$out"; fi   # -> your alerting
+out=$(docker exec -i haf-haf-1 psql -U haf_admin -d haf_block_log -X -v ON_ERROR_STOP=1 \
+    -f - < tests/parity/content_vs_hivemind.sql 2>&1); rc=$?
+if [ "$rc" -ne 0 ] || printf '%s\n' "$out" | grep -q 'NOT RUN'; then
+    printf '%s\n' "$out"   # -> your alerting
+fi
 ```
 
 A non-zero exit is either a mismatch (the message starts `content oracle: N mismatch(es)`), which is a correctness alarm, or an operational error (statement or lock timeout, connection, role). Read the message before treating it as a data bug.

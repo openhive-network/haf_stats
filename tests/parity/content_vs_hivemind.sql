@@ -67,7 +67,7 @@ DECLARE
     _days DATE[];
     _monthly DATE[];
     -- hashed, not DOY-stepped: a weekly cron would otherwise cycle through only 4 days
-    _rot INT := 1 + (abs(hashtext(CURRENT_DATE::TEXT)) % 28);
+    _rot INT := 1 + ((hashtext(CURRENT_DATE::TEXT) & 2147483647) % 28);
     _from INT;
     _to INT;
     _ours_posts BIGINT;
