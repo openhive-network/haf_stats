@@ -149,10 +149,12 @@ tests/
 
 Measured on 2026-10-23 on a full-history HAF 1.28.8 node (PostgreSQL 18), with haf_stats
 at head (block 111,019,709) and develop `4a43cf5` installed. The figures are logical
-PostgreSQL sizes (`pg_total_relation_size`): tables, indexes and TOAST together.
+PostgreSQL sizes (`pg_total_relation_size`: tables, indexes and TOAST together) in binary
+units, as `pg_size_pretty` prints them: 1 GB here is 1024^3 bytes, so 254 GB is 273
+decimal GB.
 
-**Disk: about 254 GB**, all of it in `haf_stats_backend` (106 GB of heap and 148 GB of
-indexes). `haf_stats_app` holds only bookkeeping (112 kB).
+**Logical size: about 254 GB**, all of it in `haf_stats_backend` (106 GB of heap and
+148 GB of indexes). `haf_stats_app` holds only bookkeeping (112 kB).
 
 | Table | Size | Rows (approx.) |
 |---|---:|---:|
@@ -174,11 +176,11 @@ For comparison, the app schemas on the same node:
 | `hivesense_app` | 61 GB |
 | `reptracker_app` | 27 GB |
 
-The whole HAF database on that node is 5.46 TB logical (HAF's own `hafd` schema is
-4.1 TB of it). On that node's compressed ZFS dataset the database takes 2.63 TB on disk,
-a 2.19x ratio for the database as a whole; if haf_stats compresses like the rest, its
-on-disk share is roughly 115 GB. Plan for the logical figure if your storage does not
-compress.
+The whole HAF database on that node is 5.3 TiB logical (HAF's own `hafd` schema is
+4.0 TiB of it). On that node's compressed ZFS dataset it takes 2.6 TiB on disk: about 2x
+for the database as a whole (the dataset's own compressratio, 2.19x, also counts files
+outside the database). If haf_stats compresses like the rest, its on-disk share is
+roughly 125 GB. Plan for the logical figure if your storage does not compress.
 
 The tables grow with chain activity. The largest, `active_users_daily`, gained about
 40,000 rows a day over the 30 days before the measurement, at about 180 bytes a row
@@ -186,9 +188,10 @@ The tables grow with chain activity. The largest, `active_users_daily`, gained a
 2026-09-04, quoted in #63) is superseded by this one.
 
 **Initial sync: no clean from-zero measurement exists yet.** The one data point is a
-catch-up on the node above: haf_stats went from block 77.05 M to head (about 33.5 M
-blocks) in about 36 hours, about 1.1 M blocks an hour, on an 8-core machine shared with
-every other HAF app and partly slowed by another app's index build. Read it as an
+catch-up on the node above: haf_stats went from block 77.05 M to head (about 34 M
+blocks) in about 36 hours, an average of roughly 0.95 M blocks an hour, on an 8-core
+machine shared with every other HAF app and partly slowed by another app's index build
+(start block, duration and slowdown from the operator's notes of that rebuild). Read it as an
 indication for the busy part of the chain only. Early blocks are much lighter, so a
 from-zero sync does not scale linearly from it. The one-time rollup backfills that
 `install_app.sh` step 8 runs on an already-synced node are also unmeasured at mainnet
