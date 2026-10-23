@@ -1030,6 +1030,33 @@ content is expected and equals the deleted content. `tests/hivemind_oracle_fixtu
 stubs a `hivemind_app` in the CI stack so the oracle's dynamic-SQL path is exercised there
 rather than lying dormant until it first meets a production node.
 
+### Checking post and comment counts against hivemind on a production node
+
+Two count errors reached production and were found only by hand:
+- [#42](https://gitlab.syncad.com/hive/haf_stats/-/issues/42): content volume was exactly 2x too high;
+- [#45](https://gitlab.syncad.com/hive/haf_stats/-/issues/45): account post counts were about 19% too high.
+
+Both were over 2020–2025, which the 2016 CI replay cannot reach. Where hivemind is co-located, this check catches that class:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -d haf_block_log -f tests/parity/content_vs_hivemind.sql   # also guard 8 of run_verification.sh
+```
+
+It compares **exactly**:
+- **per day:** `network_content_daily` against hivemind's `hive_posts` rows created in that day's blocks. It checks the last 14 complete days and the 15th of every third month back to 2016-06.
+- **per author:** `account_content_daily` over the last 30 days, for up to 200 authors who posted on the last complete day, matched to hivemind by name.
+
+How it behaves:
+- **Equality is the expected result.** `hive_posts` keeps deleted content as rows, so both sides count creations. This is unlike the community oracle above, which compares with live content.
+- **Measured on 2026-10-23 on a 1.28.8 node:** 56 days (2016-06 to 2026-10) and 200 authors matched exactly, in about 10 s.
+- **Fully processed days only.** It compares days both apps have fully processed, so a syncing node or reversible blocks at the head don't raise a false alarm.
+- **Read-only.** It writes nothing and creates no temporary tables.
+- **No hivemind:** it skips cleanly when `hivemind_app` is absent.
+- **Changed hivemind schema:** it fails and names the columns it needs.
+- **On a mismatch:** it lists up to 20 differing days or accounts.
+
+To run it regularly, schedule the file with cron or pg_cron. A failure is a correctness alarm that someone has to read.
+
 ### Real-data parity without a mainnet replay
 
 Everything the resolver consumes for a comment — `author`, `permlink`, `parent_author`,
