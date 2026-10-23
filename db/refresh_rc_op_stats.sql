@@ -91,6 +91,13 @@ return written
         $py$;
     $ddl$;
 
+    -- #102: CREATE gives PUBLIC EXECUTE by default. An untrusted-language function that
+    -- makes an outbound rc_api request has no business being callable by every role.
+    -- pg_cron runs a job as the role that scheduled it: install step 8d schedules
+    -- haf_stats_rc_rates as the installer's (superuser) role, the owner here; a job
+    -- scheduled by hand per the header runs as haf_stats_owner, granted below. Runs after
+    -- the DROP/CREATE above, so it holds on every install.
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats() FROM PUBLIC';
     EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats() TO haf_stats_owner';
     RAISE NOTICE 'rc_op_stats auto-refresh sampler installed';
 END
