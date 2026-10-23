@@ -46,6 +46,15 @@
 #        GET /sync-status reports block 0 on a synced node and the processor replays
 #        from genesis. Reads through the SECURITY DEFINER under the API role, so it
 #        also covers that grant and RLS on hafd.contexts.
+#   8. tests/parity/content_vs_hivemind.sql (issue #63)
+#        Where hivemind is co-located, compares post/comment counts with hivemind:
+#        posts exactly, comments >= hivemind and at most 2% above it (hivemind#394),
+#        per day (network_content_daily; the last 365 days plus one day a month back to
+#        2016) and per author (account_content_daily) -- the #42 (2x) / #45 (+19%)
+#        class, which the 2016 CI replay cannot reach. Here (no hivemind_app) it only
+#        skips; the stub lane runs it for real (tests/ci_content_oracle.sh). On a
+#        production node run that FILE on its own, not this script, whose other guards
+#        take locks and rewrite tables inside rolled-back transactions.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
@@ -99,10 +108,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/7: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/8: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/7: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/8: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
@@ -126,19 +135,22 @@ else
   fi
 fi
 
-echo "===== Guard 3/7: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/8: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Guard 4/7: community derivation vs hivemind (issue #47) ====="
+echo "===== Guard 4/8: community derivation vs hivemind (issue #47) ====="
 run_sql_file tests/parity/community_vs_hivemind.sql
 
-echo "===== Guard 5/7: interactions op-ceiling guard (issue #48) ====="
+echo "===== Guard 5/8: interactions op-ceiling guard (issue #48) ====="
 run_sql_file tests/parity/interactions_cap.sql
 
-echo "===== Guard 6/7: witness blocks rebuild consistency (issue #54) ====="
+echo "===== Guard 6/8: witness blocks rebuild consistency (issue #54) ====="
 run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
 
-echo "===== Guard 7/7: HAF context vs app_status parity (issue #55) ====="
+echo "===== Guard 7/8: HAF context vs app_status parity (issue #55) ====="
 run_sql_file tests/parity/context_vs_app_status.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity) ====="
+echo "===== Guard 8/8: post/comment counts vs hivemind (issues #42, #45, #63) ====="
+run_sql_file tests/parity/content_vs_hivemind.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle) ====="
