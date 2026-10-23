@@ -81,7 +81,7 @@ run_case 'missing index is NOT RUN' 0 \
     'DROP INDEX hivemind_app.hive_posts_block_num_created_idx;'
 # Wrong role -> an error naming the fix, not a skip.
 run_case 'role without hivemind access' 3 \
-    'cannot read hive_posts/hive_accounts; run it as haf_admin' \
+    'cannot read hive_posts/hive_accounts/hive_state; run it as haf_admin' \
     'SET ROLE haf_stats_user;'
 run_case 'role outside hive_applications_group (RLS)' 3 \
     'row-level security' \
