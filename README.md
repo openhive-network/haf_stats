@@ -132,6 +132,17 @@ docker/
 
 tests/
   tavern/                   API integration tests (pytest + Tavern)
+  unit/                     Static tests, no database (PYTHONPATH=. pytest tests/unit/)
+  privileges.sql            Lists haf_stats' owners and ACLs (functions, tables,
+                            sequences, columns, schemas), its default privileges and
+                            role memberships (#82)
+  expected_privileges.txt   The committed result of privileges.sql. reinstall-test fails
+                            when either install differs from it; and
+                            unit/test_privileges_pinned.py fails when a GRANT in the
+                            install sources is missing from it, or a REVOKE of PUBLIC
+                            EXECUTE does not hold in it. An intended privilege change
+                            means regenerating it (command in privileges.sql's header),
+                            so the change shows up in review
 ```
 
 ## Quick Start (Development)

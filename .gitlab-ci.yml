@@ -1448,6 +1448,11 @@ reinstall-test:
       echo "FAIL: schema dump is only ${LINES} lines; the install cannot have succeeded."
       exit 1
     fi
+    # #82: the privileges the FIRST install left, compared with the committed list in the
+    # last block. psql is not reliably on PATH in the haf image either; it sits beside
+    # pg_dump.
+    PSQL="$(dirname "${PG_DUMP}")/psql"
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PSQL" -U haf_admin -d haf_block_log -X -At -v ON_ERROR_STOP=1 -f - < ../tests/privileges.sql > privileges-first.txt
   - |
     cd "${CI_PROJECT_DIR}/docker" || exit 1
     echo "Re-running install_app over the already-installed cache database..."
@@ -1484,10 +1489,46 @@ reinstall-test:
       head -200 schema.diff
       exit 1
     fi
+  - |
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
+    # #82: the privileges each install left behind, against a COMMITTED list. The schema
+    # diff above compares the node with itself, so a GRANT that a DROP-and-recreate
+    # discards on every install (or a REVOKE it undoes) is lost identically twice and the
+    # diff stays empty. privileges-first.txt was taken before the reinstall (second block);
+    # this takes the second one. tests/privileges.sql explains the format;
+    # tests/unit/test_privileges_pinned.py ties the list back to the install sources.
+    docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PSQL" -U haf_admin -d haf_block_log -X -At -v ON_ERROR_STOP=1 -f - < ../tests/privileges.sql > privileges-actual.txt
+    PRIV_FAIL=0
+    for F in privileges-first.txt privileges-actual.txt; do
+      N=$(wc -l < "${F}")
+      echo "${F}: ${N} objects"
+      if [[ "${N}" -lt 100 ]]; then
+        echo "FAIL: only ${N} objects in ${F}; the query or the install did not run."
+        exit 1
+      fi
+      if ! diff -u ../tests/expected_privileges.txt "${F}" > "${F%.txt}.diff"; then
+        PRIV_FAIL=1
+        echo "FAIL: ${F} differs from tests/expected_privileges.txt:"
+        cat "${F%.txt}.diff"
+      fi
+    done
+    if [[ "${PRIV_FAIL}" -ne 0 ]]; then
+      echo
+      echo "'-' lines are what tests/expected_privileges.txt expects, '+' lines what the"
+      echo "install produced. A GRANT lost to a DROP shows as an ACL narrowed (often to"
+      echo "<default>); a REVOKE undone shows PUBLIC reappearing."
+      echo "If the change is INTENDED (a new, renamed or re-signatured function, a new"
+      echo "table, a deliberate grant change): replace tests/expected_privileges.txt with"
+      echo "this job's docker/privileges-actual.txt artifact, commit it, and make sure"
+      echo "tests/unit/test_privileges_pinned.py still passes -- the diff is then reviewed."
+      exit 1
+    fi
+    echo "OK: both installs left the committed owners, SECURITY DEFINER flags and ACLs."
+    rm -f privileges-first.txt privileges-actual.txt privileges-first.diff privileges-actual.diff
   artifacts:
     # `artifacts:` is a HASH, not a list -- one `when:` for the whole job, so the dumps
     # cannot be declared on_failure separately from the logs. Instead the success path
-    # DELETES them (see the final script block): on a green run schema.diff is empty and
+    # DELETES them (see the schema-diff block): on a green run schema.diff is empty and
     # the two dumps are identical, so uploading ~10875 lines twice per pipeline is pure
     # storage cost. On any failure the script exits before that cleanup and the files
     # survive to be uploaded. schema-before.sql exists even on the install-failure path;
@@ -1498,6 +1539,10 @@ reinstall-test:
     - docker/schema.diff
     - docker/schema-before.sql
     - docker/schema-after.sql
+    - docker/privileges-first.txt
+    - docker/privileges-actual.txt
+    - docker/privileges-first.diff
+    - docker/privileges-actual.diff
     expire_in: 1 week
 
 # =============================================================================
