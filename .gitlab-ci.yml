@@ -550,10 +550,9 @@ hadolint:
   image: hadolint/hadolint:latest-alpine
   needs: []
   script:
-    # DL3066 (non-numeric user-id): "USER root" is deliberate (DL3002 is already
-    # ignored for the same reason); the rule appeared in a newer hadolint and the
-    # unpinned latest-alpine image made it start failing without a repo change.
-  - hadolint --ignore DL3006 --ignore DL3002 --ignore DL3066 Dockerfile
+    # DL3002 (last USER is root) and DL3066 (non-numeric user-id) are NOT ignored any
+    # more: the image ends on `USER 10001:10001` (#64), so both rules now guard that.
+  - hadolint --ignore DL3006 Dockerfile
   rules:
     # Branch pipelines only (Workflows/Branch-Pipelines.gitlab-ci.yml does not
     # create merge_request_event pipelines); GitLab shows the branch pipeline in
@@ -692,6 +691,87 @@ docker-build:
     # base is Alpine (so `date` is BusyBox and has no --iso-8601), and that bash exists
     # for the #!/bin/bash scripts. One line settles both.
     docker run --rm --entrypoint /bin/sh "$IMG" -c 'set -e; date -uIseconds; command -v bash psql pg_isready sed'
+    echo "--- the image runs as the unprivileged haf_stats user, not root (#64) ---"
+    # THE GUARANTEE is these three checks on the BUILT image, not anything about the
+    # Dockerfile text (tests/unit/test_dockerfile_user.py is only a fast lint):
+    #   check_image_config.sh  the final config: User, PYTHONNOUSERSITE, no PYTHONPATH /
+    #                          PYTHONHOME / PYTHONSTARTUP / LD_PRELOAD / LD_LIBRARY_PATH;
+    #   check_image_root.sh    as root, by mode bits: nothing world-writable or owned by
+    #                          10001 anywhere, setuid/setgid and capabilities byte-exact,
+    #                          `/usr/bin/sudo -l -U haf_stats` lists no rule;
+    #   check_runtime_user.sh  as the image's default user, by access(2): identity and
+    #                          groups, nothing writable on /, HOME and its ancestors,
+    #                          /app readable and walkable, user site off, startup file.
+    image_checks() {
+      rc=0
+      sh scripts/ci-helpers/check_image_config.sh "$1" || rc=1
+      timeout 300 docker run --rm --user 0 --entrypoint /app/scripts/ci-helpers/check_image_root.sh "$1" || rc=1
+      timeout 300 docker run --rm --entrypoint /app/scripts/ci-helpers/check_runtime_user.sh "$1" || rc=1
+      return "$rc"
+    }
+    image_checks "$IMG"
+    echo "--- ...and the checks FAIL on each way of getting that wrong (negative controls) ---"
+    # Built on this job's daemon FROM the image just built, never pushed. Each mutant must
+    # make the checks fail AND name the specific path or problem, so a check that died
+    # for an unrelated reason does not count as catching it. Usage:
+    #   mutant NAME EXPECTED_OUTPUT_REGEX DOCKERFILE_LINE...
+    # The lines run after `USER 0`, one argument per line, and the image then ends on
+    # `USER 10001:10001` -- unless one of the lines is itself a USER, which then stands.
+    mutant() {
+      name="$1"; want="$2"; shift 2
+      tail_user='USER 10001:10001'
+      for l in "$@"; do case "$l" in "USER "*) tail_user='' ;; esac; done
+      { printf 'FROM %s\nUSER 0\n' "$IMG"; printf '%s\n' "$@"; [ -z "$tail_user" ] || printf '%s\n' "$tail_user"; } \
+        | docker build -q -t "haf_stats_mutant_$name" - >/dev/null
+      rc=0
+      image_checks "haf_stats_mutant_$name" >/tmp/mut_out 2>&1 || rc=$?
+      cat /tmp/mut_out
+      if [ "$rc" = 0 ]; then
+        echo "FAIL: mutant $name was not caught (the checks passed)" >&2; exit 1
+      fi
+      if grep -q -- "$want" /tmp/mut_out; then :; else
+        echo "FAIL: mutant $name failed the checks without naming '$want'" >&2; exit 1
+      fi
+      docker rmi -f "haf_stats_mutant_$name" >/dev/null
+      echo "mutant $name caught"
+    }
+    # Rounds 1-3.
+    mutant writable_subdir '^/app/db$'                          'RUN chmod -R o+w /app/db'
+    mutant runtime_owned   'owned by uid or gid 10001'          'RUN chown -R 10001:10001 /app/db'
+    mutant unreadable_file '^/app/db/version.sql$'              'RUN chmod 0600 /app/db/version.sql'
+    mutant sudoers         'sudo rules for haf_stats'           'RUN echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers'
+    mutant path_0777       '^/usr/local/bin/haf_app_driver.py$' 'RUN chmod 0777 /usr/local/bin/haf_app_driver.py'
+    mutant setuid_python   "setuid/setgid: b'/usr/bin/python3" 'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
+    mutant nosearch_dir    '^/app/nosearch$'                    'RUN mkdir /app/nosearch && chmod 0644 /app/nosearch'
+    mutant writable_home   '^/nonexistent$'                     'RUN mkdir /nonexistent && chown 10001:10001 /nonexistent'
+    mutant usercustomize   'user site is not disabled'          'ENV PYTHONNOUSERSITE=' \
+      'RUN d="$(HOME=/nonexistent python3 -c "import site; print(site.getusersitepackages())")" && mkdir -p "$d" && echo "import sys" > "$d/usercustomize.py"'
+    mutant sudo_scoped     'sudo rules for haf_stats'           'RUN echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
+    mutant file_cap        "capability: b'/usr/bin/python3"     "RUN python3 -c 'import os, struct, sys; os.setxattr(os.path.realpath(sys.executable), \"security.capability\", struct.pack(\"<IIIII\", 0x02000001, 0x80, 0, 0, 0))'"
+    # `USER uid` WITHOUT a gid: with an explicit `uid:gid` (the real image's form) Docker
+    # applies no /etc/group memberships at all -- pipeline 182889 showed groups=10001
+    # despite the membership. A `user: haf_stats` override, --group-add or Kubernetes
+    # supplementalGroups would add them, which is what this models.
+    mutant extra_group     'groups are'                         'RUN addgroup haf_stats root' 'USER 10001'
+    mutant glob_named_suid "setuid/setgid: b'/usr/bin/\[s\]udo'" 'RUN cp /bin/busybox "/usr/bin/[s]udo" && chmod 4755 "/usr/bin/[s]udo"'
+    mutant env_allowlist   "setuid/setgid: b'/usr/bin/python3"  'ENV SETID_ALLOWED=/usr/bin/python3.10' \
+      'RUN chmod 4755 "$(readlink -f /usr/bin/python3)"'
+    # Round 4: one per class, each aimed at a route the earlier, list-based checks missed.
+    mutant etc_passwd_0666 '^/etc/passwd$'                      'RUN chmod 0666 /etc/passwd'
+    mutant etc_dir_o_w     '^/etc$'                             'RUN chmod o+w /etc'
+    mutant site_pkgs_1777  'site-packages$'                     'RUN chmod 1777 "$(python3 -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")"'
+    mutant libpq_0666      'libpq.so'                           'RUN chmod 0666 "$(readlink -f "$(ls /usr/lib/libpq.so* | head -n 1)")"'
+    mutant hidden_setuid   "setuid/setgid: b'/opt/hidden/x'"    'RUN mkdir -p /opt/hidden && cp /bin/busybox /opt/hidden/x && chmod 4755 /opt/hidden/x && chmod 0711 /opt/hidden'
+    mutant newline_suid    "setuid/setgid: b'/usr/bin/sudo\\\\n'" "RUN python3 -c 'import os, shutil; p = \"/usr/bin/sudo\" + chr(10); shutil.copy(\"/bin/busybox\", p); os.chmod(p, 0o4755)'"
+    mutant fake_sudo       'sudo rules for haf_stats'           'RUN printf "#!/bin/sh\nexit 1\n" > /usr/local/bin/sudo && chmod 0755 /usr/local/bin/sudo' \
+      'RUN echo "haf_stats ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers'
+    mutant listpw_always   'sudo rules for haf_stats'           'RUN echo "Defaults listpw=always" >> /etc/sudoers && echo "haf_stats ALL=(ALL) NOPASSWD: /usr/bin/python3" >> /etc/sudoers'
+    mutant env_pythonpath  'image config sets PYTHONPATH=/tmp'  'ENV PYTHONPATH=/tmp'
+    mutant home_under_tmp  'HOME /tmp/a/b: ancestor /tmp is writable' 'ENV HOME=/tmp/a/b'
+    # The "find could not walk" sentinel: a directory that is searchable (so the
+    # per-directory -x rule passes) but not listable, with a file in it -- only the walk
+    # failing can report it, so deleting the sentinel turns this control red.
+    mutant unlistable_dir  'find could not walk /app'           'RUN mkdir /app/unlistable && touch /app/unlistable/f && chmod 0311 /app/unlistable'
     echo "--- entrypoint dispatches its own usage on stdout ---"
     expect_ok --help; grep -q "install_app" "$OUT"
     echo "--- unknown verb fails with the right message, not merely non-zero ---"
@@ -1099,6 +1179,19 @@ sync:
     echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
     "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  - |
+    # The block-processing healthcheck, run the way Docker runs it: inside the LIVE
+    # processor container, as the image's user (exec defaults to it), with the
+    # container's environment and the startup file process_blocks.sh wrote (#64).
+    # CI_FAST_HEALTHCHECK_SERVICES replaces the compose healthcheck on this service, so
+    # without this nothing in CI showed the real script passing as uid 10001 against a
+    # real HAF. In sync by now, so it must answer healthy; exit status is the assertion.
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    uid=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-process id -u)
+    [[ "$uid" == "10001" ]] || { echo "FAIL: haf-stats-process runs as uid '$uid', want 10001"; exit 1; }
+    docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf-stats-process /app/block-processing-healthcheck.sh
+    echo "block-processing healthcheck passed as uid $uid"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
     cd "${CI_PROJECT_DIR}/docker" || exit 1

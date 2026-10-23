@@ -563,6 +563,32 @@ Anything that is not a verb but *is* runnable is still executed, so the previous
 starting with `-` goes to bash — except `--help`, `-h`, `-?`, which print the
 dispatcher's own usage.
 
+### Runtime user
+
+The image runs as `haf_stats`, **uid/gid 10001**, not root
+([#64](https://gitlab.syncad.com/hive/haf_stats/-/issues/64)), with no supplementary
+groups, no sudo rule and **no home directory** (`HOME=/nonexistent`, which it cannot
+create). `PYTHONNOUSERSITE=1` turns Python's per-user site off. `/app` and the PATH
+directories are root-owned and read-only to it.
+
+What the processes write:
+
+- the healthcheck's startup timestamp, `/tmp/block_processing_startup_time.txt`, via a
+  `.tmp.<pid>` file beside it that is renamed into place;
+- `haf_app_driver.py`'s log file, only if `LOG_FILE` is set (it is not by default).
+
+Operator overrides that used to work only because the image ran as root now fail with
+`Permission denied`:
+
+- `HAF_STATS_STARTUP_TIME_FILE` or `LOG_FILE` pointing at a root-owned path or volume;
+- a root-owned volume mounted over `/tmp` itself, which breaks the default startup file
+  when `HAF_STATS_STARTUP_TIME_FILE` is unset;
+- bind-mounting root-owned `0600` files into `/app` -- they must be readable by uid 10001.
+
+Nothing binds a port, and every connection names its role explicitly (`POSTGRES_USER`),
+so the OS user does not reach the database -- only a `peer` rule in `pg_hba.conf` would
+make it matter.
+
 ### Block-processing healthcheck
 
 The image ships `/app/block-processing-healthcheck.sh` — the path

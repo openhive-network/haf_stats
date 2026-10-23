@@ -1,6 +1,9 @@
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3
 
-USER root
+# Root for the BUILD steps only: WORKDIR creates /app root-owned and the RUN below writes
+# /app/db/version.sql into it. The runtime user is dropped to at the end of this file.
+# `0`, not `root`: hadolint's DL3066 flags every non-numeric USER, not only the last.
+USER 0
 
 WORKDIR /app
 
@@ -60,6 +63,75 @@ RUN case "${GIT_HASH}" in \
  && echo "TRUNCATE haf_stats_app.app_version; INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('${GIT_HASH_BAKED}');" \
     > /app/db/version.sql
 
+# Runtime user (#64): a dedicated, unprivileged account with a FIXED uid/gid, 10001.
+#
+# Not the base image's haf_admin, although nft_tracker runs as that: the base gives
+# haf_admin passwordless sudo (Dockerfile.psql in hive/common-ci-configuration), so
+# running as it is root one `sudo` away. Not uid 1000 either -- that is haf_admin's in
+# the base (Alpine's first adduser), so `adduser -u 1000` would collide.
+#
+# Nothing at runtime writes under /app, so /app stays ROOT-owned and read-only to this
+# user; nothing here is chowned to it. The only things the image's processes write are:
+#   * /tmp/block_processing_startup_time.txt (+ a .tmp.$$ beside it, renamed into place)
+#     -- scripts/process_blocks.sh, read back by /app/block-processing-healthcheck.sh;
+#     overridable with HAF_STATS_STARTUP_TIME_FILE. /tmp is 1777.
+#   * mktemp files under /tmp (tests/ci_install_no_upgrade.sh, scripts/check_haf_drift.sh).
+#   * haf_app_driver.py's LOG_FILE, only if that env var is set (unset everywhere here).
+# No port is bound (the API is postgrest and the rewriter, separate images), and every
+# connection names its role (POSTGRES_USER), so the OS user only matters to a `peer`
+# pg_hba rule, which neither this repo's stacks nor haf_api_node use for app containers.
+#
+# `chmod -R u=rwX,go=rX /app` because COPY keeps the BUILD CONTEXT's file modes, and
+# those are not always 644 -- in EITHER direction:
+#   * too WIDE: pipeline 182878 found every db/*.sql, endpoints/* and the healthcheck
+#     .sql in the image WORLD-WRITABLE -- consistent with the runner checking out under
+#     umask 0000 (GitLab's docker executor does that unless
+#     FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR is set) -- so the runtime user could have
+#     rewritten SQL that install_app runs as haf_admin;
+#   * too NARROW: scripts/openapi_rewrite.sh writes endpoints/rewrite_rules.conf through
+#     mktemp, i.e. 0600, and an earlier openapi-drift run leaves it so in a REUSED runner
+#     build directory -- git tracks only the exec bit, so a later fetch/checkout of the
+#     same content never resets the mode. Invisible while the image ran as root.
+# go=rX keeps the exec bit on the scripts (X = only where some exec bit is already set).
+#
+# Cost: chmod copies /app into this layer once more, about 1 MB. A symbolic `COPY --chmod`
+# would avoid it but symbolic modes need the dockerfile:1.10 frontend, i.e. a `# syntax=`
+# pull from Docker Hub on every build; an octal --chmod applies to directories too, so
+# no single octal value suits both files and directories.
+#
+# The PATH directories (Alpine's default PATH, listed literally; the docker-build image
+# checks scan the WHOLE filesystem, so anything writable that this misses -- here or
+# anywhere else -- fails CI rather than shipping) get the same treatment, but only for
+# the files that need it.
+# The base image (common-ci-configuration psql:14-3) ships haf_app_driver.py,
+# install_with_app_lock.py and run_with_reconnect.sh in /usr/local/bin as 0777, and
+# scripts/process_blocks.sh execs haf_app_driver.py from PATH -- so without this the
+# runtime user could rewrite its own block loop. `find ... -exec`, not `chmod -R`, so
+# only the offending files are copied into this layer rather than all of /usr/bin.
+# Symlinks are skipped: their mode is meaningless and chmod would follow them.
+#
+# NO HOME DIRECTORY (-H, home /nonexistent under a root-owned /). A home owned by the
+# runtime user is a code path: haf_app_driver.py is `#!/usr/bin/env python3` without
+# -s, so ~/.local/lib/python3.*/site-packages/usercustomize.py -- or a planted psycopg2/
+# -- would run inside the block loop. PYTHONNOUSERSITE below disables the user site as
+# well, so neither defence depends on the other. Nothing here needs a home: psql and
+# libpq look for ~/.psqlrc, ~/.pgpass and ~/.postgresql/ and carry on when they are
+# missing, which is the intended state.
+#
+# This RUN is the LAST build step before USER: tests/unit/test_dockerfile_user.py
+# rejects any RUN/COPY/ADD after it, because a later COPY would land files with the
+# context's modes again. It is also AFTER the version.sql RUN on purpose:
+# tests/unit/test_version_provenance.py extracts that RUN with a non-greedy match from the
+# FIRST `^RUN`, so a RUN placed above it would be swept into the script it executes.
+RUN addgroup -S -g 10001 haf_stats \
+ && adduser -S -D -H -u 10001 -G haf_stats -h /nonexistent -s /bin/bash haf_stats \
+ && for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do \
+      if [ -d "$d" ]; then \
+        find "$d" ! -type l \( -perm -0002 -o -perm -0020 \) -exec chmod go-w {} +; \
+      fi; \
+    done \
+ && chmod -R u=rwX,go=rX /app
+
 # Verb dispatcher: install_app | process_blocks | uninstall_app (#57). Every other
 # haf_api_node app image exposes that trio, which is what lets a module file say
 # `command: [install_app]` instead of naming a script path inside someone else's image.
@@ -71,6 +143,14 @@ RUN case "${GIT_HASH}" in \
 # (see the script), so the existing `command: ["/app/scripts/process_blocks.sh"]` form
 # keeps working and an operator mid-migration is not stranded.
 ENTRYPOINT ["/app/docker_entrypoint.sh"]
+
+# Python's per-user site directory off for every python3 in the image (see the note on
+# the home directory above).
+ENV PYTHONNOUSERSITE=1
+
+# NUMERIC, so a runtime that enforces non-root (Kubernetes runAsNonRoot) can verify it
+# without resolving a name, and hadolint's DL3002/DL3066 no longer need ignoring.
+USER 10001:10001
 
 # NO `HEALTHCHECK` instruction here, deliberately. Upstream does not -- reputation_tracker's
 # and balance_tracker's Dockerfiles ship the script and let each app's compose attach it
