@@ -487,6 +487,36 @@ shell-lint:
     # the MR. Matches balance_tracker.
   - if: $CI_COMMIT_BRANCH
 
+# shell-lint, for the shell embedded in THIS file (#90): 26 block scalars at the time of writing, which nothing
+# shellchecked. The extractor writes one file per job, linted as bash or sh by the job's
+# image, and line-aligned so a finding's line number is the line in .gitlab-ci.yml.
+#
+# No exclusions. The baseline at --severity=warning was 9 SC2164 (bare `cd`, fixed with
+# `|| exit 1`) plus 38 SC3xxx that came only from linting bash jobs as sh; with the shell
+# taken from the image, those reduce to 2 SC3010 in prepare_haf_data, whose image comes
+# from an included template (see JOB_SHELLS in the extractor).
+#
+# NOT linted (the extractor's docstring has the detail): the 8 `!reference` items in 4
+# jobs (find_haf_image, prepare_haf_data, sync, pattern-test); script keys inherited via
+# `extends` from included templates (detect_changes, regression-test, reinstall-test,
+# pattern-test, prepare_haf_data, publish_images, cache_cleanup); and `sh -c '...'`
+# bodies. prepare_haf_data is linted without the template block that runs before it in
+# the same shell. A template extended within this file is linted as its own file, apart
+# from the job. Items that cannot keep their line are appended at the end of the file,
+# so flow-sensitive checks see them out of order. SC2164 is not raised under `set -e`.
+# find_haf_image runs bash but is linted as sh, which is stricter.
+ci-shell-lint:
+  stage: lint
+  # Same pinned shellcheck as shell-lint, so the two jobs cannot disagree on a rule.
+  image: koalaman/shellcheck-alpine:v0.11.0
+  needs: []
+  script:
+  - apk add --no-cache python3 py3-yaml >/dev/null
+  - python3 scripts/ci-helpers/extract_ci_shell.py .gitlab-ci.yml /tmp/ci-shell
+  - shellcheck --severity=warning /tmp/ci-shell/*.sh
+  rules:
+  - if: $CI_COMMIT_BRANCH
+
 # Behavioural tests for the shell scripts that make up the image contract (#57):
 # the entrypoint's verb dispatch, the block-processing healthcheck, the uninstall
 # teardown and both option loops. They drive the real scripts against a stub psql on
@@ -547,7 +577,7 @@ compose-validate:
     HAF_DATA_DIRECTORY: "/tmp/haf_data"
     HAF_SHM_DIRECTORY: "/tmp/haf_shm"
   script:
-  - cd docker
+  - cd docker || exit 1
   - docker compose -f docker-compose.yml -f overrides/ci.yml config --quiet
   - docker compose -f docker-compose-ci-test.yml config --quiet
   - docker compose -f docker-compose-ci-install.yml config --quiet
@@ -1025,7 +1055,7 @@ sync:
       sudo rm -rf "${DATADIR}/blockchain"
     fi
 
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     # PGRST_DB_URI below carries options=-c statement_timeout: it must be repeated on every
     # path that DEFINES the variable, because the docker-compose.yml default is bypassed
     # whenever it is set. Without it CI runs the endpoints against real data with no query
@@ -1071,7 +1101,7 @@ sync:
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):rewriter[collapsed=true]\r\e[0KThe documented surface answers..."
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
     # #61: this is the only lane with a real HAF behind the whole stack, and until
     # now it started the rewriter and never sent it a request -- so a rewriter that
@@ -1085,7 +1115,7 @@ sync:
     echo -e "\e[0Ksection_end:$(date +%s):rewriter\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
 
     # A clean pg_ctl stop flushes WAL and writes a shutdown checkpoint so the
@@ -1184,7 +1214,7 @@ regression-test:
   script:
   - |
     echo "Running correctness guards against the cached stack (docker:5432)"
-    cd "${CI_PROJECT_DIR}"
+    cd "${CI_PROJECT_DIR}" || exit 1
     ./scripts/run_verification.sh --host=docker --port=5432 --user=haf_admin
   artifacts:
     when: always
@@ -1278,7 +1308,7 @@ reinstall-test:
     HAF_STATS_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
   script:
   - |
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     # Record WHAT WAS ACTUALLY INSTALLED. The compose default only protects against
     # an unset/empty variable; a valid-but-wrong tag (:latest, a develop tag, a
     # typo'd registry) sails past it and the lane goes green having installed a
@@ -1286,7 +1316,7 @@ reinstall-test:
     # filters inactive-profile services out of its output -- so print it.
     echo "reinstall-test: image under test = ${HAF_STATS_IMAGE}"
   - |
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     # The PG binaries are not reliably on PATH in the haf image -- `sync` already has
     # to locate pg_ctl this way for the same reason -- so find pg_dump rather than
     # assume it. Failing here with a clear message beats a bare "executable file not
@@ -1326,7 +1356,7 @@ reinstall-test:
       exit 1
     fi
   - |
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     echo "Re-running install_app over the already-installed cache database..."
     # --no-deps: haf is already running from the template's compose startup. Without
     # it, compose would try to (re)create the dependency and disturb the very stack
@@ -1334,7 +1364,7 @@ reinstall-test:
     docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never run --rm --no-deps haf-stats-setup
     echo "Second install exited 0."
   - |
-    cd "${CI_PROJECT_DIR}/docker"
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
     echo "Capturing the schema after..."
     docker compose --env-file ci.env --file docker-compose-ci-test.yml --ansi never exec -T haf "$PG_DUMP" -U haf_admin -d haf_block_log --schema-only --strict-names -n haf_stats_app -n haf_stats_backend -n haf_stats_endpoints | sed -E '/^\\(un)?restrict /d' > schema-after.sql
     # Compare the two dumps to EACH OTHER rather than to a constant: this catches a
