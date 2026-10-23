@@ -47,12 +47,14 @@
 #        from genesis. Reads through the SECURITY DEFINER under the API role, so it
 #        also covers that grant and RLS on hafd.contexts.
 #   8. tests/parity/content_vs_hivemind.sql (issue #63)
-#        Where hivemind is co-located, compares post/comment counts EXACTLY with
-#        hivemind: per day (network_content_daily; the last 14 days plus one day a
-#        quarter back to 2016) and per author (account_content_daily, 200 authors over
-#        30 days) -- the #42 (2x) / #45 (+19%) class, which the 2016 CI replay cannot
-#        reach. Read-only, ~10 s on a 1.28.8 node, skips cleanly without hivemind_app,
-#        and is meant to be run on production nodes too.
+#        Where hivemind is co-located, compares post/comment counts with hivemind:
+#        posts exactly, comments >= hivemind and at most 2% above it (hivemind#394),
+#        per day (network_content_daily; the last 365 days plus one day a month back to
+#        2016) and per author (account_content_daily) -- the #42 (2x) / #45 (+19%)
+#        class, which the 2016 CI replay cannot reach. Here (no hivemind_app) it only
+#        skips; the stub lane runs it for real (tests/ci_content_oracle.sh). On a
+#        production node run that FILE on its own, not this script, whose other guards
+#        take locks and rewrite tables inside rolled-back transactions.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used

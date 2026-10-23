@@ -67,7 +67,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_rollups.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
-        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql &&
+        sh /ci_content_oracle.sh
     volumes:
       - ../tests/ci_setup.sql:/ci_setup.sql:ro
       # #55: the SECURITY DEFINER over hafd.contexts, plus the privilege/source probes
@@ -127,6 +128,11 @@ services:
       # only place the assertion's failure arms are executed at all.
       - ../db/op_type_registry.sql:/op_type_registry.sql:ro
       - ../tests/ci_op_types.sql:/ci_op_types.sql:ro
+      # The production post/comment guard (#63), run for real against a closed-world fixture,
+      # each case inside a rolled-back transaction (see tests/ci_content_oracle.sh).
+      - ../tests/ci_content_oracle.sh:/ci_content_oracle.sh:ro
+      - ../tests/content_oracle_fixture.sql:/content_oracle_fixture.sql:ro
+      - ../tests/parity/content_vs_hivemind.sql:/content_vs_hivemind.sql:ro
     depends_on:
       postgres:
         condition: service_healthy

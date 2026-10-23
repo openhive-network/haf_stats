@@ -1038,24 +1038,28 @@ Two count errors reached production and were found only by hand:
 
 Both were over 2020–2025, which the 2016 CI replay cannot reach. Where hivemind is co-located, this check catches that class:
 
+Run the file on its own, as `haf_admin`, from a checkout of this repository (the image does not ship `tests/`). With haf_api_node:
+
 ```bash
-psql -X -v ON_ERROR_STOP=1 -d haf_block_log -f tests/parity/content_vs_hivemind.sql   # also guard 8 of run_verification.sh
+docker exec -i haf-haf-1 psql -U haf_admin -d haf_block_log -X -v ON_ERROR_STOP=1     -f - < tests/parity/content_vs_hivemind.sql
 ```
 
-It compares **exactly**:
-- **per day:** `network_content_daily` against hivemind's `hive_posts` rows created in that day's blocks. It checks the last 14 complete days and the 15th of every third month back to 2016-06.
-- **per author:** `account_content_daily` over the last 30 days, for up to 200 authors who posted on the last complete day, matched to hivemind by name.
+Don't run `scripts/run_verification.sh` on a production node for this: its other guards take locks and rewrite tables inside rolled-back transactions.
+
+What it compares:
+- **Posts: exactly.** They matched on every one of 3,864 days (2016-03-24 to 2026-10-21) on a 1.28.8 node.
+- **Comments: at least hivemind's, and at most 2% above it per day.** hivemind's massive sync drops a re-created reply when its parent was also deleted and re-created in the same batch ([hivemind#394](https://gitlab.syncad.com/hive/hivemind/-/issues/394)). On 52 days of 2016–2021 hivemind is short by up to 182 comments (1.33% of that day), and haf_stats matches hived's `post_count` there. A count below hivemind's always fails.
+- **Days:** every complete day of the last 365, plus one day a month back to 2016-04. The day of the month rotates with the run date, so successive runs cover different days.
+- **Authors:** up to 200 who posted on the last complete day, over the last 30 days, plus 20 for each monthly day. Per author, only the direction is checked for comments.
 
 How it behaves:
-- **Equality is the expected result.** `hive_posts` keeps deleted content as rows, so both sides count creations. This is unlike the community oracle above, which compares with live content.
-- **Measured on 2026-10-23 on a 1.28.8 node:** 56 days (2016-06 to 2026-10) and 200 authors matched exactly, in about 10 s.
-- **Fully processed days only.** It compares days both apps have fully processed, so a syncing node or reversible blocks at the head don't raise a false alarm.
-- **Read-only.** It writes nothing and creates no temporary tables.
-- **No hivemind:** it skips cleanly when `hivemind_app` is absent.
-- **Changed hivemind schema:** it fails and names the columns it needs.
-- **On a mismatch:** it lists up to 20 differing days or accounts.
+- **Creations on both sides.** `hive_posts` keeps deleted content as rows. This is unlike the community oracle above, which compares with live content.
+- **Fully processed days only.** It stops at the last day both apps (and hivemind's own completion marker) have finished.
+- **Says when it can't run.** It prints a `NOT RUN` warning, exit status 0, while hivemind is in massive sync or a needed index is missing. It fails with an error when it can't read hivemind or `hafd.contexts` (wrong role), when hivemind's schema lacks a column it needs, or when nothing was compared. It skips quietly only when `hivemind_app` is absent.
+- **Read-only.** It writes nothing and creates no temporary tables. It takes about 100 s on a 1.28.8 node (measured 2026-10-23: 480 days and 2,497 account checks).
+- **On a mismatch:** it lists up to 20 differing days or accounts. A day inside the 2% band is listed as a notice.
 
-To run it regularly, schedule the file with cron or pg_cron. A failure is a correctness alarm that someone has to read.
+To run it regularly, call that command from the host's cron and alert on a non-zero exit or a `NOT RUN` warning. A failure is a correctness alarm that someone has to read.
 
 ### Real-data parity without a mainnet replay
 
