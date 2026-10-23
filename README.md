@@ -145,6 +145,55 @@ tests/
                             so the change shows up in review
 ```
 
+## Resource requirements
+
+Measured on 2026-10-23 on a full-history HAF 1.28.8 node (PostgreSQL 18), with haf_stats
+at head (block 111,019,709) and develop `4a43cf5` installed. The figures are logical
+PostgreSQL sizes (`pg_total_relation_size`): tables, indexes and TOAST together.
+
+**Disk: about 254 GB**, all of it in `haf_stats_backend` (106 GB of heap and 148 GB of
+indexes). `haf_stats_app` holds only bookkeeping (112 kB).
+
+| Table | Size | Rows (approx.) |
+|---|---:|---:|
+| `active_users_daily` | 90 GB | 542 M |
+| `account_custom_json_daily` | 78 GB | 561 M |
+| `account_financial_daily` | 29 GB | 108 M |
+| `comment_registry` | 28 GB | 133 M |
+| the other 30 tables | 30 GB | |
+
+For comparison, the app schemas on the same node:
+
+| Schema | Size |
+|---|---:|
+| `hivemind_app` | 558 GB |
+| `haf_fyp_app` | 270 GB |
+| **`haf_stats_backend`** | **254 GB** |
+| `hafbe_bal` | 84 GB |
+| `hafbe_app` | 80 GB |
+| `hivesense_app` | 61 GB |
+| `reptracker_app` | 27 GB |
+
+The whole HAF database on that node is 5.46 TB logical (HAF's own `hafd` schema is
+4.1 TB of it). On that node's compressed ZFS dataset the database takes 2.63 TB on disk,
+a 2.19x ratio for the database as a whole; if haf_stats compresses like the rest, its
+on-disk share is roughly 115 GB. Plan for the logical figure if your storage does not
+compress.
+
+The tables grow with chain activity. The largest, `active_users_daily`, gained about
+40,000 rows a day over the 30 days before the measurement, at about 180 bytes a row
+(indexes included): roughly 7 MB a day. An earlier figure from another install (354 GB,
+2026-09-04, quoted in #63) is superseded by this one.
+
+**Initial sync: no clean from-zero measurement exists yet.** The one data point is a
+catch-up on the node above: haf_stats went from block 77.05 M to head (about 33.5 M
+blocks) in about 36 hours, about 1.1 M blocks an hour, on an 8-core machine shared with
+every other HAF app and partly slowed by another app's index build. Read it as an
+indication for the busy part of the chain only. Early blocks are much lighter, so a
+from-zero sync does not scale linearly from it. The one-time rollup backfills that
+`install_app.sh` step 8 runs on an already-synced node are also unmeasured at mainnet
+scale (see the comment there).
+
 ## Quick Start (Development)
 
 **Prerequisites:** Docker, a pre-synced HAF `block_log` snapshot in `docker/blockchain/`.
