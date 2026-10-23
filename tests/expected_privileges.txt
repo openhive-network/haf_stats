@@ -53,7 +53,7 @@ function haf_stats_app.refresh_governance_concentration() | owner=haf_stats_owne
 function haf_stats_app.refresh_hp_distribution_snapshot() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE
 function haf_stats_app.refresh_network_content_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_network_vote_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
-function haf_stats_app.refresh_rc_op_stats() | owner=haf_admin | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_owner:EXECUTE
+function haf_stats_app.refresh_rc_op_stats() | owner=haf_admin | secdef=false | acl=haf_stats_owner:EXECUTE
 function haf_stats_app.refresh_top_accounts_alltime() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE
 function haf_stats_app.resolve_community_batch() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE

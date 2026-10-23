@@ -91,6 +91,10 @@ return written
         $py$;
     $ddl$;
 
+    -- #102: CREATE gives PUBLIC EXECUTE by default. An untrusted-language function that
+    -- makes an outbound rc_api request has no business being callable by every role;
+    -- the pg_cron job runs it as haf_stats_owner. After the DROP above, so it holds.
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats() FROM PUBLIC';
     EXECUTE 'GRANT EXECUTE ON FUNCTION haf_stats_app.refresh_rc_op_stats() TO haf_stats_owner';
     RAISE NOTICE 'rc_op_stats auto-refresh sampler installed';
 END
