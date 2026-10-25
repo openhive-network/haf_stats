@@ -94,10 +94,9 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One scan of the custom_json op stream per batch, fanned out to one row per signer.
--- Reads hafd.operations directly (op_type 18 + operation_id_to_block_num(id) BETWEEN,
--- served by hive_operations_op_type_id_block_num) - the haf_stats context is non-forking
--- so every processed block is irreversible; same idiom as process_financial. op_count is
+-- One pass over the batch's staged custom_json ops (prepare_batch_ops, db/process_block_range.sql,
+-- which network_custom_json_rows and process_community_registry read too), fanned out to one
+-- row per signer. op_count is
 -- additive (DO UPDATE adds), so each block range must be processed exactly once - the same
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
@@ -119,6 +118,7 @@ SET join_collapse_limit = '16'
 AS $$
 BEGIN
 PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
 RETURN QUERY
 WITH ex AS (
     -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
@@ -129,17 +129,15 @@ ops AS MATERIALIZED (
     -- One custom_json op per row, with its id, the day it landed, its payload size, and its
     -- exact RC share where its transaction recorded one (#44).
     SELECT
-        ov.id AS op_id,
-        bv.created_at::DATE AS day,
+        ov.op_id,
+        ov.day,
         ov.body_value ->> 'id' AS json_id,
         ov.body_value AS body,
-        octet_length(ov.body_value::text) AS op_bytes,
+        ov.op_bytes,
         ex.rc_exact
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    LEFT JOIN ex ON ex.operation_id = ov.id
+    FROM haf_stats_batch_ops ov
+    LEFT JOIN ex ON ex.operation_id = ov.op_id
     WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
 ),
 -- Fan each op out to its signer(s): required_posting_auths UNION required_auths.
 -- UNION (not UNION ALL) dedups an account listed under both auths so it counts the op once.

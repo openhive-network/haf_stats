@@ -217,6 +217,9 @@ DECLARE
 BEGIN
     SELECT created_at INTO _block_time FROM hafd.blocks WHERE num = _last_block;
 
+    -- Every op type, not only account_created: Step 2's authored-op set needs them all.
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
+
     -- Step 1: Record newly created accounts in this block range.
     -- Driven by the virtual account_created_operation, which the chain emits
     -- exactly once per account at its creation, for EVERY creation mechanism —
@@ -229,13 +232,11 @@ BEGIN
         (account_id, cohort_month, created_at)
     SELECT
         a.id,
-        DATE_TRUNC('month', hb.created_at)::DATE,
-        hb.created_at
-    FROM hive.operations_view ov
-    JOIN hafd.blocks hb  ON hb.num  = ov.block_num
-    JOIN hafd.accounts a ON a.name  = (ov.body -> 'value' ->> 'new_account_name')
-    WHERE ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.op_type_id = (
+        DATE_TRUNC('month', ov.op_time)::DATE,
+        ov.op_time
+    FROM haf_stats_batch_ops ov
+    JOIN hafd.accounts a ON a.name  = (ov.body_value ->> 'new_account_name')
+    WHERE ov.op_type_id = (
           SELECT id FROM hafd.operation_types
           WHERE name = 'hive::protocol::account_created_operation'
       )
@@ -258,9 +259,10 @@ BEGIN
     -- 180-day window overlapped the batch and index-probed account_operations once
     -- each — O(accumulated members), ~4.3s/batch and worsening as the cohort grows.
     -- account_operations has no block/operation_id index (only (account_id, ...)),
-    -- so it cannot be range-scanned by block at all. The shared helper scans
-    -- operations_view once for both this processor and process_active_users using
-    -- the operation_id half-open range [op_id(first,0), op_id(last+1,0)).
+    -- so it cannot be range-scanned by block at all. The shared helper resolves the
+    -- batch's staged non-virtual ops (prepare_batch_ops, read by the operation_id
+    -- half-open range [op_id(first,0), op_id(last+1,0))) once for both this processor
+    -- and process_active_users.
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
     WITH batch_authored AS MATERIALIZED (
         -- Preserve the old retention grain: one row per account per op timestamp.

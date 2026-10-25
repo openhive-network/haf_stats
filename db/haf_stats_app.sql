@@ -153,7 +153,9 @@ $$;
 -- Trade-offs: WHEN OTHERS is deliberately broad (the lost signal is a few legacy
 -- ops; a dead processor is strictly worse). The exception block makes each call a
 -- subtransaction, but the wrapped call is read-only so no XID is assigned (no XID
--- burn) — only modest per-row overhead, verified not to regress massive sync.
+-- burn). Even so that is one subtransaction per op, so prepare_batch_authored_ops
+-- calls hive.get_required_authorities plainly and falls back to this wrapper only for a
+-- batch whose plain statement failed.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.get_required_authorities_safe;
@@ -397,7 +399,7 @@ $$;
 --
 -- The search_path pin is belt-and-braces rather than a fix. Everything reached from here
 -- resolves schema-qualified, and the unqualified tables in the block path --
--- haf_stats_batch_authored_ops (process_block_range.sql),
+-- haf_stats_batch_ops and haf_stats_batch_authored_ops (process_block_range.sql),
 -- haf_stats_community_batch_stage (process_content_stats.sql) and
 -- haf_stats_batch_exact_rc (exact_rc.sql) -- are all TEMP, and
 -- pg_temp is searched first for relations whether or not it is listed. But the legacy

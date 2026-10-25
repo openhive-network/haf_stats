@@ -402,13 +402,17 @@ psql_cmd -c "
         'SELECT haf_stats_app.refresh_network_content_periods(''2016-03-24'')');
     -- network_custom_json_daily is raw-op-derived (no cheap daily source to roll up from), so its
     -- one-time backfill IS the processor over every already-processed block. Empty-only: on a
-    -- fresh genesis replay app_status.last_processed_block is still 0, so process_network_custom_json(1, 0)
-    -- is a no-op and the forward hook fills it; on an already-synced re-install it backfills [1, tip]
-    -- once (the processor then resumes forward from tip+1, so no double-count).
+    -- fresh genesis replay app_status.last_processed_block is still 0, so the series is empty
+    -- and the forward hook fills it; on an already-synced re-install it backfills [1, tip]
+    -- once (the processor then resumes forward from tip+1, so no double-count). In steps of
+    -- 100,000 blocks, as rebuild_network_custom_json.sh runs it: the processor stages each
+    -- range's operations in a temp table (prepare_batch_ops), so one call over the whole chain
+    -- would copy every custom_json ever broadcast, and a range of up to 100,000 blocks also gets
+    -- its exact RC.
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.network_custom_json_daily',
         'hafd.operations',
-        'SELECT haf_stats_app.process_network_custom_json(1, (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
+        'SELECT haf_stats_app.process_network_custom_json(r.lo, LEAST(r.lo + 99999, s.tip)) FROM (SELECT COALESCE(MAX(last_processed_block), 0) AS tip FROM haf_stats_app.app_status) AS s CROSS JOIN LATERAL generate_series(1, s.tip, 100000) AS r (lo) ORDER BY r.lo');
     -- witness_blocks_daily is derived the same way (hafd.blocks + producer_missed ops), so its
     -- one-time backfill is likewise the processor over every already-processed block.
     --
@@ -481,12 +485,14 @@ psql_cmd -c "
 #     chunk. Safe to re-run: process_community_registry is idempotent (registration is
 #     ON CONFLICT DO NOTHING; roles/titles are last-writer-wins over an ordered replay), and
 #     it returns immediately for ranges below the community start block, so a node still
-#     replaying 2016 skips it entirely.
+#     replaying 2016 skips it entirely. 100,000 blocks a chunk, as
+#     rebuild_community_registry.sh runs it: each call stages its range's account_created and
+#     custom_json ops in a temp table (prepare_batch_ops) before it reads them.
 #
 #     The per-comment community mapping is NOT self-healed here: it rides on comment_registry,
 #     whose create-vs-edit replay only works from genesis. Repairing it is
 #     scripts/rebuild_content_volume.sh (see README).
-: "${COMMUNITY_BACKFILL_BATCH:=1000000}"
+: "${COMMUNITY_BACKFILL_BATCH:=100000}"
 community_rows="$(psql_cmd -Atc "SELECT COUNT(*) FROM haf_stats_backend.community_registry")"
 community_start="$(psql_cmd -Atc "SELECT haf_stats_app.community_start_block()")"
 app_head="$(psql_cmd -Atc "SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status")"

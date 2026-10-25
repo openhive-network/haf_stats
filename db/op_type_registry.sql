@@ -112,24 +112,24 @@ AS $fn$
     FROM (
         VALUES
         -- Resolved by NAME into locals. expected_id is NULL: the id is never assumed.
-        ('hive::protocol::author_reward_operation',              NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::comment_benefactor_reward_operation',  NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::curation_reward_operation',            NULL::INT, 'db/process_financial.sql'),
+        ('hive::protocol::author_reward_operation',              NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::comment_benefactor_reward_operation',  NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::curation_reward_operation',            NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
         ('hive::protocol::claim_reward_balance_operation',       NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::interest_operation',                   NULL::INT, 'db/process_financial.sql'),
+        ('hive::protocol::interest_operation',                   NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
         ('hive::protocol::transfer_to_savings_operation',        NULL::INT, 'db/process_financial.sql'),
         ('hive::protocol::transfer_from_savings_operation',      NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::fill_transfer_from_savings_operation', NULL::INT, 'db/process_financial.sql'),
+        ('hive::protocol::fill_transfer_from_savings_operation', NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
         ('hive::protocol::transfer_to_vesting_operation',        NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::fill_vesting_withdraw_operation',      NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::producer_reward_operation',            NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::liquidity_reward_operation',           NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::proposal_pay_operation',               NULL::INT, 'db/process_financial.sql'),
-        ('hive::protocol::fill_order_operation',                 NULL::INT, 'db/process_financial.sql'),
+        ('hive::protocol::fill_vesting_withdraw_operation',      NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::producer_reward_operation',            NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::liquidity_reward_operation',           NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::proposal_pay_operation',               NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::fill_order_operation',                 NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
         ('hive::protocol::producer_missed_operation',            NULL::INT,
-            'db/process_witness_blocks.sql (GET /witnesses/missed-blocks reports zero misses)'),
+            'db/process_witness_blocks.sql, db/process_block_range.sql (GET /witnesses/missed-blocks reports zero misses)'),
         ('hive::protocol::account_created_operation',            NULL::INT,
-            'db/process_account_cohorts.sql, db/process_community_registry.sql'),
+            'db/process_account_cohorts.sql, db/process_community_registry.sql, db/process_block_range.sql'),
 
         -- Hardcoded NUMERIC ids: the name must exist AND still carry this id.
         -- 0/1/2/17/18 are non-virtual and consensus-ordered, so they are stable by construction;
@@ -146,7 +146,7 @@ AS $fn$
         ('hive::protocol::custom_json_operation',                18,
             'db/process_custom_json.sql, db/process_network_custom_json.sql, db/process_block_range.sql, db/process_community_registry.sql, db/seed_data.sql, endpoints/endpoint_schema.sql (id 18)'),
         ('hive::protocol::ineffective_delete_comment_operation', 73,
-            'db/process_content_stats.sql (id 73, VIRTUAL - the unstable one)')
+            'db/process_content_stats.sql, db/process_block_range.sql (id 73, VIRTUAL - the unstable one)')
     ) AS t (op_name, expected_id, used_by);
 $fn$;
 
