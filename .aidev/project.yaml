@@ -45,12 +45,20 @@ issues:
 # postgres:14-alpine both docker/docker-compose-ci.yml (endpoint-tests) and
 # docker/docker-compose-ci-install.yml (install-test) start, named `postgres` as
 # there. Those lanes write a mock hafd schema and create the app's roles, which the
-# shared 5M-block HAF's consumer cannot do, so this project does not use
-# sandbox.external. The runtime container joins the stack's network; the rest of
-# each lane runs inside it (.aidev/compose_lane.py), so no haf_stats image is built.
-# Slots that only lint say `stack: false`. See .aidev/README.md.
+# shared 5M-block HAF's consumer cannot do, so they run against this stack. The
+# runtime container joins the stack's network; the rest of each lane runs inside it
+# (.aidev/compose_lane.py), so no haf_stats image is built. Slots that only lint say
+# `stack: false`.
+#
+# CI's synced lane runs over the shared 5M-block HAF (sandbox.external, provider
+# haf/haf): .aidev/run-checks.sh clones it per run as haf_shared_consumer
+# (haf_shared.clone_run_database) and drops the clone on exit. The consumer role is
+# trusted from the fleet LAN: no secret. See .aidev/README.md.
 sandbox:
   compose: .aidev/test-stack.compose.yml
+  external:
+    - name: haf
+      provider: "haf/haf"
   # One idle PostgreSQL; nothing replayed.
   resource_class: light
   services: [postgres]
@@ -64,11 +72,17 @@ sandbox:
 # Every step is one of .gitlab-ci.yml's jobs. quick: the lint stage (shell-lint,
 # ci-shell-lint, shell-tests, sql-lint, hadolint, compose-validate, openapi-drift)
 # plus the image pins. full and canary add CI's two stub lanes, endpoint-tests and
-# install-test. CI's synced lane (.aidev/run-checks.sh's sync, pattern, regression and
-# reinstall, over a clone of the shared 5M-block HAF) is not bound yet: in that clone
-# haf_stats_user has no read on hafd or hive, which only the shared HAF can grant, so
-# the install fails there. The networked haf-drift jobs are not bound either; see
-# .aidev/README.md.
+# install-test, and its synced lane (sync, pattern-test, regression-test and
+# reinstall-test over a clone of the shared 5M-block HAF). The networked haf-drift
+# jobs are not bound; see .aidev/README.md.
+#
+# `full` and `canary` declare their walls: without one the 900s default applies, and
+# the synced lane alone is over 1000s. Recorded by hand on 2026-10-25 against the
+# shared HAF: full's steps 963s (sync 662s, regression 267s, the other twelve 34s),
+# and the synced lane on its own 1023s (sync 745s, regression 272s). full's 1800s is
+# about 1.9x that run, room for the host-load swing of the sync, inside its 2100s
+# activity ceiling; canary's 1500s is its cap (the deploy timeout less its 300s
+# reserve), about 1.5x.
 verification:
   quick:
     adapter: command
@@ -77,16 +91,18 @@ verification:
     artifacts: ["test-results/quick/"]
   full:
     adapter: command
-    args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install"]
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/full/"]
+    timeout: 1800
   baseline:
     adapter: command
     args: [".aidev/run-checks.sh", "baseline", "unit", "endpoint", "install"]
     artifacts: ["test-results/baseline/"]
   canary:
     adapter: command
-    args: [".aidev/run-checks.sh", "canary", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install"]
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/canary/"]
+    timeout: 1500
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # that read the candidate's code (AIDEV runs it in the post-implementation scan
   # only). `static` and `system` are left unbound: AIDEV runs neither for a project.

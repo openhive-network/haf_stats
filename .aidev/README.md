@@ -58,7 +58,7 @@ gives CI.
 |---|---|---|
 | quick | shellcheck, ci-shell-lint, unit, sql-lint, hadolint, compose-validate, openapi-drift, stack-pins | no |
 | coverage | shellcheck, unit, sql-lint | no |
-| full, canary | quick's plus endpoint, install | yes |
+| full, canary | quick's plus endpoint, install, sync, pattern, regression, reinstall | yes, and the shared HAF |
 | baseline | unit, endpoint, install | yes |
 
 `static` and `system` are unbound: AIDEV runs neither for a project.
@@ -88,30 +88,18 @@ Where it differs from CI:
 - `regression` runs as the consumer, which reads `hafd.contexts` through
   `hive_applications_owner_group`.
 
-**Not bound yet.** In the clone `haf_stats_user` cannot read `hafd` or `hive`: it is
-in no HAF group, the shared HAF grants it nothing there, and the consumer holds no
-grant option on either schema, so `db/builtin_roles.sql` warns instead of granting.
-The install then stops at its `GET /sync-status` assertion (`hive.is_instance_ready()`
-as `haf_stats_user`), and every endpoint that reads `hafd` would answer 42501. The
-shared HAF has to grant `haf_stats_user` `USAGE` on `hafd` and `hive`, `SELECT` on
-their tables and `EXECUTE` on `hive`'s functions in its template, as
-`db/builtin_roles.sql` does as `haf_admin`. Until it does, `full` and `canary` do not
-run the lane (every haf_stats change would fail them), and the profile does not
-declare `sandbox.external`. Binding it then is two edits to `project.yaml`: the
-external service
-
-```yaml
-sandbox:
-  external:
-    - name: haf
-      provider: "haf/haf"
-```
-
-beside `compose`, and `sync pattern regression reinstall` appended to `full`'s and
-`canary`'s args with a `timeout:` sized from a recorded run (CI's sync takes about
-7 minutes and regression-test about 4.5). Run by hand meanwhile, with the provider's
-endpoint (`api_v1.shared_service_endpoints` on central) in
-`AIDEV_EXTERNAL_HAF_HOST`/`_PORT`:
+**Bound in `full` and `canary`.** In the clone `haf_stats_user` is in no HAF group,
+and the consumer holds no grant option on `hafd` or `hive`, so `db/builtin_roles.sql`
+cannot grant it its reads there. The shared HAF's clone template grants them instead
+(haf#392): `USAGE` on `hafd` and `hive`, `SELECT` on their tables and `EXECUTE` on
+`hive`'s functions, as `db/builtin_roles.sql` does as `haf_admin`. Without them the
+install stops at its `GET /sync-status` assertion (`hive.is_instance_ready()` as
+`haf_stats_user`) and every endpoint that reads `hafd` answers 42501; a
+`db/builtin_roles.sql` "cannot read schema" warning in `sync.log` is that
+case. The profile's `sandbox.external` names the provider, which publishes its
+endpoint in `AIDEV_EXTERNAL_HAF_HOST`/`_PORT`, and `full`'s and `canary`'s `timeout:`
+is sized from the recorded runs in `project.yaml`'s comment. To run the lane by hand,
+with the provider's endpoint (`api_v1.shared_service_endpoints` on central):
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w \
