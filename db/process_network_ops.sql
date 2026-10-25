@@ -51,9 +51,8 @@ GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One scan of the op stream per batch, aggregated to (day, op_type). Reads hafd.operations
--- directly over an operation-id block range (same idiom as process_custom_json); the
--- haf_stats context is non-forking so every processed block is irreversible. op_count/op_bytes
+-- One pass over the batch's staged non-virtual ops (prepare_batch_ops,
+-- db/process_block_range.sql), aggregated to (day, op_type). op_count/op_bytes
 -- are additive (DO UPDATE adds), so each block range must be processed exactly once - the same
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
@@ -73,6 +72,7 @@ SET jit = OFF
 AS $$
 BEGIN
 PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
 RETURN QUERY
 WITH ex AS (
     -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
@@ -80,18 +80,16 @@ WITH ex AS (
     FROM haf_stats_batch_exact_rc AS c
 )
 SELECT
-    bv.created_at::DATE AS day,
-    ov.op_type_id::SMALLINT,
+    ov.day,
+    ov.op_type_id,
     COUNT(*)::BIGINT,
-    SUM(octet_length(ov.body_value::text))::BIGINT,
+    SUM(ov.op_bytes)::BIGINT,
     -- Exact only when every op of the group has its share (#44); otherwise NULL.
     CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
-FROM hafd.operations ov
-JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+FROM haf_stats_batch_ops ov
 JOIN hafd.operation_types ot ON ot.id = ov.op_type_id AND ot.is_virtual = FALSE
-LEFT JOIN ex ON ex.operation_id = ov.id
-WHERE hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-GROUP BY bv.created_at::DATE, ov.op_type_id;
+LEFT JOIN ex ON ex.operation_id = ov.op_id
+GROUP BY ov.day, ov.op_type_id;
 END;
 $$;
 

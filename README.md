@@ -197,6 +197,24 @@ from-zero sync does not scale linearly from it. The one-time rollup backfills th
 `install_app.sh` step 8 runs on an already-synced node are also unmeasured at mainnet
 scale (see the comment there).
 
+**The period, monthly and retention rollups are empty during massive sync.** Outside it they
+are refreshed whenever a batch crosses a 1200-block boundary; in massive sync each processor
+records the earliest day it would have refreshed from instead
+(`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
+refresh once from that day, before processing its blocks. `install_app.sh` does the same over a
+context already past massive sync. A sync stopped while still in massive sync (e.g.
+`--stop-at-block`) leaves them empty, so the period, monthly and retention endpoints answer
+nothing meaningful, until the first live batch or the call that batch makes:
+
+```sql
+SET ROLE haf_stats_owner;
+SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);
+```
+
+On the 1→5M range that one call took about 4 s. CI's `sync` job, `.aidev/run-checks.sh`'s
+sync step and `docker/docker-compose-test.yml` all stop at a block in massive sync and make
+this call before anything reads the rollups.
+
 ## Quick Start (Development)
 
 **Prerequisites:** Docker, a pre-synced HAF `block_log` snapshot in `docker/blockchain/`.
@@ -1342,10 +1360,9 @@ Measured read-only on a 1.28.8 node, the split of 10,000 blocks takes ~1.7 s for
 (218,937 operations) and ~3.4 s for blocks from 2021 (392,913 operations), and in both its shares add
 up exactly to the transactions' recorded RC. That is what a catch-up batch gains (its batches take
 20-112 s on busy history); live processing is a block at a time. A range of more than 100,000
-blocks is not split at all: the installer's one-time self-heal of an empty `network_custom_json_daily`
-runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill. Until
-then that table is estimate up to the self-heal while the other two may be exact, so `custom-json-usage` and the
-custom_json part of `rc-utilization` can differ. `rebuild_custom_json.sh` and
+blocks is not split at all. The installer's one-time self-heal of an empty `network_custom_json_daily`
+runs over the whole chain in steps of 100,000 blocks, so its rows get `rc_exact` as the processor's
+do. `rebuild_custom_json.sh` and
 `rebuild_network_custom_json.sh` refuse a `BATCH_SIZE` above 100,000 for the same reason: they
 truncate first and would replace exact rows with NULL ones.
 

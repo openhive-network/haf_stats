@@ -339,6 +339,8 @@ DECLARE
     _first_day DATE;
     _last_day DATE;
     _refresh_lo_block INT;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
 
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
@@ -413,9 +415,17 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    PERFORM haf_stats_app.refresh_active_users_periods(_first_day, _last_day);
-    -- Same touched-day range feeds the per-account monthly leaderboard rollup (#37).
-    PERFORM haf_stats_app.refresh_active_users_account_monthly(_first_day, _last_day);
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql).
+    IF NOT haf_stats_app.defer_rollup_refresh('process_active_users', _first_day) THEN
+        -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
+        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_active_users_periods(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_active_users_periods', _first_block, _last_block, _t, '{}', 'process_active_users'); END IF;
+        -- Same touched-day range feeds the per-account monthly leaderboard rollup (#37).
+        PERFORM haf_stats_app.refresh_active_users_account_monthly(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_active_users_account_monthly', _first_block, _last_block, _t, '{}', 'process_active_users'); END IF;
+    END IF;
 END IF;
 
 END;

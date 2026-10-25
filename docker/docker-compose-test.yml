@@ -90,6 +90,32 @@ services:
       haf-stats-setup:
         condition: service_completed_successfully
 
+  # The replay stops at REPLAY_STOP_AT_BLOCK, so the context never leaves massive sync
+  # and no live batch runs the deferred period, monthly and retention rollup refreshes.
+  # Once processing reaches the stop block, run the call that batch makes, as
+  # .gitlab-ci.yml's sync job and .aidev/run-checks.sh do; tavern waits for it.
+  haf-stats-deferred-refresh:
+    image: ${HAF_STATS_REGISTRY}/haf_stats:${HAF_STATS_VERSION}
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        until [ "$$(psql -XAtc 'SELECT COALESCE(MAX(last_processed_block), 0) >= $${REPLAY_STOP_AT_BLOCK} FROM haf_stats_app.app_status')" = t ]; do
+          echo "waiting for block processing to reach $${REPLAY_STOP_AT_BLOCK}"
+          sleep 10
+        done
+        psql -X -v ON_ERROR_STOP=on -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);"
+    environment:
+      PGHOST:     /var/run/postgresql
+      PGUSER:     haf_stats_owner
+      PGDATABASE: haf_block_log
+      REPLAY_STOP_AT_BLOCK: "${REPLAY_STOP_AT_BLOCK:-5000000}"
+    volumes:
+      - pg_socket:/var/run/postgresql
+    depends_on:
+      haf-stats-process:
+        condition: service_started
+
   haf-stats-api:
     image: postgrest/postgrest:${POSTGREST_VERSION}
     ports:
@@ -167,7 +193,10 @@ services:
       PYTHONPATH: "/tests/tavern"
       TAVERN_DIR: "/tests/tavern"
     depends_on:
-      - haf-stats-api
+      haf-stats-api:
+        condition: service_started
+      haf-stats-deferred-refresh:
+        condition: service_completed_successfully
 
 volumes:
   pg_socket:

@@ -70,19 +70,18 @@ GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One scan of the custom_json op stream per batch, aggregated to (day, json_id). Reads
--- hafd.operations directly over an operation-id block range (op_type 18 +
--- operation_id_to_block_num(id) BETWEEN, served by hive_operations_op_type_id_block_num) - the
--- same idiom as process_custom_json / process_network_ops; the haf_stats context is non-forking
--- so every processed block is irreversible. op_count/op_bytes are additive (DO UPDATE adds), so
+-- One pass over the batch's staged custom_json ops (prepare_batch_ops, db/process_block_range.sql),
+-- aggregated to (day, json_id): the same staged rows process_custom_json and
+-- process_community_registry read. op_count/op_bytes are additive (DO UPDATE adds), so
 -- each block range must be processed exactly once - the same exactly-once assumption the other
 -- additive counters rely on.
 --
 -- Standalone (not folded into process_custom_json) because that processor fans each op out to
 -- one row PER SIGNER (required_posting_auths UNION required_auths), so its per-account table
 -- cannot be summed into correct one-row-per-op network counts. Keeping this separate gives a
--- clean, independently-rebuildable counter symmetric with network_op_daily, and the targeted
--- op-18 scan is marginal against the per-account fan-out process_custom_json already pays.
+-- clean, independently-rebuildable counter symmetric with network_op_daily, and the second
+-- pass over the staged op-18 rows is marginal against the per-account fan-out process_custom_json
+-- already pays.
 --
 -- Invariant (over the range both tables cover): SUM(op_count) / SUM(op_bytes) here per day
 -- equals network_op_daily's op_type_id = 18 row, since both count the same op-18 ops once each.
@@ -106,6 +105,7 @@ SET jit = OFF
 AS $$
 BEGIN
 PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
 RETURN QUERY
 WITH ex AS (
     -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
@@ -113,19 +113,17 @@ WITH ex AS (
     FROM haf_stats_batch_exact_rc AS c
 )
 SELECT
-    bv.created_at::DATE AS day,
+    ov.day,
     ov.body_value ->> 'id' AS json_id,
     COUNT(*)::BIGINT,
-    SUM(octet_length(ov.body_value::text))::BIGINT,
+    SUM(ov.op_bytes)::BIGINT,
     -- Exact only when every op of the group has its share (#44); otherwise NULL.
     CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
-FROM hafd.operations ov
-JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-LEFT JOIN ex ON ex.operation_id = ov.id
+FROM haf_stats_batch_ops ov
+LEFT JOIN ex ON ex.operation_id = ov.op_id
 WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-  AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
   AND ov.body_value ->> 'id' IS NOT NULL
-GROUP BY bv.created_at::DATE, ov.body_value ->> 'id';
+GROUP BY ov.day, ov.body_value ->> 'id';
 END;
 $$;
 

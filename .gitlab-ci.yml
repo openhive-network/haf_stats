@@ -1221,6 +1221,23 @@ sync:
     echo
     echo -e "\e[0Ksection_end:$(date +%s):rewriter\r\e[0K"
   - |
+    echo -e "\e[0Ksection_start:$(date +%s):deferred[collapsed=true]\r\e[0KRunning the rollup refreshes massive sync deferred..."
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    # HAF stops at REPLAY_STOP_AT_BLOCK, so the context is still in MASSIVE_PROCESSING
+    # here and never reaches the live batch that runs the deferred period, monthly and
+    # retention rollup refreshes; the cache the test jobs read would hold them empty.
+    # Run that batch's call ourselves, in .aidev/run-checks.sh's sync_blocks sequence
+    # (keep the two in step): with the processor gone between two batches,
+    # ci_deferred_refresh_recorded.sql; then the call; then ci_deferred_refresh_complete.sql.
+    docker compose "${COMPOSE_OPTIONS[@]}" stop haf-stats-process
+    cd "${CI_PROJECT_DIR}" || exit 1
+    psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_recorded.sql
+    psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on \
+      -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);"
+    psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_complete.sql
+    echo -e "\e[0Ksection_end:$(date +%s):deferred\r\e[0K"
+  - |
     echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
     cd "${CI_PROJECT_DIR}/docker" || exit 1
     IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"

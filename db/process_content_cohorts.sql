@@ -179,6 +179,9 @@ AS $$
 DECLARE
     _first_block_time TIMESTAMP;
     _block_time TIMESTAMP;
+    _from_month DATE;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
     SELECT created_at INTO _first_block_time FROM hafd.blocks WHERE num = _first_block;
     SELECT created_at INTO _block_time FROM hafd.blocks WHERE num = _last_block;
@@ -186,21 +189,18 @@ BEGIN
     -- Step 1: Register each account's first-ever root post (parent_author = '').
     --
     -- DISTINCT ON keeps the lowest op id per author within the batch; ON CONFLICT
-    -- DO NOTHING keeps the earliest across all forward-processed batches. Scan
-    -- operations_view by both block_num and the half-open operation-id range so
-    -- the planner can use the same HAF id-range pattern as the other processors.
+    -- DO NOTHING keeps the earliest across all forward-processed batches. Reads the
+    -- batch's staged comment ops (prepare_batch_ops, db/process_block_range.sql), the
+    -- same rows process_content_stats classifies.
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[1]);
     WITH first_posts AS MATERIALIZED (
         SELECT DISTINCT ON (ov.body_value ->> 'author')
             ov.body_value ->> 'author' AS author,
-            b.created_at               AS first_post_at
-        FROM hive.operations_view ov
-        JOIN hafd.blocks b ON b.num = ov.block_num
+            ov.op_time                 AS first_post_at
+        FROM haf_stats_batch_ops ov
         WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
           AND ov.body_value ->> 'parent_author' = ''
-          AND ov.block_num BETWEEN _first_block AND _last_block
-          AND ov.id >= hafd.operation_id(_first_block, 0)
-          AND ov.id <  hafd.operation_id(_last_block + 1, 0)
-        ORDER BY ov.body_value ->> 'author', ov.id
+        ORDER BY ov.body_value ->> 'author', ov.op_id
     )
     INSERT INTO haf_stats_backend.author_cohort_members
         (account_id, cohort_month, first_post_at)
@@ -268,15 +268,21 @@ BEGIN
     -- toward window N only once its own N-day window has elapsed (eligible_at_Nd),
     -- so recent cohorts populate on a partial basis as members mature.
     -- Refresh only near hourly block boundaries; retention is a coarse metric and
-    -- the affected cohorts are exactly re-aggregated when the refresh fires.
+    -- the affected cohorts are exactly re-aggregated when the refresh fires. During
+    -- massive sync it is recorded instead, from its earliest cohort month (see
+    -- defer_rollup_refresh, db/haf_stats_app.sql).
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-        PERFORM haf_stats_app.refresh_author_cohort_retention(
-            _block_time,
-            (
-                DATE_TRUNC('month', _block_time - INTERVAL '180 days')
-                - INTERVAL '1 month'
-            )::DATE
-        );
+        _from_month := (
+            DATE_TRUNC('month', _block_time - INTERVAL '180 days')
+            - INTERVAL '1 month'
+        )::DATE;
+        IF NOT haf_stats_app.defer_rollup_refresh('process_content_cohorts', _from_month) THEN
+            -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
+            _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+            IF _timed THEN _t := clock_timestamp(); END IF;
+            PERFORM haf_stats_app.refresh_author_cohort_retention(_block_time, _from_month);
+            IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_author_cohort_retention', _first_block, _last_block, _t, '{}', 'process_content_cohorts'); END IF;
+        END IF;
     END IF;
 END;
 $$;

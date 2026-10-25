@@ -221,10 +221,11 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- Single pass: one INSERT … SELECT over a UNION ALL of per-operation "legs".
--- Each leg emits one row per source operation in the normalized shape
--- (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, 1),
--- with 0 in the amount columns it doesn't touch. The outer GROUP BY does all
+-- Single pass: one INSERT … SELECT over the batch's staged financial ops
+-- (prepare_batch_ops, db/process_block_range.sql), joined to a VALUES list of impact rules
+-- that fans each op out into one row per affected account and direction, in the normalized
+-- shape (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, 1), with 0 in
+-- the amount columns it doesn't touch. The outer GROUP BY does all
 -- aggregation, collapsing every same-key row before the INSERT — so a single
 -- uniform ON CONFLICT can sum the three amount columns, and the
 -- "ON CONFLICT DO UPDATE cannot affect row a second time" error (which fires
@@ -250,15 +251,9 @@ $$;
 -- field can be either). transfer and fill_order are multi-leg (sender/receiver,
 -- maker/taker).
 --
--- SCAN SOURCE: each leg reads hafd.operations directly (not hive.operations_view),
--- filtered by op_type_id + hafd.operation_id_to_block_num(id) BETWEEN the batch
--- bounds, which the hive_operations_op_type_id_block_num index serves as a tight
--- range scan. operations_view is a UNION ALL of operations + reversible_operations
--- and adds large per-query overhead over wide ranges; its reversible half is moot
--- here because the haf_stats context is non-forking (is_forking = false), so every
--- block this function processes is already irreversible and present in
--- hafd.operations. Same idiom as the haf_block_explorer / balance_tracker processors;
--- a full-history financial rebuild drops from ~tens of hours to ~1-2h.
+-- SCAN SOURCE: the staged rows, which prepare_batch_ops reads from hafd.operations by
+-- operation-id range once per batch for every processor. A direct call (rebuild_financial.sh)
+-- stages only the fifteen types below.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.process_financial;
@@ -288,7 +283,16 @@ DECLARE
     _first_day DATE;
     _last_day DATE;
     _refresh_lo_block INT;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
+
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[
+    _author_reward_id, _comment_benefactor_reward_id, _curation_reward_id, _claim_reward_balance_id,
+    _interest_id, _transfer_id, _transfer_to_savings_id, _transfer_from_savings_id,
+    _fill_transfer_from_savings_id, _transfer_to_vesting_id, _fill_vesting_withdraw_id,
+    _producer_reward_id, _liquidity_reward_id, _proposal_pay_id, _fill_order_id
+]);
 
 INSERT INTO haf_stats_backend.account_financial_daily
     (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
@@ -302,370 +306,70 @@ SELECT
     SUM(vests_nai)::BIGINT,
     SUM(op_count)::INT
 FROM (
-
-    -- 1. Author rewards: incoming for the post author.
     SELECT
         a.id AS account_id,
-        bv.created_at::DATE AS day,
-        'author_reward_operation' AS category,
-        'incoming' AS direction,
-        COALESCE((ov.body_value -> 'hive_payout'    ->> 'amount')::BIGINT, 0) AS hive_nai,
-        COALESCE((ov.body_value -> 'hbd_payout'     ->> 'amount')::BIGINT, 0) AS hbd_nai,
-        COALESCE((ov.body_value -> 'vesting_payout' ->> 'amount')::BIGINT, 0) AS vests_nai,
+        o.day,
+        r.category,
+        r.direction,
+        COALESCE((o.body_value -> r.hive_field  ->> 'amount')::BIGINT, 0)
+        + CASE WHEN (o.body_value -> r.split_field ->> 'nai') = '@@000000021'
+               THEN COALESCE((o.body_value -> r.split_field ->> 'amount')::BIGINT, 0) ELSE 0 END AS hive_nai,
+        COALESCE((o.body_value -> r.hbd_field   ->> 'amount')::BIGINT, 0)
+        + CASE WHEN (o.body_value -> r.split_field ->> 'nai') = '@@000000013'
+               THEN COALESCE((o.body_value -> r.split_field ->> 'amount')::BIGINT, 0) ELSE 0 END AS hbd_nai,
+        COALESCE((o.body_value -> r.vests_field ->> 'amount')::BIGINT, 0)
+        + CASE WHEN (o.body_value -> r.split_field ->> 'nai') = '@@000000037'
+               THEN COALESCE((o.body_value -> r.split_field ->> 'amount')::BIGINT, 0) ELSE 0 END AS vests_nai,
         1 AS op_count
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'author')
-    WHERE ov.op_type_id = _author_reward_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 2. Comment benefactor rewards: incoming for the benefactor.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'comment_benefactor_reward_operation',
-        'incoming',
-        COALESCE((ov.body_value -> 'hive_payout'    ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body_value -> 'hbd_payout'     ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body_value -> 'vesting_payout' ->> 'amount')::BIGINT, 0),
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'benefactor')
-    WHERE ov.op_type_id = _comment_benefactor_reward_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 3. Curation rewards: incoming for the curator (VESTS only).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'curation_reward_operation',
-        'incoming',
-        0::BIGINT,
-        0::BIGINT,
-        COALESCE((ov.body_value -> 'reward' ->> 'amount')::BIGINT, 0),
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'curator')
-    WHERE ov.op_type_id = _curation_reward_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 4. Claim reward balance: incoming for the claiming account.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'claim_reward_balance_operation',
-        'incoming',
-        COALESCE((ov.body_value -> 'reward_hive'  ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body_value -> 'reward_hbd'   ->> 'amount')::BIGINT, 0),
-        COALESCE((ov.body_value -> 'reward_vests' ->> 'amount')::BIGINT, 0),
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'account')
-    WHERE ov.op_type_id = _claim_reward_balance_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 5. HBD savings interest: incoming for the account owner (HBD only).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'interest_operation',
-        'incoming',
-        0::BIGINT,
-        COALESCE((ov.body_value -> 'interest' ->> 'amount')::BIGINT, 0),
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'owner')
-    WHERE ov.op_type_id = _interest_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 6. Transfers: outgoing for the sender.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'transfer_operation',
-        'outgoing',
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
-    WHERE ov.op_type_id = _transfer_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 7. Transfers: incoming for the receiver.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'transfer_operation',
-        'incoming',
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to')
-    WHERE ov.op_type_id = _transfer_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 8. Transfer to savings: outgoing for the sender.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'transfer_to_savings_operation',
-        'outgoing',
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
-    WHERE ov.op_type_id = _transfer_to_savings_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 9. Transfer from savings (the request): outgoing for the sender.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'transfer_from_savings_operation',
-        'outgoing',
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
-    WHERE ov.op_type_id = _transfer_from_savings_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 10. Fill transfer from savings: incoming for the receiver.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_transfer_from_savings_operation',
-        'incoming',
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'amount' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to')
-    WHERE ov.op_type_id = _fill_transfer_from_savings_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 11. Power up (transfer_to_vesting): outgoing for the initiator (HIVE spent).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'transfer_to_vesting_operation',
-        'outgoing',
-        COALESCE((ov.body_value -> 'amount' ->> 'amount')::BIGINT, 0),
-        0::BIGINT,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'from')
-    WHERE ov.op_type_id = _transfer_to_vesting_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 12. Power down (fill_vesting_withdraw): incoming for the deposit recipient.
-    -- `deposited` is credited to to_account (usually == from_account, but a
-    -- withdrawal route can send it elsewhere) and may be HIVE (normal power-down)
-    -- or VESTS (route that re-vests). `withdrawn` is the from_account's own VESTS
-    -- leaving its vesting balance, not a value inflow, so it is not recorded here.
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_vesting_withdraw_operation',
-        'incoming',
-        CASE WHEN (ov.body_value -> 'deposited' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        CASE WHEN (ov.body_value -> 'deposited' ->> 'nai') = '@@000000037'
-             THEN COALESCE((ov.body_value -> 'deposited' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'to_account')
-    WHERE ov.op_type_id = _fill_vesting_withdraw_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 13. Witness pay (producer_reward): incoming for the block producer (VESTS only).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'producer_reward_operation',
-        'incoming',
-        0::BIGINT,
-        0::BIGINT,
-        COALESCE((ov.body_value -> 'vesting_shares' ->> 'amount')::BIGINT, 0),
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'producer')
-    WHERE ov.op_type_id = _producer_reward_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 14. Liquidity reward: incoming for the owner (HIVE only).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'liquidity_reward_operation',
-        'incoming',
-        COALESCE((ov.body_value -> 'payout' ->> 'amount')::BIGINT, 0),
-        0::BIGINT,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'owner')
-    WHERE ov.op_type_id = _liquidity_reward_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 15. Proposal pay (DHF): incoming for the proposal receiver (HBD only).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'proposal_pay_operation',
-        'incoming',
-        0::BIGINT,
-        COALESCE((ov.body_value -> 'payment' ->> 'amount')::BIGINT, 0),
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'receiver')
-    WHERE ov.op_type_id = _proposal_pay_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 16. Fill order: outgoing for current_owner (what they paid).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_order_operation',
-        'outgoing',
-        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'current_owner')
-    WHERE ov.op_type_id = _fill_order_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 17. Fill order: incoming for current_owner (what they received).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_order_operation',
-        'incoming',
-        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'current_owner')
-    WHERE ov.op_type_id = _fill_order_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 18. Fill order: outgoing for open_owner (what they paid).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_order_operation',
-        'outgoing',
-        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'open_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'open_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'open_owner')
-    WHERE ov.op_type_id = _fill_order_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-
-    UNION ALL
-
-    -- 19. Fill order: incoming for open_owner (what they received).
-    SELECT
-        a.id,
-        bv.created_at::DATE,
-        'fill_order_operation',
-        'incoming',
-        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000021'
-             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        CASE WHEN (ov.body_value -> 'current_pays' ->> 'nai') = '@@000000013'
-             THEN COALESCE((ov.body_value -> 'current_pays' ->> 'amount')::BIGINT, 0) ELSE 0 END,
-        0::BIGINT,
-        1
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
-    JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'open_owner')
-    WHERE ov.op_type_id = _fill_order_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
+    FROM haf_stats_batch_ops o
+    JOIN (VALUES
+        -- One row per impact. An op fans out into every row of its type: transfer into two,
+        -- fill_order into four. party_field names the account; hive/hbd/vests_field the asset
+        -- that column takes whatever its NAI; split_field the asset whose NAI picks the column
+        -- (@@000000021 HIVE, @@000000013 HBD, @@000000037 VESTS). A split asset only ever
+        -- carries two of the three: transfers, savings and the internal market move HIVE or
+        -- HBD, and a vesting withdrawal deposits HIVE or VESTS.
+        -- 1. Author rewards: incoming for the post author.
+        (_author_reward_id,              'author_reward_operation',              'incoming', 'author',        'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
+        -- 2. Comment benefactor rewards: incoming for the benefactor.
+        (_comment_benefactor_reward_id,  'comment_benefactor_reward_operation',  'incoming', 'benefactor',    'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
+        -- 3. Curation rewards: incoming for the curator (VESTS only).
+        (_curation_reward_id,            'curation_reward_operation',            'incoming', 'curator',       NULL,           NULL,         'reward',         NULL),
+        -- 4. Claim reward balance: incoming for the claiming account.
+        (_claim_reward_balance_id,       'claim_reward_balance_operation',       'incoming', 'account',       'reward_hive',  'reward_hbd', 'reward_vests',   NULL),
+        -- 5. HBD savings interest: incoming for the account owner (HBD only).
+        (_interest_id,                   'interest_operation',                   'incoming', 'owner',         NULL,           'interest',   NULL,             NULL),
+        -- 6-7. Transfers: outgoing for the sender, incoming for the receiver.
+        (_transfer_id,                   'transfer_operation',                   'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
+        (_transfer_id,                   'transfer_operation',                   'incoming', 'to',            NULL,           NULL,         NULL,             'amount'),
+        -- 8. Transfer to savings: outgoing for the sender.
+        (_transfer_to_savings_id,        'transfer_to_savings_operation',        'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
+        -- 9. Transfer from savings (the request): outgoing for the sender.
+        (_transfer_from_savings_id,      'transfer_from_savings_operation',      'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
+        -- 10. Fill transfer from savings: incoming for the receiver.
+        (_fill_transfer_from_savings_id, 'fill_transfer_from_savings_operation', 'incoming', 'to',            NULL,           NULL,         NULL,             'amount'),
+        -- 11. Power up (transfer_to_vesting): outgoing for the initiator (HIVE spent).
+        (_transfer_to_vesting_id,        'transfer_to_vesting_operation',        'outgoing', 'from',          'amount',       NULL,         NULL,             NULL),
+        -- 12. Power down (fill_vesting_withdraw): incoming for the deposit recipient.
+        -- `deposited` is credited to to_account (usually == from_account, but a
+        -- withdrawal route can send it elsewhere) and may be HIVE (normal power-down)
+        -- or VESTS (route that re-vests). `withdrawn` is the from_account's own VESTS
+        -- leaving its vesting balance, not a value inflow, so it is not recorded here.
+        (_fill_vesting_withdraw_id,      'fill_vesting_withdraw_operation',      'incoming', 'to_account',    NULL,           NULL,         NULL,             'deposited'),
+        -- 13. Witness pay (producer_reward): incoming for the block producer (VESTS only).
+        (_producer_reward_id,            'producer_reward_operation',            'incoming', 'producer',      NULL,           NULL,         'vesting_shares', NULL),
+        -- 14. Liquidity reward: incoming for the owner (HIVE only).
+        (_liquidity_reward_id,           'liquidity_reward_operation',           'incoming', 'owner',         'payout',       NULL,         NULL,             NULL),
+        -- 15. Proposal pay (DHF): incoming for the proposal receiver (HBD only).
+        (_proposal_pay_id,               'proposal_pay_operation',               'incoming', 'receiver',      NULL,           'payment',    NULL,             NULL),
+        -- 16-19. Fill order: each owner pays one side and receives the other.
+        (_fill_order_id,                 'fill_order_operation',                 'outgoing', 'current_owner', NULL,           NULL,         NULL,             'current_pays'),
+        (_fill_order_id,                 'fill_order_operation',                 'incoming', 'current_owner', NULL,           NULL,         NULL,             'open_pays'),
+        (_fill_order_id,                 'fill_order_operation',                 'outgoing', 'open_owner',    NULL,           NULL,         NULL,             'open_pays'),
+        (_fill_order_id,                 'fill_order_operation',                 'incoming', 'open_owner',    NULL,           NULL,         NULL,             'current_pays')
+    ) AS r (op_type_id, category, direction, party_field, hive_field, hbd_field, vests_field, split_field)
+        ON r.op_type_id = o.op_type_id
+    JOIN hafd.accounts a ON a.name = (o.body_value ->> r.party_field)
 
 ) impacts
 GROUP BY account_id, day, category, direction
@@ -692,7 +396,14 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    PERFORM haf_stats_app.refresh_financial_monthly(_first_day, _last_day);
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql).
+    IF NOT haf_stats_app.defer_rollup_refresh('process_financial', _first_day) THEN
+        -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
+        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_financial_monthly(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_financial_monthly', _first_block, _last_block, _t, '{}', 'process_financial'); END IF;
+    END IF;
 END IF;
 
 END;

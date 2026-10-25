@@ -832,17 +832,18 @@ $$;
 -- Optimisation notes (patterns borrowed from haf_block_explorer / balance_tracker
 -- HAF processors, which run over the same high-volume operation stream):
 --
---  * Two heavy scans, not seven. Each op stream is scanned ONCE into a
---    MATERIALIZED CTE and fans out to every consumer (PG would otherwise inline
---    the CTE and re-scan per consumer). The comment-op scan feeds FIVE outputs:
---    the comment_registry state, the network_content_daily counters, the
---    network_author_daily author set, account_content_daily (the author's
---    posts/comments AND the parent author's replies_received, unpivoted with
---    UNION ALL), and post_engagement (per-root-post reply counts). The vote-op
---    scan feeds FOUR: account_content_daily (votes_cast/received), the
---    network_vote_daily counters, the network_voter_daily voter set, and
---    post_engagement (per-post vote counts). A third scan exists for
---    delete_comment/ineffective_delete ops but their volume is negligible.
+--  * One statement, each table written once. The comment and vote ops come from the
+--    batch's staged rows (prepare_batch_ops, db/process_block_range.sql), each read ONCE
+--    into a MATERIALIZED CTE that fans out to every consumer (PG would otherwise inline
+--    the CTE and re-read per consumer). The comment ops feed the comment_registry state,
+--    the network_content_daily counters, the network_author_daily author set,
+--    account_content_daily (the author's posts/comments AND the parent author's
+--    replies_received) and post_engagement (per-root-post reply counts); the vote ops
+--    feed account_content_daily (votes_cast/received), the network_vote_daily counters,
+--    the network_voter_daily voter set and post_engagement (per-post vote counts). The
+--    two feeds of account_content_daily are one upsert, and those of post_engagement one
+--    INSERT (new posts) plus one UPDATE (existing posts). delete_comment/ineffective_delete
+--    ops are read too, but their volume is negligible.
 --
 --  * Count CREATES, not ops. comment_operation doubles as the edit op: the chain
 --    decides create-vs-edit by whether (author, permlink) already exists, and an
@@ -855,17 +856,14 @@ $$;
 --    posts / comments / replies_received / unique authors all count actual
 --    creations; edits land only in network_content_daily.edits.
 --
---  * Bound the scan by operation id as well as block_num. hafd.operation_id(b, 0)
---    is the first op id in block b, so the half-open id range
---    [op_id(first,0), op_id(last+1,0)) is exactly this block range and lets the
---    planner range-scan the operations primary key — the canonical
---    haf_block_explorer idiom (process_account_stats.sql, process_block_operations.sql).
---
---  * Drive from hive.operations_view by block_num. operations_view is indexed by
---    block_num; hive.account_operations_view is NOT (it is keyed by account_id),
---    so a block_num-range scan there is a full seq scan — see process_account_cohorts
---    (#21). We need to distinguish roles (voter vs author, author vs parent_author)
---    which only the op body carries, so operations_view is also the correct source.
+--  * prepare_batch_ops bounds its read by operation id: hafd.operation_id(b, 0) is the
+--    first op id in block b, so the half-open id range [op_id(first,0), op_id(last+1,0))
+--    is exactly this block range and range-scans the operations primary key — the
+--    canonical haf_block_explorer idiom (process_account_stats.sql,
+--    process_block_operations.sql). hive.account_operations_view is no alternative: it is
+--    keyed by account_id, so a block-range scan there is a full seq scan — see
+--    process_account_cohorts (#21) — and the roles (voter vs author, author vs
+--    parent_author) are only in the op body anyway.
 --
 --  * Resolve hafd.accounts AFTER pre-aggregation. We GROUP BY account name + day
 --    inside the CTE first, then join hafd.accounts on the (much smaller) aggregated
@@ -894,6 +892,8 @@ DECLARE
     _last_day DATE;
     _refresh_lo_block INT;
     _high_water INT;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
 
 -- Recurrence guard for issue #42. Every counter below accumulates additively
@@ -915,30 +915,30 @@ IF _first_block <= _high_water THEN
 END IF;
 
 PERFORM haf_stats_app.prepare_community_batch_stage();
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[0, 1, 17, 73]);
 
--- Comment ops: ONE scan, six outputs.
+-- Comment and vote ops: ONE statement over the batch's staged ops, each table written once.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
 --   network_content_daily — daily created posts/comments + edits counters
 --   network_author_daily  — distinct (day, author) set for exact unique authors
---   account_content_daily — author's posts/comments + parent's replies_received
---   post_engagement       — per-post vote/reply counts (insert new root posts +
---                           update reply_count for direct replies)
+--   account_content_daily — author's posts/comments + parent's replies_received, and the
+--                           voter's votes_cast + author's votes_received
+--   post_engagement       — per-post reply and vote counts (insert new root posts seeded with
+--                           this batch's counts + update the posts that already existed)
+--   network_vote_daily    — daily up/down/un/self counters
+--   network_voter_daily   — distinct (day, voter) set for exact unique voters
 --   community stage       — this batch's created comments, for resolve_community_batch()
 WITH comment_ops AS MATERIALIZED (
     SELECT
-        ov.id,
+        ov.op_id                            AS id,
         ov.body_value ->> 'author'          AS author,
         ov.body_value ->> 'permlink'        AS permlink,
         ov.body_value ->> 'parent_author'   AS parent_author,
         ov.body_value ->> 'parent_permlink' AS parent_permlink,
-        b.created_at::DATE                  AS day,
+        ov.day,
         ov.block_num
-    FROM hive.operations_view ov
-    JOIN hafd.blocks b ON b.num = ov.block_num
+    FROM haf_stats_batch_ops ov
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
-      AND ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.id >= hafd.operation_id(_first_block, 0)
-      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
 -- delete_comment ops (17) interleaved with ineffective_delete_comment vops (73).
 -- The vop is emitted while the failed delete applies, so its id is the very next
@@ -947,13 +947,10 @@ delete_events AS (
     SELECT
         ov.body_value ->> 'author'   AS author,
         ov.body_value ->> 'permlink' AS permlink,
-        ov.id,
+        ov.op_id                     AS id,
         ov.op_type_id = 73           AS is_vop
-    FROM hive.operations_view ov
+    FROM haf_stats_batch_ops ov
     WHERE ov.op_type_id IN (17, 73)
-      AND ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.id >= hafd.operation_id(_first_block, 0)
-      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
 effective_deletes AS (
     SELECT author, permlink, id
@@ -1139,7 +1136,7 @@ contrib AS (
 -- a column it does not project, and (b) fanned a reply created and edited in the
 -- same batch into N rows, overcounting. Replies-to-replies fall out for free:
 -- only root posts (parent_author = '') ever enter post_engagement, so a comment
--- parent matches nothing in insert_posts/update_replies below.
+-- parent matches nothing in insert_posts/update_engagement below.
 batch_replies AS (
     SELECT a.id AS author_id, agg.parent_permlink AS permlink, agg.cnt
     FROM (
@@ -1150,94 +1147,91 @@ batch_replies AS (
     ) agg
     JOIN hafd.accounts a ON a.name = agg.parent_author
 ),
--- Insert new root posts, seeding reply_count with replies that arrived in THIS
--- batch (LEFT JOIN batch_replies). Seeding here — rather than leaving it all to
--- update_replies — is what makes a post and its early replies land correctly when
--- they share one (large, backfill) batch: data-modifying CTEs all see the
--- pre-statement snapshot, so update_replies below cannot see the rows insert_posts
--- just added. ON CONFLICT DO NOTHING: is_create also fires on re-creation after a
--- delete, but the PK row already exists, so the seed is dropped and update_replies
--- (which DOES see that pre-existing row) adds the batch's replies — counted once.
-insert_posts AS (
-    INSERT INTO haf_stats_backend.post_engagement (author_id, permlink, post_day, reply_count)
-    SELECT c.author_id, c.permlink, c.day, COALESCE(br.cnt, 0)
-    FROM classified c
-    LEFT JOIN batch_replies br
-        ON br.author_id = c.author_id AND br.permlink = c.permlink
-    WHERE c.is_create AND c.parent_author = ''
-    ON CONFLICT (author_id, permlink) DO NOTHING
-    -- RETURNING yields only genuinely-inserted rows (ON CONFLICT skips re-creations),
-    -- i.e. this batch's new posts, so their creation-day gets total_posts refreshed.
-    RETURNING post_day
-),
--- Add this batch's replies to posts that existed before the statement. Posts just
--- inserted by insert_posts are invisible here (same snapshot), so they match no
--- row and are not double-counted — their replies were already seeded above.
-update_replies AS (
-    UPDATE haf_stats_backend.post_engagement pe
-    SET reply_count = pe.reply_count + br.cnt
-    FROM batch_replies br
-    WHERE pe.author_id = br.author_id
-      AND pe.permlink  = br.permlink
-    -- The replied-to post's creation-day may be old; record it so its engagement period
-    -- is re-rolled (the forward block-window refresh would never revisit it).
-    RETURNING pe.post_day
-),
--- Stage every touched post creation-day (new posts + replied-to posts) for the boundary
--- hook's refresh_engagement_touched(). A data-modifying CTE not read by the main statement
--- still runs, so this executes even though account_content_daily below ignores it.
-stage_touched_content AS (
-    INSERT INTO haf_stats_backend.engagement_touched_days (day)
-    SELECT post_day FROM insert_posts
-    UNION
-    SELECT post_day FROM update_replies
-    ON CONFLICT (day) DO NOTHING
-)
-INSERT INTO haf_stats_backend.account_content_daily
-    (account_id, day, posts, comments, replies_received)
-SELECT
-    c.account_id,
-    c.day,
-    SUM(c.posts)::INT,
-    SUM(c.comments)::INT,
-    SUM(c.replies_received)::INT
-FROM contrib c
-GROUP BY c.account_id, c.day
-ON CONFLICT (account_id, day) DO UPDATE SET
-    posts            = account_content_daily.posts            + EXCLUDED.posts,
-    comments         = account_content_daily.comments         + EXCLUDED.comments,
-    replies_received = account_content_daily.replies_received + EXCLUDED.replies_received;
-
--- Resolve the staged batch's communities and write comment_registry.community +
--- account_community_daily. Must be a SEPARATE statement: the community of a reply whose
--- parent was created just above is only knowable once that INSERT is visible.
-PERFORM haf_stats_app.resolve_community_batch();
-
--- Vote ops: ONE scan, four outputs.
---   account_content_daily — votes_cast (voter) + votes_received (author)
---   network_vote_daily    — daily up/down/un/self counters
---   network_voter_daily   — distinct (day, voter) set for exact unique voters
---   post_engagement       — increment vote_count per voted post (weight != 0)
--- The two INSERTs feeding account_content_daily and network_vote_daily are
--- data-modifying CTEs; the network_voter_daily INSERT is the main statement. All
--- read the single MATERIALIZED vote_ops, so the op stream is scanned once.
-WITH vote_ops AS MATERIALIZED (
+vote_ops AS MATERIALIZED (
     SELECT
         ov.body_value ->> 'voter'                                  AS voter,
         ov.body_value ->> 'author'                                 AS author,
         ov.body_value ->> 'permlink'                               AS permlink,
         (ov.body_value ->> 'weight')::INT                          AS weight,
         (ov.body_value ->> 'voter') = (ov.body_value ->> 'author') AS is_self,
-        b.created_at::DATE                                         AS day
-    FROM hive.operations_view ov
-    JOIN hafd.blocks b ON b.num = ov.block_num
+        ov.day
+    FROM haf_stats_batch_ops ov
     WHERE ov.op_type_id = 0   -- hive::protocol::vote_operation
-      AND ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.id >= hafd.operation_id(_first_block, 0)
-      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
+),
+-- post_engagement: this batch's votes per voted post (upvotes + downvotes; unvotes
+-- (weight=0) are retractions not engagement). Pre-aggregate to distinct (author, permlink)
+-- pairs first, then resolve author_id once per pair — O(distinct voted posts) not O(raw vote ops).
+batch_votes AS (
+    SELECT a.id AS author_id, agg.permlink, agg.cnt
+    FROM (
+        SELECT vo.author, vo.permlink, COUNT(*) AS cnt
+        FROM vote_ops vo
+        WHERE vo.weight != 0
+        GROUP BY vo.author, vo.permlink
+    ) agg
+    JOIN hafd.accounts a ON a.name = agg.author
+),
+-- One row per post this batch replied to or voted on, so each post_engagement row is written
+-- once below whichever of the two it got.
+batch_engagement AS (
+    SELECT e.author_id, e.permlink, SUM(e.replies) AS replies, SUM(e.votes) AS votes
+    FROM (
+        SELECT br.author_id, br.permlink, br.cnt AS replies, 0 AS votes FROM batch_replies br
+        UNION ALL
+        SELECT bv.author_id, bv.permlink, 0, bv.cnt FROM batch_votes bv
+    ) e
+    GROUP BY e.author_id, e.permlink
+),
+-- Insert new root posts, seeding reply_count and vote_count with the replies and votes that
+-- arrived in THIS batch (LEFT JOIN batch_engagement). Seeding here — rather than leaving it to
+-- update_engagement — is what makes a post and its early replies and votes land correctly when
+-- they share one (large, backfill) batch: data-modifying CTEs all see the pre-statement
+-- snapshot, so update_engagement below cannot see the rows insert_posts just added. ON CONFLICT
+-- DO NOTHING: is_create also fires on re-creation after a delete, but the PK row already
+-- exists, so the seed is dropped and update_engagement (which DOES see that pre-existing row)
+-- adds the batch's counts — counted once. A post created, deleted and created again within
+-- the batch has two creations here; DISTINCT ON keeps the first, so its post_day is the day it
+-- was first created, as it is when the re-creation lands in a later batch.
+insert_posts AS (
+    INSERT INTO haf_stats_backend.post_engagement (author_id, permlink, post_day, vote_count, reply_count)
+    SELECT DISTINCT ON (c.author_id, c.permlink)
+        c.author_id, c.permlink, c.day, COALESCE(be.votes, 0), COALESCE(be.replies, 0)
+    FROM classified c
+    LEFT JOIN batch_engagement be
+        ON be.author_id = c.author_id AND be.permlink = c.permlink
+    WHERE c.is_create AND c.parent_author = ''
+    ORDER BY c.author_id, c.permlink, c.id
+    ON CONFLICT (author_id, permlink) DO NOTHING
+    -- RETURNING yields only genuinely-inserted rows (ON CONFLICT skips re-creations),
+    -- i.e. this batch's new posts, so their creation-day gets total_posts refreshed.
+    RETURNING post_day
+),
+-- Add this batch's replies and votes to posts that existed before the statement. Posts just
+-- inserted by insert_posts are invisible here (same snapshot), so they match no row and are
+-- not double-counted — their counts were already seeded above.
+update_engagement AS (
+    UPDATE haf_stats_backend.post_engagement pe
+    SET reply_count = pe.reply_count + be.replies,
+        vote_count  = pe.vote_count  + be.votes
+    FROM batch_engagement be
+    WHERE pe.author_id = be.author_id
+      AND pe.permlink  = be.permlink
+    -- The post's creation-day may be old; record it so its engagement period is re-rolled
+    -- by the boundary hook (the forward block-window refresh would never revisit it).
+    RETURNING pe.post_day
+),
+-- Stage every touched post creation-day (new posts + replied-to or voted posts) for the
+-- boundary hook's refresh_engagement_touched(). A data-modifying CTE not read by the main
+-- statement still runs, so this executes even though account_content_daily below ignores it.
+stage_touched_engagement AS (
+    INSERT INTO haf_stats_backend.engagement_touched_days (day)
+    SELECT post_day FROM insert_posts
+    UNION
+    SELECT post_day FROM update_engagement
+    ON CONFLICT (day) DO NOTHING
 ),
 -- Per-account: votes cast (voter) and votes received (author).
-contrib AS (
+vote_contrib AS (
     SELECT voter AS account_name, day, COUNT(*) AS votes_cast, 0::BIGINT AS votes_received
     FROM vote_ops
     GROUP BY voter, day
@@ -1257,21 +1251,6 @@ daily AS (
     FROM vote_ops
     GROUP BY day
 ),
-upsert_account AS (
-    INSERT INTO haf_stats_backend.account_content_daily
-        (account_id, day, votes_cast, votes_received)
-    SELECT
-        a.id,
-        c.day,
-        SUM(c.votes_cast)::INT,
-        SUM(c.votes_received)::INT
-    FROM contrib c
-    JOIN hafd.accounts a ON a.name = c.account_name
-    GROUP BY a.id, c.day
-    ON CONFLICT (account_id, day) DO UPDATE SET
-        votes_cast     = account_content_daily.votes_cast     + EXCLUDED.votes_cast,
-        votes_received = account_content_daily.votes_received + EXCLUDED.votes_received
-),
 upsert_counts AS (
     INSERT INTO haf_stats_backend.network_vote_daily AS nvd
         (day, upvotes, downvotes, unvotes, self_votes)
@@ -1283,44 +1262,49 @@ upsert_counts AS (
         unvotes    = nvd.unvotes    + EXCLUDED.unvotes,
         self_votes = nvd.self_votes + EXCLUDED.self_votes
 ),
--- post_engagement: increment vote_count per voted post (upvotes + downvotes;
--- unvotes (weight=0) are retractions not engagement).
--- Pre-aggregate to distinct (author, permlink) pairs first, then resolve
--- author_id once per pair — O(distinct voted posts) not O(raw vote ops).
-update_engagement_votes AS (
-    UPDATE haf_stats_backend.post_engagement pe
-    SET vote_count = vote_count + v.cnt
-    FROM (
-        SELECT a.id AS author_id, agg.permlink, agg.cnt
-        FROM (
-            SELECT vo.author, vo.permlink, COUNT(*) AS cnt
-            FROM vote_ops vo
-            WHERE vo.weight != 0
-            GROUP BY vo.author, vo.permlink
-        ) agg
-        JOIN hafd.accounts a ON a.name = agg.author
-    ) v
-    WHERE pe.author_id = v.author_id
-      AND pe.permlink  = v.permlink
-    -- The voted post's creation-day may be old; record it so its engagement period is
-    -- re-rolled by the boundary hook (see refresh_engagement_touched).
-    RETURNING pe.post_day
-),
--- Stage the touched creation-days from this batch's votes for refresh_engagement_touched().
--- Data-modifying CTE, unread by the main statement, so it runs on its own.
-stage_touched_votes AS (
-    INSERT INTO haf_stats_backend.engagement_touched_days (day)
-    SELECT DISTINCT post_day FROM update_engagement_votes
-    ON CONFLICT (day) DO NOTHING
-)
 -- Distinct (day, voter) presence set, resolved to account id once per pair. The
 -- counters above never touch hafd.accounts, so an (impossible) unknown voter can
 -- never drop a counted vote.
-INSERT INTO haf_stats_backend.network_voter_daily (day, voter_id)
-SELECT DISTINCT vo.day, a.id
-FROM vote_ops vo
-JOIN hafd.accounts a ON a.name = vo.voter
-ON CONFLICT (day, voter_id) DO NOTHING;
+network_voters AS (
+    INSERT INTO haf_stats_backend.network_voter_daily (day, voter_id)
+    SELECT DISTINCT vo.day, a.id
+    FROM vote_ops vo
+    JOIN hafd.accounts a ON a.name = vo.voter
+    ON CONFLICT (day, voter_id) DO NOTHING
+)
+-- The content and the vote columns of a row in one upsert: GROUP BY collapses the content
+-- contributions (already keyed by account id) and the vote contributions (resolved here) to
+-- one row per (account_id, day), so ON CONFLICT never hits a row twice.
+INSERT INTO haf_stats_backend.account_content_daily
+    (account_id, day, posts, comments, votes_cast, votes_received, replies_received)
+SELECT
+    c.account_id,
+    c.day,
+    SUM(c.posts)::INT,
+    SUM(c.comments)::INT,
+    SUM(c.votes_cast)::INT,
+    SUM(c.votes_received)::INT,
+    SUM(c.replies_received)::INT
+FROM (
+    SELECT ct.account_id, ct.day, ct.posts, ct.comments, 0 AS votes_cast, 0 AS votes_received, ct.replies_received
+    FROM contrib ct
+    UNION ALL
+    SELECT a.id, vc.day, 0, 0, vc.votes_cast, vc.votes_received, 0
+    FROM vote_contrib vc
+    JOIN hafd.accounts a ON a.name = vc.account_name
+) c
+GROUP BY c.account_id, c.day
+ON CONFLICT (account_id, day) DO UPDATE SET
+    posts            = account_content_daily.posts            + EXCLUDED.posts,
+    comments         = account_content_daily.comments         + EXCLUDED.comments,
+    votes_cast       = account_content_daily.votes_cast       + EXCLUDED.votes_cast,
+    votes_received   = account_content_daily.votes_received   + EXCLUDED.votes_received,
+    replies_received = account_content_daily.replies_received + EXCLUDED.replies_received;
+
+-- Resolve the staged batch's communities and write comment_registry.community +
+-- account_community_daily. Must be a SEPARATE statement: the community of a reply whose
+-- parent was created just above is only knowable once that INSERT is visible.
+PERFORM haf_stats_app.resolve_community_batch();
 
 -- Refresh the get_network_vote_stats and get_network_content_volume rollups on a ~1200-block
 -- (~1h) boundary. Recompute every day/week/month period that received data since the previous
@@ -1351,18 +1335,31 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
-    PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql);
+    -- engagement_touched_days keeps every creation-day staged meanwhile for the deferred drain.
+    IF NOT haf_stats_app.defer_rollup_refresh('process_content_stats', _first_day) THEN
+        -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
+        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_vote_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+        PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_content_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
 
-    -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
-    -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
-    -- touched by THIS batch (never a growing backlog). It re-aggregates by creation-day rather than
-    -- block-day, so a lifetime count on an old post refreshes that post's old period - the reason
-    -- for the engagement_touched_days staging. (A previous version deferred this during full-bucket
-    -- catch-up to spread the work, but a bulk replay-then-serve flow - e.g. sync to head then run
-    -- the API - never produces the small LIVE batch that would trigger the deferred drain, leaving
-    -- the rollup permanently empty, so the drain must run unconditionally.)
-    PERFORM haf_stats_app.refresh_engagement_touched();
+        -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
+        -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
+        -- touched since the last drain. It re-aggregates by creation-day rather than block-day, so a
+        -- lifetime count on an old post refreshes that post's old period - the reason for the
+        -- engagement_touched_days staging. (A previous version deferred this during full-bucket
+        -- catch-up, but a bulk replay-then-serve flow - e.g. sync to head then run the API - never
+        -- produced the small LIVE batch that would trigger its drain, leaving the rollup permanently
+        -- empty. The massive-sync deferral above is drained by run_deferred_rollup_refreshes on the
+        -- first LIVE batch of any size and at install over a context past massive sync; a sync
+        -- stopped while still in massive sync (--stop-at-block) has to call it itself.)
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_engagement_touched();
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+    END IF;
 END IF;
 
 END;
@@ -1429,22 +1426,19 @@ AS $$
 BEGIN
 
 PERFORM haf_stats_app.prepare_community_batch_stage();
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[1, 17, 73]);
 
 WITH comment_ops AS MATERIALIZED (
     SELECT
-        ov.id,
+        ov.op_id                            AS id,
         ov.body_value ->> 'author'          AS author,
         ov.body_value ->> 'permlink'        AS permlink,
         ov.body_value ->> 'parent_author'   AS parent_author,
         ov.body_value ->> 'parent_permlink' AS parent_permlink,
-        b.created_at::DATE                  AS day,
+        ov.day,
         ov.block_num
-    FROM hive.operations_view ov
-    JOIN hafd.blocks b ON b.num = ov.block_num
+    FROM haf_stats_batch_ops ov
     WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
-      AND ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.id >= hafd.operation_id(_first_block, 0)
-      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
 -- delete_comment ops (17) interleaved with ineffective_delete_comment vops (73).
 -- The vop is emitted while the failed delete applies, so its id is the very next
@@ -1453,13 +1447,10 @@ delete_events AS (
     SELECT
         ov.body_value ->> 'author'   AS author,
         ov.body_value ->> 'permlink' AS permlink,
-        ov.id,
+        ov.op_id                     AS id,
         ov.op_type_id = 73           AS is_vop
-    FROM hive.operations_view ov
+    FROM haf_stats_batch_ops ov
     WHERE ov.op_type_id IN (17, 73)
-      AND ov.block_num BETWEEN _first_block AND _last_block
-      AND ov.id >= hafd.operation_id(_first_block, 0)
-      AND ov.id <  hafd.operation_id(_last_block + 1, 0)
 ),
 effective_deletes AS (
     SELECT author, permlink, id
