@@ -37,3 +37,6 @@ scripts/openapi_out/
 
 # Extracted by install-test to run the baseline (merge-target) install. (#78)
 .baseline/
+
+# AIDEV check reports (.aidev/run-checks.sh)
+/test-results/

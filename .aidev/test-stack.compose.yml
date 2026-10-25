@@ -1,0 +1,23 @@
+# The service stack AIDEV starts for the slots that run haf_stats's CI stub lanes
+# (.aidev/project.yaml `sandbox.compose`): the one PostgreSQL both of them start,
+# docker/docker-compose-ci.yml's and docker/docker-compose-ci-install.yml's
+# `postgres` service, at the image those files name (postgres:14-alpine), pinned by
+# digest. The runtime container joins this stack's network and reaches it as
+# `postgres`, the host name every psql command in those files uses. Everything else
+# those files run (the setup SQL, the app image's install_app/uninstall_app,
+# postgrest, the rewriter, tavern) runs inside the runtime container, replayed by
+# .aidev/compose_lane.py; .aidev/run-checks.sh recreates haf_block_log and drops the
+# app's roles before each lane, so each lane starts from what a fresh container gives
+# CI. See .aidev/README.md.
+services:
+  postgres:
+    image: postgres:14-alpine@sha256:50fce0c9c54c43d8b02ce16cb9daff75eb94c09c4ee3d41c157852ebd9700c80
+    environment:
+      POSTGRES_DB: haf_block_log
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U postgres -d haf_block_log"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
