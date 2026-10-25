@@ -40,7 +40,10 @@
 # haf_shared_consumer, which is a member of haf_stats_owner there):
 #   - sync            sync: scripts/install_app.sh into the clone, then the block
 #                     processing (haf_app_driver.py, as scripts/process_blocks.sh runs
-#                     it, as haf_stats_owner) to block 5,000,000
+#                     it, as haf_stats_owner) to block 5,000,000, with
+#                     haf_stats.processor_timings on; then
+#                     scripts/processor_timings_report.py over the driver's log
+#                     (sync-driver.log): processor-timings.json and its table
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
@@ -296,20 +299,32 @@ current_block() {
 }
 
 # The runtime's python3 is /opt/venv's; psycopg2, which haf_app_driver.py needs, is
-# the system interpreter's.
+# the system interpreter's. The sync runs with haf_stats.processor_timings on
+# (db/process_block_range.sql): the INFO lines it adds reach the driver's log only at
+# --server-messages=INFO, and change nothing the processors write. The lines a failed
+# batch leaves are kept in the log too, but no report is made from them.
 sync_blocks() {
-    local block
+    local block t0 seconds driver_log="$out/sync-driver.log"
     stage_sources && open_clone || return 1
     # The consumer owns the clone; haf_stats_owner creates its schemas in it.
     cq -c "GRANT CREATE ON DATABASE \"$clone\" TO haf_stats_owner" || return 1
     clone_install || return 1
-    /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
-        --postgres-url="$clone_url?application_name=haf_stats_block_processing&options=-c%20role%3Dhaf_stats_owner" \
-        --stop-at-block="$STOP_AT_BLOCK" --startup-marker='' --server-messages=WARNING || return 1
+    t0="$(date +%s.%N)"
+    if ! /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
+        --postgres-url="$clone_url?application_name=haf_stats_block_processing&options=-c%20role%3Dhaf_stats_owner%20-c%20haf_stats.processor_timings%3Don" \
+        --stop-at-block="$STOP_AT_BLOCK" --startup-marker='' --server-messages=INFO > "$driver_log" 2>&1; then
+        echo "the block processing failed; the end of its log ($driver_log):"
+        grep -v 'haf_stats_processor_timing\|haf_stats_operation_counts' "$driver_log" | tail -40
+        return 1
+    fi
+    seconds="$(echo "$t0 $(date +%s.%N)" | awk '{ printf "%.3f\n", $2 - $1 }')"
+    echo "block processing took ${seconds}s; driver log $driver_log ($(wc -l < "$driver_log") lines)"
     block="$(current_block)" || return 1
     echo "processed up to block $block"
     [ "$block" -ge "$STOP_AT_BLOCK" ] || { echo "expected block $STOP_AT_BLOCK"; return 1; }
     synced=yes
+    "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
+        --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds"
 }
 
 needs_sync() {
