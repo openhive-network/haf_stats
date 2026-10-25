@@ -1352,10 +1352,9 @@ Measured read-only on a 1.28.8 node, the split of 10,000 blocks takes ~1.7 s for
 (218,937 operations) and ~3.4 s for blocks from 2021 (392,913 operations), and in both its shares add
 up exactly to the transactions' recorded RC. That is what a catch-up batch gains (its batches take
 20-112 s on busy history); live processing is a block at a time. A range of more than 100,000
-blocks is not split at all: the installer's one-time self-heal of an empty `network_custom_json_daily`
-runs over the whole chain, and its rows come out without `rc_exact` for the backfill to fill. Until
-then that table is estimate up to the self-heal while the other two may be exact, so `custom-json-usage` and the
-custom_json part of `rc-utilization` can differ. `rebuild_custom_json.sh` and
+blocks is not split at all. The installer's one-time self-heal of an empty `network_custom_json_daily`
+runs over the whole chain in steps of 100,000 blocks, so its rows get `rc_exact` as the processor's
+do. `rebuild_custom_json.sh` and
 `rebuild_network_custom_json.sh` refuse a `BATCH_SIZE` above 100,000 for the same reason: they
 truncate first and would replace exact rows with NULL ones.
 

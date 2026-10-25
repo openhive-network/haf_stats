@@ -128,6 +128,7 @@ SET jit = OFF
 AS $$
 DECLARE
     _from_block INT;
+    _account_created_id INT;
     _rec RECORD;
     _json JSONB;
     _action TEXT;
@@ -147,6 +148,14 @@ IF _last_block < haf_stats_app.community_start_block() THEN
 END IF;
 
 _from_block := GREATEST(_first_block, haf_stats_app.community_start_block());
+_account_created_id := (
+    SELECT id FROM hafd.operation_types
+    WHERE name = 'hive::protocol::account_created_operation'
+);
+
+-- Both passes read the batch's staged ops (prepare_batch_ops, db/process_block_range.sql);
+-- the custom_json ones are the rows process_custom_json and process_network_custom_json read.
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[_account_created_id, 18]);
 
 -- Pass 1: register communities created in this range, and seed the community account
 -- itself as owner so it can immediately set roles and props.
@@ -156,12 +165,9 @@ WITH registered AS (
         ov.body_value ->> 'new_account_name',
         SUBSTRING(ov.body_value ->> 'new_account_name' FROM 6 FOR 1)::SMALLINT,
         ov.block_num
-    FROM hive.operations_view ov
+    FROM haf_stats_batch_ops ov
     WHERE ov.block_num BETWEEN _from_block AND _last_block
-      AND ov.op_type_id = (
-          SELECT id FROM hafd.operation_types
-          WHERE name = 'hive::protocol::account_created_operation'
-      )
+      AND ov.op_type_id = _account_created_id
       AND haf_stats_app.is_community_name(ov.body_value ->> 'new_account_name')
     ON CONFLICT (community) DO NOTHING
     RETURNING community
@@ -174,12 +180,12 @@ ON CONFLICT (community, account_id) DO UPDATE SET role = EXCLUDED.role;
 
 -- Pass 2: apply community custom_json ops in op order.
 FOR _rec IN
-    SELECT ov.id, ov.body_value
-    FROM hive.operations_view ov
+    SELECT ov.op_id AS id, ov.body_value
+    FROM haf_stats_batch_ops ov
     WHERE ov.block_num BETWEEN _from_block AND _last_block
       AND ov.op_type_id = 18   -- hive::protocol::custom_json_operation
       AND ov.body_value ->> 'id' = 'community'
-    ORDER BY ov.id
+    ORDER BY ov.op_id
 LOOP
     -- custom_json.json is a free-form STRING: a malformed payload is a normal
     -- occurrence on-chain and must not abort the batch.

@@ -96,11 +96,11 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
     assert report["batches"] == 3
     assert report["sync_wall_seconds"] == 100.0
     assert report["blocks_per_second"] == 20000.0
-    assert report["processors"]["process_witness_blocks"] == {"seconds": 7.0, "calls": 3, "share": 0.0833}
+    assert report["processors"]["process_witness_blocks"] == {"seconds": 7.0, "calls": 3, "share": 0.0769}
     assert report["processing_seconds"] == 7.0 * len(PROCESSORS)
     assert report["instrumentation_seconds"] == 1.5
     assert report["refreshes"]["refresh_financial_monthly"] == {
-        "seconds": 0.6, "calls": 2, "share": 0.0071, "within": "process_financial"}
+        "seconds": 0.6, "calls": 2, "share": 0.0066, "within": "process_financial"}
     assert report["refreshes"]["refresh_engagement_touched"]["calls"] == 1
     assert report["refreshes"]["refresh_author_cohort_retention"]["calls"] == 0
     # A batch counts towards the million its first block is in.
@@ -115,7 +115,7 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
     assert report["operations"]["producer_reward_operation"] == 300
 
     table = capsys.readouterr().out
-    assert re.search(r"^process_financial +7\.00 +8\.3% +3 +1\.00 +6\.00$", table, re.M)
+    assert re.search(r"^process_financial +7\.00 +7\.7% +3 +1\.00 +6\.00$", table, re.M)
     assert re.search(r"^  refresh_financial_monthly +0\.60 +0\.7% +2 +0\.00 +0\.60$", table, re.M)
     assert "sync wall 100.0s over 3 batches (blocks 1..2000000)" in table
     assert "process_financial: transfer_operation 9" in table

@@ -193,8 +193,9 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_ops(BIGINT []) TO haf_stats
 -- part 2). The block processors call it for the range they are processing; the backfill calls it
 -- one day at a time. Same rule as exact_rc_for_ops - whole transaction split by rc_avg_cost
 -- weights, floor plus the remainder to the highest op id - but driven by the range instead of by
--- ids, so it reads hafd.transactions and hafd.operations through their block-range indexes rather
--- than probing one operation at a time.
+-- ids, so it reads hafd.transactions through its block-range index and the range's operations as
+-- prepare_batch_ops (db/process_block_range.sql) staged them, rather than probing one operation
+-- at a time.
 --
 -- Returns nothing on a HAF without rc_cost, like exact_rc_for_ops - and nothing for a range of
 -- more than 100,000 blocks. The processors work in batches of at most 10,000 (a catch-up sync)
@@ -213,7 +214,9 @@ CREATE OR REPLACE FUNCTION haf_stats_app.exact_rc_for_range(
 )
 RETURNS TABLE (operation_id BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
-STABLE
+-- VOLATILE, not STABLE: it stages the range's operations (prepare_batch_ops) and reads them
+-- from there.
+VOLATILE
 AS $$
 BEGIN
     IF _first_block IS NULL OR _last_block IS NULL OR _first_block > _last_block
@@ -221,6 +224,8 @@ BEGIN
        OR NOT haf_stats_app.rc_cost_available() THEN
         RETURN;
     END IF;
+
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
 
     RETURN QUERY
     WITH priced_tx AS MATERIALIZED (
@@ -231,14 +236,13 @@ BEGIN
           AND t.rc_cost IS NOT NULL
     ),
     tx_ops AS MATERIALIZED (
-        SELECT p.block_num, p.trx_in_block, p.rc_cost, p.day, o.id, o.op_type_id::SMALLINT AS op_type_id
-        FROM hafd.operations AS o
+        SELECT p.block_num, p.trx_in_block, p.rc_cost, p.day, o.op_id AS id, o.op_type_id
+        FROM haf_stats_batch_ops AS o
         JOIN priced_tx AS p
-          ON p.block_num = hafd.operation_id_to_block_num(o.id)
+          ON p.block_num = o.block_num
          AND p.trx_in_block = o.trx_in_block
         JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id AND NOT ot.is_virtual
-        WHERE hafd.operation_id_to_block_num(o.id) BETWEEN _first_block AND _last_block
-          AND o.trx_in_block >= 0
+        WHERE o.trx_in_block >= 0
     ),
     weight AS MATERIALIZED (
         SELECT k.op_type_id, k.day,

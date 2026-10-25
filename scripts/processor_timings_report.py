@@ -40,6 +40,7 @@ from typing import Any
 
 #: The steps db/process_block_range.sql calls, in call order.
 PROCESSORS: tuple[str, ...] = (
+    "prepare_batch_ops",
     "process_financial",
     "prepare_batch_authored_ops",
     "process_account_cohorts",

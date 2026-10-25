@@ -189,21 +189,18 @@ BEGIN
     -- Step 1: Register each account's first-ever root post (parent_author = '').
     --
     -- DISTINCT ON keeps the lowest op id per author within the batch; ON CONFLICT
-    -- DO NOTHING keeps the earliest across all forward-processed batches. Scan
-    -- operations_view by both block_num and the half-open operation-id range so
-    -- the planner can use the same HAF id-range pattern as the other processors.
+    -- DO NOTHING keeps the earliest across all forward-processed batches. Reads the
+    -- batch's staged comment ops (prepare_batch_ops, db/process_block_range.sql), the
+    -- same rows process_content_stats classifies.
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[1]);
     WITH first_posts AS MATERIALIZED (
         SELECT DISTINCT ON (ov.body_value ->> 'author')
             ov.body_value ->> 'author' AS author,
-            b.created_at               AS first_post_at
-        FROM hive.operations_view ov
-        JOIN hafd.blocks b ON b.num = ov.block_num
+            ov.op_time                 AS first_post_at
+        FROM haf_stats_batch_ops ov
         WHERE ov.op_type_id = 1   -- hive::protocol::comment_operation
           AND ov.body_value ->> 'parent_author' = ''
-          AND ov.block_num BETWEEN _first_block AND _last_block
-          AND ov.id >= hafd.operation_id(_first_block, 0)
-          AND ov.id <  hafd.operation_id(_last_block + 1, 0)
-        ORDER BY ov.body_value ->> 'author', ov.id
+        ORDER BY ov.body_value ->> 'author', ov.op_id
     )
     INSERT INTO haf_stats_backend.author_cohort_members
         (account_id, cohort_month, first_post_at)

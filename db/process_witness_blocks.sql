@@ -97,6 +97,8 @@ DECLARE
     );
 BEGIN
 
+PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[_producer_missed_id]);
+
 INSERT INTO haf_stats_backend.witness_blocks_daily AS wb (
     day, producer_account_id, produced_count, missed_count, first_missed_block, last_missed_block
 )
@@ -125,25 +127,19 @@ FROM (
     -- ->> 'producer' is a witness name; resolve it to an account id here so the whole table is
     -- keyed consistently with the produced arm. Verified 100% resolvable over the replay corpus
     -- (44,300 ops, 0 NULL, 0 unmatched); the parity guard's SUM(missed_count) vs a raw op count
-    -- is what would catch a silent drop if that ever stopped holding.
-    --
-    -- Keep the block predicate as operation_id_to_block_num(ov.id) BETWEEN: EXPLAIN shows that
-    -- derived-block form IS the Index Cond on hive_operations_op_type_id_block_num. Rewriting it
-    -- as an ov.id >= hafd.operation_id(...) range demotes it to a heap filter that scans every
-    -- op-86 in history (issue #41).
+    -- is what would catch a silent drop if that ever stopped holding. The ops are the batch's
+    -- staged ones (prepare_batch_ops, db/process_block_range.sql).
     SELECT
-        bv.created_at::DATE,
+        ov.day,
         a.id,
         0::BIGINT,
         COUNT(*)::BIGINT,
-        MIN(bv.num)::INT,
-        MAX(bv.num)::INT
-    FROM hafd.operations ov
-    JOIN hafd.blocks bv ON bv.num = hafd.operation_id_to_block_num(ov.id)
+        MIN(ov.block_num)::INT,
+        MAX(ov.block_num)::INT
+    FROM haf_stats_batch_ops ov
     JOIN hafd.accounts a ON a.name = (ov.body_value ->> 'producer')
     WHERE ov.op_type_id = _producer_missed_id
-      AND hafd.operation_id_to_block_num(ov.id) BETWEEN _first_block AND _last_block
-    GROUP BY bv.created_at::DATE, a.id
+    GROUP BY ov.day, a.id
 ) s
 GROUP BY s.day, s.producer_account_id
 ON CONFLICT (day, producer_account_id) DO UPDATE SET
