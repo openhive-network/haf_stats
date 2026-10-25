@@ -48,7 +48,8 @@
 #                     tests/ci_deferred_refresh_recorded.sql; then, timed apart from the
 #                     sync, the call that batch makes,
 #                     haf_stats_app.prepare_rollup_refreshes(FALSE) (deferred-refresh.log);
-#                     then tests/ci_deferred_refresh_complete.sql; then
+#                     then tests/ci_deferred_refresh_complete.sql (.gitlab-ci.yml's
+#                     sync job runs the same three steps; keep them in step); then
 #                     scripts/processor_timings_report.py over both logs:
 #                     processor-timings.json and its table
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against

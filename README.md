@@ -203,9 +203,17 @@ records the earliest day it would have refreshed from instead
 (`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
 refresh once from that day, before processing its blocks. `install_app.sh` does the same over a
 context already past massive sync. A sync stopped while still in massive sync (e.g.
-`--stop-at-block`) leaves them empty until
-`SELECT haf_stats_app.run_deferred_rollup_refreshes();` (as `haf_stats_owner`) or the first
-live batch. On the 1→5M range that one call took about 4 s.
+`--stop-at-block`) leaves them empty, so the period, monthly and retention endpoints answer
+nothing meaningful, until the first live batch or the call that batch makes:
+
+```sql
+SET ROLE haf_stats_owner;
+SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);
+```
+
+On the 1→5M range that one call took about 4 s. CI's `sync` job, `.aidev/run-checks.sh`'s
+sync step and `docker/docker-compose-test.yml` all stop at a block in massive sync and make
+this call before anything reads the rollups.
 
 ## Quick Start (Development)
 
