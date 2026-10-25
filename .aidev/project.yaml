@@ -90,6 +90,7 @@ verification:
     stack: false
     artifacts: ["test-results/quick/"]
   full:
+    reports: ["test-results/full/processor-timings.json"]
     adapter: command
     args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/full/"]
@@ -99,6 +100,7 @@ verification:
     args: [".aidev/run-checks.sh", "baseline", "unit", "endpoint", "install"]
     artifacts: ["test-results/baseline/"]
   canary:
+    reports: ["test-results/canary/processor-timings.json"]
     adapter: command
     args: [".aidev/run-checks.sh", "canary", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/canary/"]
