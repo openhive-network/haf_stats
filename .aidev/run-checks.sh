@@ -41,9 +41,16 @@
 #   - sync            sync: scripts/install_app.sh into the clone, then the block
 #                     processing (haf_app_driver.py, as scripts/process_blocks.sh runs
 #                     it, as haf_stats_owner) to block 5,000,000, with
-#                     haf_stats.processor_timings on; then
-#                     scripts/processor_timings_report.py over the driver's log
-#                     (sync-driver.log): processor-timings.json and its table
+#                     haf_stats.processor_timings on. The context is still in massive
+#                     sync at 5,000,000, which defers the rollup refreshes to its first
+#                     live batch, and the lane never reaches one: so, with the driver
+#                     gone between two batches as a crash would leave it,
+#                     tests/ci_deferred_refresh_recorded.sql; then, timed apart from the
+#                     sync, the call that batch makes,
+#                     haf_stats_app.prepare_rollup_refreshes(FALSE) (deferred-refresh.log);
+#                     then tests/ci_deferred_refresh_complete.sql; then
+#                     scripts/processor_timings_report.py over both logs:
+#                     processor-timings.json and its table
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
@@ -304,7 +311,7 @@ current_block() {
 # --server-messages=INFO, and change nothing the processors write. The lines a failed
 # batch leaves are kept in the log too, but no report is made from them.
 sync_blocks() {
-    local block t0 seconds driver_log="$out/sync-driver.log"
+    local block t0 seconds deferred_seconds driver_log="$out/sync-driver.log" deferred_log="$out/deferred-refresh.log"
     stage_sources && open_clone || return 1
     # The consumer owns the clone; haf_stats_owner creates its schemas in it.
     cq -c "GRANT CREATE ON DATABASE \"$clone\" TO haf_stats_owner" || return 1
@@ -322,9 +329,20 @@ sync_blocks() {
     block="$(current_block)" || return 1
     echo "processed up to block $block"
     [ "$block" -ge "$STOP_AT_BLOCK" ] || { echo "expected block $STOP_AT_BLOCK"; return 1; }
+    cq -f tests/ci_deferred_refresh_recorded.sql || return 1
+    t0="$(date +%s.%N)"
+    if ! cq -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);" \
+        > "$deferred_log" 2>&1; then
+        echo "the deferred rollup refreshes failed ($deferred_log):"; tail -40 "$deferred_log"
+        return 1
+    fi
+    deferred_seconds="$(echo "$t0 $(date +%s.%N)" | awk '{ printf "%.3f\n", $2 - $1 }')"
+    echo "deferred rollup refreshes took ${deferred_seconds}s"
+    cq -f tests/ci_deferred_refresh_complete.sql || return 1
     synced=yes
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
-        --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds"
+        --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \
+        --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds"
 }
 
 needs_sync() {

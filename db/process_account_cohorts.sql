@@ -212,6 +212,7 @@ SET enable_bitmapscan = 'off'
 AS $$
 DECLARE
     _block_time TIMESTAMP;
+    _from_month DATE;
     _timed BOOLEAN;
     _t TIMESTAMPTZ;
 BEGIN
@@ -312,20 +313,22 @@ BEGIN
     -- yet retention is a coarse metric with day-granular disclosure windows.
     -- Recompute only when the block range crosses a ~1200-block (~1 hour)
     -- boundary, rather than on every single block range — cutting this from the
-    -- per-block hot path to roughly hourly. Multi-block (catch-up / massive)
-    -- ranges that span a boundary still refresh it.
+    -- per-block hot path to roughly hourly. Multi-block catch-up ranges that span
+    -- a boundary still refresh it; during massive sync the refresh is recorded
+    -- instead, from its earliest cohort month (see defer_rollup_refresh,
+    -- db/haf_stats_app.sql, for why its rows do not depend on when it runs).
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-        -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
-        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
-        IF _timed THEN _t := clock_timestamp(); END IF;
-        PERFORM haf_stats_app.refresh_account_cohort_retention(
-            _block_time,
-            (
-                DATE_TRUNC('month', _block_time - INTERVAL '180 days')
-                - INTERVAL '1 month'
-            )::DATE
-        );
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_account_cohort_retention', _first_block, _last_block, _t, '{}', 'process_account_cohorts'); END IF;
+        _from_month := (
+            DATE_TRUNC('month', _block_time - INTERVAL '180 days')
+            - INTERVAL '1 month'
+        )::DATE;
+        IF NOT haf_stats_app.defer_rollup_refresh('process_account_cohorts', _from_month) THEN
+            -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
+            _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+            IF _timed THEN _t := clock_timestamp(); END IF;
+            PERFORM haf_stats_app.refresh_account_cohort_retention(_block_time, _from_month);
+            IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_account_cohort_retention', _first_block, _last_block, _t, '{}', 'process_account_cohorts'); END IF;
+        END IF;
     END IF;
 END;
 $$;

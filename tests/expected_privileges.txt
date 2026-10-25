@@ -12,6 +12,7 @@ function haf_stats_app.block_range_for_dates(_from date, _to date) | owner=haf_s
 function haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.continue_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.create_context_if_not_exists() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -25,6 +26,7 @@ function haf_stats_app.network_op_rows(_first_block integer, _last_block integer
 function haf_stats_app.prepare_batch_authored_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_exact_rc(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_community_batch_stage() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prepare_rollup_refreshes(_massive boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_account_cohorts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_active_users(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_block_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -55,12 +57,15 @@ function haf_stats_app.refresh_network_content_periods(_lo date, _hi date) | own
 function haf_stats_app.refresh_network_vote_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_rc_op_stats() | owner=haf_admin | secdef=false | acl=haf_stats_owner:EXECUTE
 function haf_stats_app.refresh_top_accounts_alltime() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE
+function haf_stats_app.report_deferred_refresh_timing(_step text, _dirty_from date, _as_of timestamp without time zone, _started timestamp with time zone) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_operation_counts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_processor_timing(_step text, _first_block integer, _last_block integer, _started timestamp with time zone, _reads text[], _within text) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.resolve_community_batch() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_category(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_name(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.run_deferred_rollup_refreshes() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.run_deferred_rollup_refreshes_past_massive() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -103,6 +108,7 @@ sequence haf_stats_app.haf_stats_hive_rowid_seq | owner=haf_stats_owner | acl=<d
 table haf_stats_app.app_config | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.app_status | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.app_version | owner=haf_stats_owner | acl=haf_stats_user:SELECT
+table haf_stats_app.deferred_rollup_refreshes | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.haf_stats | owner=haf_stats_owner | acl=<default>
 table haf_stats_backend.account_cohort_members | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_cohort_retention | owner=haf_stats_owner | acl=haf_stats_user:SELECT

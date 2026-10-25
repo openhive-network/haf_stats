@@ -1353,25 +1353,31 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
-    _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
-    IF _timed THEN _t := clock_timestamp(); END IF;
-    PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_vote_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
-    PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_content_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql);
+    -- engagement_touched_days keeps every creation-day staged meanwhile for the deferred drain.
+    IF NOT haf_stats_app.defer_rollup_refresh('process_content_stats', _first_day) THEN
+        -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
+        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_vote_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+        PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_content_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
 
-    -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
-    -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
-    -- touched by THIS batch (never a growing backlog). It re-aggregates by creation-day rather than
-    -- block-day, so a lifetime count on an old post refreshes that post's old period - the reason
-    -- for the engagement_touched_days staging. (A previous version deferred this during full-bucket
-    -- catch-up to spread the work, but a bulk replay-then-serve flow - e.g. sync to head then run
-    -- the API - never produces the small LIVE batch that would trigger the deferred drain, leaving
-    -- the rollup permanently empty, so the drain must run unconditionally.)
-    IF _timed THEN _t := clock_timestamp(); END IF;
-    PERFORM haf_stats_app.refresh_engagement_touched();
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+        -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
+        -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
+        -- touched since the last drain. It re-aggregates by creation-day rather than block-day, so a
+        -- lifetime count on an old post refreshes that post's old period - the reason for the
+        -- engagement_touched_days staging. (A previous version deferred this during full-bucket
+        -- catch-up, but a bulk replay-then-serve flow - e.g. sync to head then run the API - never
+        -- produced the small LIVE batch that would trigger its drain, leaving the rollup permanently
+        -- empty. The massive-sync deferral above is drained by run_deferred_rollup_refreshes on the
+        -- first LIVE batch of any size and at install over a context past massive sync; a sync
+        -- stopped while still in massive sync (--stop-at-block) has to call it itself.)
+        IF _timed THEN _t := clock_timestamp(); END IF;
+        PERFORM haf_stats_app.refresh_engagement_touched();
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+    END IF;
 END IF;
 
 END;
