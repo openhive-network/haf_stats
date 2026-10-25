@@ -179,6 +179,7 @@ AS $$
 DECLARE
     _first_block_time TIMESTAMP;
     _block_time TIMESTAMP;
+    _from_month DATE;
     _timed BOOLEAN;
     _t TIMESTAMPTZ;
 BEGIN
@@ -270,19 +271,21 @@ BEGIN
     -- toward window N only once its own N-day window has elapsed (eligible_at_Nd),
     -- so recent cohorts populate on a partial basis as members mature.
     -- Refresh only near hourly block boundaries; retention is a coarse metric and
-    -- the affected cohorts are exactly re-aggregated when the refresh fires.
+    -- the affected cohorts are exactly re-aggregated when the refresh fires. During
+    -- massive sync it is recorded instead, from its earliest cohort month (see
+    -- defer_rollup_refresh, db/haf_stats_app.sql).
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
-        -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
-        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
-        IF _timed THEN _t := clock_timestamp(); END IF;
-        PERFORM haf_stats_app.refresh_author_cohort_retention(
-            _block_time,
-            (
-                DATE_TRUNC('month', _block_time - INTERVAL '180 days')
-                - INTERVAL '1 month'
-            )::DATE
-        );
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_author_cohort_retention', _first_block, _last_block, _t, '{}', 'process_content_cohorts'); END IF;
+        _from_month := (
+            DATE_TRUNC('month', _block_time - INTERVAL '180 days')
+            - INTERVAL '1 month'
+        )::DATE;
+        IF NOT haf_stats_app.defer_rollup_refresh('process_content_cohorts', _from_month) THEN
+            -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
+            _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+            IF _timed THEN _t := clock_timestamp(); END IF;
+            PERFORM haf_stats_app.refresh_author_cohort_retention(_block_time, _from_month);
+            IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_author_cohort_retention', _first_block, _last_block, _t, '{}', 'process_content_cohorts'); END IF;
+        END IF;
     END IF;
 END;
 $$;

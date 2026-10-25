@@ -381,6 +381,12 @@ psql_cmd -c "
         GRANT EXECUTE ON FUNCTIONS TO haf_stats_user;
 "
 
+# 7b. The rollup refreshes the processors deferred through massive sync (db/haf_stats_app.sql),
+#     when the context is already past it; in massive sync they are left to the first batch
+#     outside it. Before step 8, whose empty-rollup backfills would otherwise rebuild them from
+#     genesis.
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.run_deferred_rollup_refreshes_past_massive(); RESET ROLE;"
+
 # 8. Self-heal the precomputed endpoint rollups. They ship empty and the endpoints read
 #    them directly; on an already-synced node the forward refresh hook only fills recent
 #    periods, so without this the historical rollup stays empty and the endpoint returns

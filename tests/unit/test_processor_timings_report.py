@@ -165,6 +165,65 @@ def test_a_missing_log_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert "no report:" in capsys.readouterr().err
 
 
+def _deferred_line(step: str, seconds: float) -> str:
+    return (f"psql:<stdin>:1: INFO:  haf_stats_deferred_refresh_timing "
+            f'{{"step" : "{step}", "dirty_from" : "2016-03-24", "as_of" : "2016-09-01T00:00:00", '
+            f'"seconds" : {seconds}}}\n')
+
+
+def _run_with_deferred(tmp_path: Path, deferred: list[str]) -> tuple[int, Path]:
+    log = tmp_path / "driver.log"
+    log.write_text("".join(_three_batches()), encoding="utf-8")
+    deferred_log = tmp_path / "deferred-refresh.log"
+    deferred_log.write_text("SET\n" + "".join(deferred) + " prepare_rollup_refreshes \n", encoding="utf-8")
+    out = tmp_path / "processor-timings.json"
+    rc: int = report_script.main(["--log", str(log), "--out", str(out), "--first-block", "1",
+                                  "--last-block", "2000000", "--sync-seconds", "100",
+                                  "--deferred-log", str(deferred_log), "--deferred-seconds", "9.5"])
+    return rc, out
+
+
+def test_the_deferred_refreshes_are_reported_apart_from_the_sync(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc, out = _run_with_deferred(tmp_path, [_deferred_line("refresh_financial_monthly", 1.25),
+                                            _deferred_line("refresh_author_cohort_retention", 4)])
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["deferred_refreshes"]["wall_seconds"] == 9.5
+    assert report["deferred_refreshes"]["seconds"]["refresh_financial_monthly"] == 1.25
+    assert report["deferred_refreshes"]["seconds"]["refresh_author_cohort_retention"] == 4.0
+    assert report["deferred_refreshes"]["seconds"]["refresh_engagement_touched"] == 0.0
+    # The per-batch refresh totals are the driver log's alone.
+    assert report["refreshes"]["refresh_financial_monthly"]["seconds"] == 0.6
+    table = capsys.readouterr().out
+    assert "deferred refreshes, after the sync: 9.5s wall" in table
+    assert re.search(r"^  refresh_author_cohort_retention +4\.00$", table, re.M)
+
+
+def test_a_report_without_a_deferred_log_has_no_deferred_section(tmp_path: Path) -> None:
+    rc, out = _run(tmp_path, _three_batches())
+
+    assert rc == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["deferred_refreshes"] is None
+
+
+@pytest.mark.parametrize(("deferred", "problem"), [
+    pytest.param([], "no deferred refresh timings", id="no timings"),
+    pytest.param([_deferred_line("refresh_votes", 1)], "unknown refresh 'refresh_votes'", id="an unknown refresh"),
+    pytest.param([_deferred_line("refresh_financial_monthly", 1)] * 2, "timed twice", id="timed twice"),
+    pytest.param([_deferred_line("refresh_financial_monthly", -1)], "negative", id="negative seconds"),
+    pytest.param(["INFO:  haf_stats_deferred_refresh_timing {\"step\"\n"], "not JSON", id="a truncated line"),
+])
+def test_a_bad_deferred_log_fails_and_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                                    deferred: list[str], problem: str) -> None:
+    rc, out = _run_with_deferred(tmp_path, deferred)
+
+    assert rc == 1
+    assert not out.exists()
+    assert problem in capsys.readouterr().err
+
+
 # --- the step lists against the SQL that emits the lines ------------------------------
 
 _TIMING_CALL = re.compile(r"report_processor_timing\('(\w+)', _first_block, _last_block, _t, '\{([^}]*)\}', "
@@ -206,3 +265,15 @@ def test_the_reads_name_op_types_the_counts_can_report() -> None:
     assert reads, "the dispatcher names no op type it reads"
     for r in reads:
         assert r == report_script.NON_VIRTUAL or r.endswith("_operation"), r
+
+
+_DEFERRED_CALL = re.compile(r"PERFORM haf_stats_app\.(refresh_\w+)\(.*\n.*report_deferred_refresh_timing\('(\w+)'")
+
+
+def test_every_deferred_refresh_is_timed_under_its_own_name() -> None:
+    body = _sql("haf_stats_app.sql")
+    body = body[body.index("CREATE OR REPLACE FUNCTION haf_stats_app.run_deferred_rollup_refreshes("):]
+    timed = [(m.group(1), m.group(2)) for m in _DEFERRED_CALL.finditer(body)]
+
+    assert [called for called, _ in timed] == [named for _, named in timed]
+    assert sorted(named for _, named in timed) == sorted(REFRESHES)

@@ -3,6 +3,7 @@
 
     processor_timings_report.py --log DRIVER_LOG --out REPORT.json
         --first-block N --last-block M --sync-seconds S
+        [--deferred-log DEFERRED_LOG --deferred-seconds D]
 
 DRIVER_LOG is haf_app_driver.py's output (with --server-messages=INFO) for a run with
 haf_stats.processor_timings = on (db/process_block_range.sql): one
@@ -17,6 +18,12 @@ The report holds each processor's and each refresh's wall time over the whole ru
 1,000,000 blocks (a batch counts towards the million its first block is in), the rows
 each processor read by op type, and the run's wall time as measured by the caller. A
 refresh runs inside its processor, so its seconds are also part of that processor's.
+
+During massive sync the processors skip their refreshes and record them instead, and
+haf_stats_app.run_deferred_rollup_refreshes() runs each once afterwards
+(db/haf_stats_app.sql). DEFERRED_LOG is that call's output, with one
+`haf_stats_deferred_refresh_timing {...}` line per refresh it ran, and D its wall time;
+the report then holds each one's seconds as well. They are outside the sync wall time.
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ NON_VIRTUAL = "non_virtual"
 BUCKET_BLOCKS = 1_000_000
 
 _LINE = re.compile(r"\b(haf_stats_processor_timing|haf_stats_operation_counts) (.*?)\s*$")
+_DEFERRED_LINE = re.compile(r"\bhaf_stats_deferred_refresh_timing (.*?)\s*$")
 
 
 class TimingsError(Exception):
@@ -175,6 +183,36 @@ def parse_log(lines: Iterable[str]) -> tuple[list[_Timing], list[_Counts]]:
     return timings, counts
 
 
+def parse_deferred_log(lines: Iterable[str]) -> dict[str, float]:
+    """Each deferred refresh's seconds, from run_deferred_rollup_refreshes()'s output.
+
+    :raises TimingsError: a line is not JSON, names a step that is not a refresh, times one
+        twice, or there is no line at all.
+    """
+    seconds: dict[str, float] = {}
+    for number, line in enumerate(lines, 1):
+        m = _DEFERRED_LINE.search(line)
+        if m is None:
+            continue
+        where = f"deferred log line {number}"
+        try:
+            record = json.loads(m.group(1))
+        except json.JSONDecodeError as exc:
+            raise TimingsError(f"{where}: not JSON ({exc})") from exc
+        if not isinstance(record, dict):
+            raise TimingsError(f"{where}: not a JSON object")
+        step = _field(record, "step", str, where)
+        if step not in REFRESHES:
+            raise TimingsError(f"{where}: unknown refresh {step!r}")
+        if step in seconds:
+            raise TimingsError(f"{where}: {step} is timed twice")
+        seconds[step] = _seconds(record, where)
+    if not seconds:
+        raise TimingsError("no deferred refresh timings: did the run record any, and was "
+                           "haf_stats.processor_timings on for run_deferred_rollup_refreshes()?")
+    return seconds
+
+
 _Batch = tuple[tuple[int, int], dict[str, _Timing], _Counts]
 
 
@@ -220,15 +258,17 @@ def _rows_read(reads: tuple[str, ...], per_type: Mapping[str, int], non_virtual:
 
 
 def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: int, last_block: int,
-                 sync_seconds: float) -> dict[str, Any]:
-    """The report for one run: totals, the per-million split and the rows read.
+                 sync_seconds: float, deferred: Mapping[str, float] | None = None,
+                 deferred_seconds: float | None = None) -> dict[str, Any]:
+    """The report for one run: totals, the per-million split and the rows read, and, given
+    ``deferred`` (parse_deferred_log) and its wall time, the deferred refreshes' seconds.
 
     :raises TimingsError: the records do not tile ``first_block..last_block`` with every
-        processor timed and the operations counted once per batch, or ``sync_seconds``
-        is negative.
+        processor timed and the operations counted once per batch, or a wall time is
+        negative.
     """
-    if sync_seconds < 0:
-        raise TimingsError("the sync wall time is negative")
+    if sync_seconds < 0 or (deferred_seconds is not None and deferred_seconds < 0):
+        raise TimingsError("a wall time is negative")
     batches = _batches(timings, counts, first_block, last_block)
     steps = PROCESSORS + tuple(REFRESHES)
     totals: dict[str, float] = dict.fromkeys(steps, 0.0)
@@ -287,6 +327,10 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
         "per_million": per_million,
         "rows_read": {p: dict(sorted(r.items())) for p, r in rows_read.items()},
         "operations": dict(sorted(operations.items())),
+        "deferred_refreshes": None if deferred is None else {
+            "wall_seconds": _rounded(deferred_seconds or 0.0),
+            "seconds": {r: _rounded(deferred.get(r, 0.0)) for r in REFRESHES},
+        },
     }
 
 
@@ -313,6 +357,10 @@ def summary_table(report: Mapping[str, Any]) -> str:
     lines.append(f"sync wall {report['sync_wall_seconds']:.1f}s over {report['batches']} batches"
                  f" (blocks {report['first_block']}..{report['last_block']}),"
                  f" instrumentation {report['instrumentation_seconds']:.1f}s")
+    deferred = report.get("deferred_refreshes")
+    if deferred is not None:
+        lines.append(f"deferred refreshes, after the sync: {deferred['wall_seconds']:.1f}s wall")
+        lines += [f"  {r:<{width - 2}}  {s:>9.2f}" for r, s in deferred["seconds"].items()]
     lines.append("rows read:")
     for p in PROCESSORS:
         read = report["rows_read"][p]
@@ -328,12 +376,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--first-block", required=True, type=int)
     parser.add_argument("--last-block", required=True, type=int)
     parser.add_argument("--sync-seconds", required=True, type=float, help="the timed run's wall time")
+    parser.add_argument("--deferred-log", type=Path, help="run_deferred_rollup_refreshes()'s output")
+    parser.add_argument("--deferred-seconds", type=float, help="that call's wall time")
     args = parser.parse_args(argv)
+    if (args.deferred_log is None) != (args.deferred_seconds is None):
+        parser.error("--deferred-log and --deferred-seconds go together")
     try:
         with args.log.open(encoding="utf-8", errors="replace") as log:
             timings, counts = parse_log(log)
+        deferred = None
+        if args.deferred_log is not None:
+            with args.deferred_log.open(encoding="utf-8", errors="replace") as log:
+                deferred = parse_deferred_log(log)
         report = build_report(timings, counts, first_block=args.first_block, last_block=args.last_block,
-                              sync_seconds=args.sync_seconds)
+                              sync_seconds=args.sync_seconds, deferred=deferred,
+                              deferred_seconds=args.deferred_seconds)
     except (OSError, TimingsError) as exc:
         print(f"no report: {exc}", file=sys.stderr)
         return 1

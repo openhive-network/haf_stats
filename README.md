@@ -197,6 +197,16 @@ from-zero sync does not scale linearly from it. The one-time rollup backfills th
 `install_app.sh` step 8 runs on an already-synced node are also unmeasured at mainnet
 scale (see the comment there).
 
+**The period, monthly and retention rollups are empty during massive sync.** Outside it they
+are refreshed whenever a batch crosses a 1200-block boundary; in massive sync each processor
+records the earliest day it would have refreshed from instead
+(`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
+refresh once from that day, before processing its blocks. `install_app.sh` does the same over a
+context already past massive sync. A sync stopped while still in massive sync (e.g.
+`--stop-at-block`) leaves them empty until
+`SELECT haf_stats_app.run_deferred_rollup_refreshes();` (as `haf_stats_owner`) or the first
+live batch. On the 1→5M range that one call took about 4 s.
+
 ## Quick Start (Development)
 
 **Prerequisites:** Docker, a pre-synced HAF `block_log` snapshot in `docker/blockchain/`.
