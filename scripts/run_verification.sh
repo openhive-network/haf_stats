@@ -57,7 +57,7 @@
 #        take locks and rewrite tables inside rolled-back transactions.
 #
 # Two connection modes:
-#   * TCP (CI):    --host/--port/--user connect straight to the DB over TCP. Used
+#   * TCP (CI):    --host/--port/--user[/--database] connect straight to the DB over TCP. Used
 #                  by the regression-test CI job against the cached test stack
 #                  (PostgreSQL reachable at docker:5432, PG_ACCESS=trust).
 #   * compose (default, local): no --host given -> run psql inside the running
@@ -78,14 +78,16 @@ MODE="compose"
 PG_HOST=""
 PG_PORT="5432"
 PG_USER="haf_admin"
+PG_DB="haf_block_log"
 
 for arg in "$@"; do
   case "$arg" in
     --host=*) require_flag_value "$arg"; PG_HOST="${arg#*=}"; MODE="tcp" ;;
     --port=*) require_flag_value "$arg"; PG_PORT="${arg#*=}" ;;
     --user=*) require_flag_value "$arg"; PG_USER="${arg#*=}" ;;
+    --database=*) require_flag_value "$arg"; PG_DB="${arg#*=}" ;;
     --help|-h)
-      echo "Usage: $0 [--host=H [--port=P] [--user=U]]"
+      echo "Usage: $0 [--host=H [--port=P] [--user=U] [--database=D]]"
       echo "  no args        run against docker-compose-test.yml's haf container (local)"
       echo "  --host=H ...    run over TCP against H:P as user U (CI)"
       exit 0 ;;
@@ -94,8 +96,8 @@ for arg in "$@"; do
 done
 
 if [[ "$MODE" == "tcp" ]]; then
-  DB="postgresql://${PG_USER}@${PG_HOST}:${PG_PORT}/haf_block_log"
-  echo "Verification mode: TCP (${PG_HOST}:${PG_PORT} user=${PG_USER})"
+  DB="postgresql://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}"
+  echo "Verification mode: TCP (${PG_HOST}:${PG_PORT} user=${PG_USER} database=${PG_DB})"
   run_sql_file() { psql "$DB" -v ON_ERROR_STOP=on -f "$1"; }
 else
   COMPOSE=(docker compose --env-file "${REPO_ROOT}/docker/.env" -f "${REPO_ROOT}/docker/docker-compose-test.yml")
@@ -114,7 +116,7 @@ run_sql_file tests/parity/mainnet_metrics_parity.sql
 echo "===== Guard 2/8: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
-  bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}"
+  bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}" --database="${PG_DB}"
 else
   # No host-side TCP into the local haf image — drive psql inside the container.
   "${COMPOSE[@]}" cp tests/regression/sql/00_schema.sql haf:/tmp/reg_00.sql

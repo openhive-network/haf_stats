@@ -89,7 +89,7 @@ BEGIN
     -- policy on hafd.contexts is written in.
     --
     -- Only ONE of the four arms below needs the install to have run: the
-    -- haf_admin -> haf_stats_owner edge, which comes from db/builtin_roles.sql:63.
+    -- haf_admin -> haf_stats_owner edge, which comes from db/builtin_roles.sql:89.
     -- tests/ci_setup.sql creates both app roles before the shim loads, so the others
     -- could have lived in the shim's own probe.
     --
@@ -101,7 +101,7 @@ BEGIN
     END IF;
     IF NOT hive.can_impersonate('haf_admin', 'haf_stats_owner') THEN
         RAISE EXCEPTION 'install: haf_admin cannot impersonate haf_stats_owner. '
-                        'db/builtin_roles.sql:63 grants that; without it uninstall_app.sh '
+                        'db/builtin_roles.sql:89 grants that; without it uninstall_app.sh '
                         'guard 2 refuses and the context can never be removed.';
     END IF;
     -- The arm that distinguishes can_impersonate from pg_has_role. postgres is a
@@ -120,18 +120,18 @@ BEGIN
                         'this predicate -- so it could rewind or drop the HAF context.';
     END IF;
 
-    -- db/builtin_roles.sql:86, the one hive.* EXECUTE grant this lane can actually
+    -- db/builtin_roles.sql:130, the one hive.* EXECUTE grant this lane can actually
     -- defend. haf_stats_user is NOINHERIT and belongs to no group, so the PUBLIC revoke
     -- in ci_haf_stub.sql leaves it with nothing unless :86 runs.
     --
     -- Its SIBLING AT :81 IS NOT DEFENDABLE, and saying so here is the point:
     -- haf_stats_owner inherits EXECUTE through hive_applications_group (ci_setup.sql
     -- creates hive_applications_owner_group IN ROLE hive_applications_group;
-    -- db/builtin_roles.sql:53-54 grants it to the owner), so deleting :81 changes
+    -- db/builtin_roles.sql:67-68 grants it to the owner), so deleting :127 changes
     -- nothing -- here OR on a node, where HAF grants the group too.
     IF NOT has_function_privilege('haf_stats_user', 'hive.is_instance_ready()', 'EXECUTE') THEN
         RAISE EXCEPTION 'install: haf_stats_user cannot EXECUTE hive.is_instance_ready(). '
-                        'db/builtin_roles.sql:86 grants that, and without it GET '
+                        'db/builtin_roles.sql:130 grants that, and without it GET '
                         '/sync-status answers 503 on a healthy node.';
     END IF;
 

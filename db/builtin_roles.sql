@@ -6,8 +6,10 @@ BEGIN
     -- when creating the HAF context and advancing the block pointer in main().
     -- A NOINHERIT owner fails context creation with "permission denied for table contexts".
     CREATE ROLE haf_stats_owner LOGIN INHERIT;
-  ELSE
-    -- Repair an earlier install that created the role as NOINHERIT.
+  ELSIF NOT (SELECT rolinherit FROM pg_roles WHERE rolname = 'haf_stats_owner') THEN
+    -- Repair an earlier install that created the role as NOINHERIT. Only then: an
+    -- installer that is a member of the app roles but not their admin (no CREATEROLE)
+    -- may not ALTER the role, and has nothing to repair when it is already INHERIT.
     ALTER ROLE haf_stats_owner INHERIT;
   END IF;
 
@@ -25,6 +27,13 @@ $$;
 -- refreshes the membership's inherit flag from the now-INHERIT role: PG16+ freezes that
 -- flag at GRANT time, so a membership first created while the role was NOINHERIT would
 -- otherwise stay non-inheriting on re-install. On a fresh install the REVOKE is a no-op.
+--
+-- Each edge is touched only when it is missing or does not inherit. An installer that is a
+-- member of the app roles but not their admin (no ADMIN option on the group, no CREATEROLE)
+-- may neither REVOKE nor GRANT them, and where the shared HAF provisioned the roles there is
+-- nothing to repair. pg_auth_members.inherit_option is PostgreSQL 16+; it is read through
+-- to_jsonb() so the block also runs on 14/15, where a membership inherits by the member's
+-- rolinherit, which the block above has just made INHERIT.
 --
 -- The whole set lives in one DO block because a DO block is a single statement, hence a
 -- single transaction, and scripts/common.sh runs psql without --single-transaction. As
@@ -49,18 +58,36 @@ BEGIN
     -- diagnostic further down never gets the chance to run - making that branch dead code.
     IF to_regrole('hive_applications_owner_group') IS NULL THEN
         RAISE WARNING 'hive_applications_owner_group does not exist - skipping the haf_stats_owner group membership. The block processor cannot write hafd.contexts and GET /sync-status will answer 503 until HAF is installed.';
-    ELSE
+    ELSIF NOT EXISTS (
+        SELECT FROM pg_auth_members AS a
+        WHERE a.roleid = 'hive_applications_owner_group'::regrole
+          AND a.member = 'haf_stats_owner'::regrole
+          AND COALESCE((to_jsonb(a) ->> 'inherit_option')::boolean, TRUE)
+    ) THEN
         EXECUTE 'REVOKE hive_applications_owner_group FROM haf_stats_owner';
         EXECUTE 'GRANT hive_applications_owner_group TO haf_stats_owner';
     END IF;
 
     -- haf_stats_user is readable by haf_stats_owner (owner inherits user perms). Same
     -- PG16+ inherit-flag freeze applies, so refresh this one too.
-    REVOKE haf_stats_user FROM haf_stats_owner;
-    GRANT haf_stats_user TO haf_stats_owner;
+    IF NOT EXISTS (
+        SELECT FROM pg_auth_members AS a
+        WHERE a.roleid = 'haf_stats_user'::regrole
+          AND a.member = 'haf_stats_owner'::regrole
+          AND COALESCE((to_jsonb(a) ->> 'inherit_option')::boolean, TRUE)
+    ) THEN
+        REVOKE haf_stats_user FROM haf_stats_owner;
+        GRANT haf_stats_user TO haf_stats_owner;
+    END IF;
 
     -- haf_admin (HAF superrole) owns haf_stats_owner
-    GRANT haf_stats_owner TO haf_admin;
+    IF NOT EXISTS (
+        SELECT FROM pg_auth_members AS a
+        WHERE a.roleid = 'haf_stats_owner'::regrole
+          AND a.member = 'haf_admin'::regrole
+    ) THEN
+        GRANT haf_stats_owner TO haf_admin;
+    END IF;
 END
 $$;
 
@@ -74,16 +101,51 @@ $$;
 -- way, which is the point of stating them explicitly; granted to the owner too. (HAF's
 -- own create_haf_app_role.sh does not grant that edge: its default group is
 -- hive_applications_owner_group, the OWNER's. An earlier revision said otherwise.)
-GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
-GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
-GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
-GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_owner;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO haf_stats_owner;
-GRANT USAGE ON SCHEMA hafd TO haf_stats_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_user;
-GRANT USAGE ON SCHEMA hive TO haf_stats_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_user;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO haf_stats_user;
+--
+-- Granted only by an installer that holds the schema's USAGE WITH GRANT OPTION: HAF's
+-- owner (haf_admin) or a superuser, as docker/docker-compose.yml's haf-stats-setup and
+-- every CI lane install. Any other installer can grant none of it -- PostgreSQL only warns for the
+-- objects it can read, and refuses outright (42501) the first hive function it cannot
+-- execute -- so it skips the grants and warns for each role left unable to read the
+-- schema. In a clone of the shared HAF the consumer installs; haf_stats_owner reads
+-- through hive_applications_owner_group there, haf_stats_user does not.
+DO $$
+DECLARE
+    _role text;
+    _schema text;
+    _unreadable bigint;
+BEGIN
+    IF has_schema_privilege('hafd', 'USAGE WITH GRANT OPTION') THEN
+        GRANT USAGE ON SCHEMA hafd TO haf_stats_owner;
+        GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_owner;
+        GRANT USAGE ON SCHEMA hafd TO haf_stats_user;
+        GRANT SELECT ON ALL TABLES IN SCHEMA hafd TO haf_stats_user;
+    END IF;
+    IF has_schema_privilege('hive', 'USAGE WITH GRANT OPTION') THEN
+        GRANT USAGE ON SCHEMA hive TO haf_stats_owner;
+        GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_owner;
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO haf_stats_owner;
+        GRANT USAGE ON SCHEMA hive TO haf_stats_user;
+        GRANT SELECT ON ALL TABLES IN SCHEMA hive TO haf_stats_user;
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA hive TO haf_stats_user;
+    END IF;
+
+    FOREACH _schema IN ARRAY ARRAY['hafd', 'hive'] LOOP
+        CONTINUE WHEN has_schema_privilege(_schema, 'USAGE WITH GRANT OPTION');
+        FOREACH _role IN ARRAY ARRAY['haf_stats_owner', 'haf_stats_user'] LOOP
+            SELECT count(*) INTO _unreadable
+            FROM pg_class AS c
+            WHERE c.relnamespace = _schema::regnamespace
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND NOT has_table_privilege(_role, c.oid, 'SELECT');
+            IF NOT has_schema_privilege(_role, _schema, 'USAGE') OR _unreadable > 0 THEN
+                RAISE WARNING '% cannot read schema % (USAGE: %, tables without SELECT: %), and % (the installing role) may not grant it: run db/builtin_roles.sql as the schema''s owner or a superuser.',
+                    _role, _schema, has_schema_privilege(_role, _schema, 'USAGE'), _unreadable, current_user;
+            END IF;
+        END LOOP;
+    END LOOP;
+END
+$$;
 
 -- Take the API role OUT of the HAF application groups. (#88)
 --
@@ -211,11 +273,22 @@ $$;
 -- refresh_top_accounts_alltime() held while it used TRUNCATE. It no longer takes a lock
 -- a reader waits for (#95).
 --
--- Set unconditionally, so a reinstall restores the shipped budget. Where PostgREST logs in
--- as haf_stats_user, ALTER ROLE haf_stats_user IN DATABASE <db> SET statement_timeout = ...
--- takes precedence over this and survives reinstall.
+-- Set on every install unless the role already carries it, so a reinstall restores the
+-- shipped budget, and an installer without CREATEROLE (which may not ALTER the role) passes
+-- where it is already in place. Where PostgREST logs in as haf_stats_user, ALTER ROLE
+-- haf_stats_user IN DATABASE <db> SET statement_timeout = ... takes precedence over this
+-- and survives reinstall.
 --
 -- Kept at the END of the file on purpose: tests/ci_install_verify.sql,
 -- tests/ci_haf_stub.sql and scripts/check_haf_drift.sh cite lines of this file by NUMBER,
 -- and inserting this beside the CREATE ROLE would re-point most of them.
-ALTER ROLE haf_stats_user SET statement_timeout = '30s';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT FROM pg_roles
+        WHERE rolname = 'haf_stats_user' AND 'statement_timeout=30s' = ANY(rolconfig)
+    ) THEN
+        ALTER ROLE haf_stats_user SET statement_timeout = '30s';
+    END IF;
+END
+$$;
