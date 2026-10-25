@@ -27,19 +27,21 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../scripts/arg_guard.sh"
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_USER="${POSTGRES_USER:-haf_admin}"
+POSTGRES_DB="haf_block_log"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --host=*) require_flag_value "$1"; POSTGRES_HOST="${1#*=}" ;;
         --port=*) require_flag_value "$1"; POSTGRES_PORT="${1#*=}" ;;
         --user=*) require_flag_value "$1"; POSTGRES_USER="${1#*=}" ;;
-        --help|-h) echo "Usage: $0 [--host=H] [--port=P] [--user=U]"; exit 0 ;;
+        --database=*) require_flag_value "$1"; POSTGRES_DB="${1#*=}" ;;
+        --help|-h) echo "Usage: $0 [--host=H] [--port=P] [--user=U] [--database=D]"; exit 0 ;;
         *) echo "ERROR: unknown option: $1"; exit 1 ;;
     esac
     shift
 done
 
-DB="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/haf_block_log"
+DB="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 PSQL=(psql "$DB" -v ON_ERROR_STOP=on)
 
 echo "=============================================="

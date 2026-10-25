@@ -35,10 +35,26 @@
 #                     verify, uninstall --force, verify-gone), replayed the same way;
 #                     install.xml per service
 #
+# CI's synced lane, over this run's copy-on-write clone of the shared 5M-block HAF
+# (haf_shared.clone_run_database on AIDEV_EXTERNAL_HAF_HOST:_PORT, as
+# haf_shared_consumer, which is a member of haf_stats_owner there):
+#   - sync            sync: scripts/install_app.sh into the clone, then the block
+#                     processing (haf_app_driver.py, as scripts/process_blocks.sh runs
+#                     it, as haf_stats_owner) to block 5,000,000
+#   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
+#                     PostgREST over the clone (anon role haf_stats_user); one junit
+#                     case per tavern test, pattern.xml
+#   - regression      regression-test: scripts/run_verification.sh over the clone
+#   - reinstall       reinstall-test: scripts/install_app.sh again; the three schemas'
+#                     definitions (.aidev/schema_snapshot.sql) unchanged, the synced
+#                     block unchanged, and both installs' privileges
+#                     (tests/privileges.sql) tests/expected_privileges.txt
+#
 # endpoint and install need the stack (.aidev/test-stack.compose.yml): its
 # `postgres` service is the one both CI compose files start. Each lane starts on a
 # freshly created haf_block_log with the app's roles dropped, as a fresh container
-# gives CI. Reports go to test-results/<suite>/.
+# gives CI. pattern, regression and reinstall need sync; the clone is dropped when
+# the script exits, pass or fail. Reports go to test-results/<suite>/.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -47,6 +63,14 @@ out="test-results/$suite"
 rm -rf "$out"; mkdir -p "$out"
 cases="$out/cases.tsv"; : > "$cases"
 py=/opt/venv/bin/python3
+
+STOP_AT_BLOCK=5000000
+# The shared HAF trusts haf_shared_consumer from the fleet LAN: no password.
+consumer_url="postgresql://haf_shared_consumer@${AIDEV_EXTERNAL_HAF_HOST:-}:${AIDEV_EXTERNAL_HAF_PORT:-5432}"
+clone=""; clone_id=""; clone_url=""; stage=""; synced=""
+# The script's own stderr, which a step's redirected output does not reach: where
+# the clone's name and its drop are reported.
+exec 3>&2
 
 status=0
 # record CASES_FILE NAME RC SECONDS LOG
@@ -215,6 +239,155 @@ install() {
     return "$rc"
 }
 
+# This run's own clone of the shared HAF, named after the suite, the time and a
+# random suffix so concurrent runs never share one.
+open_clone() {
+    [ -n "$clone" ] && return 0
+    if [ -z "${AIDEV_EXTERNAL_HAF_HOST:-}" ]; then
+        echo "AIDEV_EXTERNAL_HAF_HOST is unset: this step needs sandbox.external haf (provider haf/haf)"
+        return 1
+    fi
+    local run_id
+    run_id="haf-stats-$suite-$(date -u +%Y%m%d%H%M%S)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    clone="$(psql "$consumer_url/haf_shared" -X -v ON_ERROR_STOP=on -Atc "select haf_shared.clone_run_database('$run_id')")" || { clone=""; return 1; }
+    clone_id="$run_id"
+    clone_url="$consumer_url/$clone"
+    echo "== shared HAF clone $clone ($consumer_url)" | tee /dev/fd/3
+}
+
+drop_clone() {
+    [ -n "$clone" ] || return 0
+    if psql "$consumer_url/haf_shared" -X -v ON_ERROR_STOP=on -qAtc "select haf_shared.drop_run_database('$clone_id')"; then
+        echo "== dropped shared HAF clone $clone" >&3
+    else
+        echo "== could not drop shared HAF clone $clone; the provider reaps it after its TTL" >&3
+    fi
+}
+
+cleanup() {
+    drop_clone
+    if [ -n "$stage" ]; then rm -rf "$stage"; fi
+}
+trap cleanup EXIT
+
+cq() { psql "$clone_url" -X -v ON_ERROR_STOP=on "$@"; }
+
+# The installed sources with the db/version.sql the Dockerfile bakes (its 8-character
+# GIT_HASH), in a scratch directory so the tree stays clean.
+stage_sources() {
+    [ -n "$stage" ] && return 0
+    local hash
+    stage="$(mktemp -d)"
+    cp -r db endpoints scripts "$stage/" || return 1
+    hash="$(git rev-parse HEAD 2>/dev/null | cut -c1-8)"
+    printf "TRUNCATE haf_stats_app.app_version; INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('%s');\n" \
+        "${hash:-unspecified}" > "$stage/db/version.sql"
+}
+
+# As the consumer: the roles are the shared HAF's, and db/builtin_roles.sql leaves
+# them as it finds them when they already hold what it would set.
+clone_install() {
+    (cd "$stage" && POSTGRES_HOST="$AIDEV_EXTERNAL_HAF_HOST" POSTGRES_PORT="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
+        POSTGRES_USER=haf_shared_consumer POSTGRES_DB="$clone" bash scripts/install_app.sh)
+}
+
+current_block() {
+    cq -Atc "SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status"
+}
+
+# The runtime's python3 is /opt/venv's; psycopg2, which haf_app_driver.py needs, is
+# the system interpreter's.
+sync_blocks() {
+    local block
+    stage_sources && open_clone || return 1
+    # The consumer owns the clone; haf_stats_owner creates its schemas in it.
+    cq -c "GRANT CREATE ON DATABASE \"$clone\" TO haf_stats_owner" || return 1
+    clone_install || return 1
+    /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
+        --postgres-url="$clone_url?application_name=haf_stats_block_processing&options=-c%20role%3Dhaf_stats_owner" \
+        --stop-at-block="$STOP_AT_BLOCK" --startup-marker='' --server-messages=WARNING || return 1
+    block="$(current_block)" || return 1
+    echo "processed up to block $block"
+    [ "$block" -ge "$STOP_AT_BLOCK" ] || { echo "expected block $STOP_AT_BLOCK"; return 1; }
+    synced=yes
+}
+
+needs_sync() {
+    if [ -z "$synced" ]; then
+        echo "haf_stats is not synced: the sync step did not run or failed"
+        return 1
+    fi
+    "$@"
+}
+
+# docker/docker-compose-ci-test.yml's postgrest service, logging in as the consumer
+# (the clone's only login) instead of haf_stats_owner, and switching to the same anon
+# role.
+pattern_test() {
+    local port=13000 base pid rc=0 i
+    base="http://127.0.0.1:$port"
+    PGRST_DB_URI="$clone_url?options=-c%20statement_timeout%3D30s" PGRST_DB_SCHEMA=haf_stats_endpoints \
+        PGRST_DB_ANON_ROLE=haf_stats_user PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app \
+        PGRST_DB_POOL=20 PGRST_DB_POOL_ACQUISITION_TIMEOUT=10 \
+        PGRST_SERVER_HOST=127.0.0.1 PGRST_SERVER_PORT="$port" \
+        postgrest > "$out/postgrest.log" 2>&1 &
+    pid=$!
+    for i in $(seq 60); do
+        curl -fsS -o /dev/null "$base/rpc/get_version" && break
+        kill -0 "$pid" 2>/dev/null || { echo "postgrest exited; see $out/postgrest.log"; return 1; }
+        [ "$i" -lt 60 ] || { echo "postgrest did not answer in 60s"; kill "$pid"; return 1; }
+        sleep 1
+    done
+    # .gitlab-ci.yml's global REWRITER_URL: tavern resolves it while collecting the
+    # rewriter tests this run deselects.
+    API_URL="$base" REWRITER_URL="http://rewriter.invalid" PYTHONPATH=tests/tavern TAVERN_DIR=tests/tavern \
+        "$py" -m pytest tests/tavern -p no:cacheprovider -m "not negative and not synthetic" --tb=short -v \
+        --junitxml="$out/pattern.xml" -o junit_family=xunit1 || rc=$?
+    kill "$pid"; wait "$pid" 2>/dev/null
+    return "$rc"
+}
+
+regression_test() {
+    bash scripts/run_verification.sh --host="$AIDEV_EXTERNAL_HAF_HOST" --port="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
+        --user=haf_shared_consumer --database="$clone"
+}
+
+# tests/privileges.sql minus what differs only because the clone is not CI's HAF: the
+# consumer's own membership of haf_stats_owner, and haf_stats_app.refresh_rc_op_stats(),
+# which only a superuser can create (PL/Python is untrusted) and so is absent here.
+privileges_against_expected() {
+    local actual="$out/privileges-$1.txt"
+    cq -At -f tests/privileges.sql | grep -v '^membership haf_shared_consumer in ' > "$actual" || return 1
+    echo "$actual: $(wc -l < "$actual") objects"
+    if ! grep -q '^function haf_stats_app\.refresh_rc_op_stats()' "$actual"; then
+        grep -v '^function haf_stats_app\.refresh_rc_op_stats()' tests/expected_privileges.txt
+    else
+        cat tests/expected_privileges.txt
+    fi | diff -u - "$actual"
+}
+
+reinstall_test() {
+    local before after rc=0
+    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-before.txt" || return 1
+    echo "schema-before.txt: $(wc -l < "$out/schema-before.txt") lines"
+    [ "$(wc -l < "$out/schema-before.txt")" -ge 1000 ] || { echo "the schema snapshot is too short for an install to have succeeded"; return 1; }
+    privileges_against_expected first || rc=1
+    before="$(current_block)" || return 1
+    clone_install || return 1
+    echo "Second install exited 0."
+    after="$(current_block)" || return 1
+    echo "synced block before $before, after $after"
+    [ "$before" = "$after" ] || { echo "reinstalling over a synced schema moved its block"; rc=1; }
+    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-after.txt" || return 1
+    if diff -u "$out/schema-before.txt" "$out/schema-after.txt" > "$out/schema.diff"; then
+        echo "OK: the second install left the three schemas' definitions unchanged."
+    else
+        echo "FAIL: the second install changed the schema:"; head -200 "$out/schema.diff"; rc=1
+    fi
+    privileges_against_expected second || rc=1
+    return "$rc"
+}
+
 for s in "$@"; do
     case "$s" in
         shellcheck) step shellcheck run_shellcheck ;;
@@ -227,6 +400,10 @@ for s in "$@"; do
         stack-pins) step stack-pins stack_pins ;;
         endpoint) step endpoint endpoint ;;
         install) step install install ;;
+        sync) step sync sync_blocks ;;
+        pattern) step pattern needs_sync pattern_test ;;
+        regression) step regression needs_sync regression_test ;;
+        reinstall) step reinstall needs_sync reinstall_test ;;
         *) echo "unknown step: $s" >&2; exit 2 ;;
     esac
 done

@@ -64,8 +64,10 @@ sandbox:
 # Every step is one of .gitlab-ci.yml's jobs. quick: the lint stage (shell-lint,
 # ci-shell-lint, shell-tests, sql-lint, hadolint, compose-validate, openapi-drift)
 # plus the image pins. full and canary add CI's two stub lanes, endpoint-tests and
-# install-test. CI's synced lane (pattern-test, regression-test, reinstall-test over
-# a 5M-block replay) and the networked haf-drift jobs are not bound; see
+# install-test. CI's synced lane (.aidev/run-checks.sh's sync, pattern, regression and
+# reinstall, over a clone of the shared 5M-block HAF) is not bound yet: in that clone
+# haf_stats_user has no read on hafd or hive, which only the shared HAF can grant, so
+# the install fails there. The networked haf-drift jobs are not bound either; see
 # .aidev/README.md.
 verification:
   quick:
