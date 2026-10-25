@@ -1,0 +1,98 @@
+# Profile for hive/haf_stats, written by `aidev project scaffold` (#13561).
+#
+# Schema reference: docs/architecture/project-profile.md
+# Onboarding procedure: the `onboard-external-project` skill.
+# Guide: docs/operations/onboarding-an-external-project.md
+#
+# The generator writes a starting point, not a governed answer: every
+# binding below is the command a maintainer said this project runs, and it
+# is reviewed and edited like any other declaration.
+version: 2
+project: haf-stats
+
+gitlab:
+  host: "gitlab.syncad.com"
+  path: "hive/haf_stats"
+  id: 602
+
+# AIDEV integrates into its own branch and hands it off to develop by merge
+# request (`aidev handoff`: it opens the MR gated by the project CI), as in
+# hive/nft_tracker, hive/reputation_tracker and hive/balance_tracker. `stable` is
+# omitted, so `aidev release` never moves develop or main; develop -> main stays
+# the project's own process.
+branches:
+  integration: "aidev/integration"
+  handoff: "develop"
+
+# How this project's suites execute (#13892): one kind, stated once.
+environment:
+  kind: "container"
+  # Built by .aidev/runtime/build.sh from .aidev/runtime/Dockerfile (its only input).
+  image: "registry.gitlab.syncad.com/hive/haf_stats/aidev-tests@sha256:7e7a5984f0f25e43c3f70f08158dc310498895e4025ba5e9386ec42d0f9da1da"
+  inputs: [".aidev/runtime/Dockerfile"]
+
+issues:
+  intake_label: todo
+  taxonomy: ".aidev/labels.yaml"
+  decompose:
+    # `never` is where an external project starts: nothing marks work
+    # approved on this project's behalf until there is a track record.
+    auto_todo: never
+  # Reports about this project's work are filed against this project.
+  watcher_reports: self
+
+# The service stack the slots that run CI's stub lanes start (aidev#9890): the one
+# postgres:14-alpine both docker/docker-compose-ci.yml (endpoint-tests) and
+# docker/docker-compose-ci-install.yml (install-test) start, named `postgres` as
+# there. Those lanes write a mock hafd schema and create the app's roles, which the
+# shared 5M-block HAF's consumer cannot do, so this project does not use
+# sandbox.external. The runtime container joins the stack's network; the rest of
+# each lane runs inside it (.aidev/compose_lane.py), so no haf_stats image is built.
+# Slots that only lint say `stack: false`. See .aidev/README.md.
+sandbox:
+  compose: .aidev/test-stack.compose.yml
+  # One idle PostgreSQL; nothing replayed.
+  resource_class: light
+  services: [postgres]
+  readiness_timeout: 300
+
+# Verification slots. Each binding is what this project genuinely runs for
+# that slot — never one selection repeated under seven names, which makes
+# seven gates report on the same evidence while claiming to check seven
+# different things.
+#
+# Every step is one of .gitlab-ci.yml's jobs. quick: the lint stage (shell-lint,
+# ci-shell-lint, shell-tests, sql-lint, hadolint, compose-validate, openapi-drift)
+# plus the image pins. full and canary add CI's two stub lanes, endpoint-tests and
+# install-test. CI's synced lane (pattern-test, regression-test, reinstall-test over
+# a 5M-block replay) and the networked haf-drift jobs are not bound; see
+# .aidev/README.md.
+verification:
+  quick:
+    adapter: command
+    args: [".aidev/run-checks.sh", "quick", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins"]
+    stack: false
+    artifacts: ["test-results/quick/"]
+  full:
+    adapter: command
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install"]
+    artifacts: ["test-results/full/"]
+  baseline:
+    adapter: command
+    args: [".aidev/run-checks.sh", "baseline", "unit", "endpoint", "install"]
+    artifacts: ["test-results/baseline/"]
+  canary:
+    adapter: command
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install"]
+    artifacts: ["test-results/canary/"]
+  # There is no coverage measurement for SQL; `coverage` runs the stackless checks
+  # that read the candidate's code (AIDEV runs it in the post-implementation scan
+  # only). `static` and `system` are left unbound: AIDEV runs neither for a project.
+  coverage:
+    adapter: command
+    args: [".aidev/run-checks.sh", "coverage", "shellcheck", "unit", "sql-lint"]
+    stack: false
+    artifacts: ["test-results/coverage/"]
+
+# Capability grants for target-side code. Empty until this project needs one.
+capabilities: []
