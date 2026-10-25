@@ -212,6 +212,8 @@ SET enable_bitmapscan = 'off'
 AS $$
 DECLARE
     _block_time TIMESTAMP;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
     SELECT created_at INTO _block_time FROM hafd.blocks WHERE num = _last_block;
 
@@ -313,6 +315,9 @@ BEGIN
     -- per-block hot path to roughly hourly. Multi-block (catch-up / massive)
     -- ranges that span a boundary still refresh it.
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
+        -- Timed when haf_stats.processor_timings is on (db/process_block_range.sql).
+        _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+        IF _timed THEN _t := clock_timestamp(); END IF;
         PERFORM haf_stats_app.refresh_account_cohort_retention(
             _block_time,
             (
@@ -320,6 +325,7 @@ BEGIN
                 - INTERVAL '1 month'
             )::DATE
         );
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_account_cohort_retention', _first_block, _last_block, _t, '{}', 'process_account_cohorts'); END IF;
     END IF;
 END;
 $$;

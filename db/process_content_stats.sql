@@ -894,6 +894,8 @@ DECLARE
     _last_day DATE;
     _refresh_lo_block INT;
     _high_water INT;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
 BEGIN
 
 -- Recurrence guard for issue #42. Every counter below accumulates additively
@@ -1351,8 +1353,13 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
+    -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
+    _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+    IF _timed THEN _t := clock_timestamp(); END IF;
     PERFORM haf_stats_app.refresh_network_vote_periods(_first_day, _last_day);
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_vote_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
     PERFORM haf_stats_app.refresh_network_content_periods(_first_day, _last_day);
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_network_content_periods', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
 
     -- Engagement drain. Drains every boundary, same as the vote/content refreshes above and the
     -- staging set is emptied each time, so a boundary only re-aggregates the creation-days actually
@@ -1362,7 +1369,9 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     -- catch-up to spread the work, but a bulk replay-then-serve flow - e.g. sync to head then run
     -- the API - never produces the small LIVE batch that would trigger the deferred drain, leaving
     -- the rollup permanently empty, so the drain must run unconditionally.)
+    IF _timed THEN _t := clock_timestamp(); END IF;
     PERFORM haf_stats_app.refresh_engagement_touched();
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
 END IF;
 
 END;
