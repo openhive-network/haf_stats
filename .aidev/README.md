@@ -31,6 +31,10 @@ Every step is one of `.gitlab-ci.yml`'s jobs, run as that job runs it:
 | `stack-pins` | — | the images `.aidev/` runs stand in for the ones CI names: the stack's `postgres:<tag>` is the CI compose files' tag, the runtime image copies `docker/docker-compose-ci.yml`'s postgrest tag and is built `FROM` `Dockerfile.rewriter`'s base (reads only the tree) |
 | `endpoint` | endpoint-tests | `docker/docker-compose-ci.yml`: the mock `hafd` schema, the real processors over the fixtures, the parity and oracle checks, PostgREST, the shipped rewriter and `tavern -m 'negative or synthetic'` |
 | `install` | install-test | `docker/docker-compose-ci-install.yml`: the baseline install from `.baseline/`, upgrade, reset, install, seed repair, break-schema + install-again, install under a lock holder, verify, `uninstall_app --force`, verify-gone |
+| `sync` | sync | a clone of the shared 5M-block HAF for this run; `scripts/install_app.sh` into it, then the block processing (`haf_app_driver.py`, as `scripts/process_blocks.sh` runs it) to block 5,000,000 |
+| `pattern` | pattern-test | `tavern -m 'not negative and not synthetic'` (the exact mainnet values) against PostgREST over the clone, anon role `haf_stats_user`; one junit case per test in `pattern.xml` |
+| `regression` | regression-test | `scripts/run_verification.sh` over the clone |
+| `reinstall` | reinstall-test | `scripts/install_app.sh` again over the synced clone: the three schemas' definitions unchanged, the synced block unchanged, and each install's privileges (`tests/privileges.sql`) are `tests/expected_privileges.txt` |
 
 `endpoint` and `install` replay the compose file itself with
 `.aidev/compose_lane.py`, so a service added to either lane runs here too: a slot has
@@ -54,23 +58,57 @@ gives CI.
 |---|---|---|
 | quick | shellcheck, ci-shell-lint, unit, sql-lint, hadolint, compose-validate, openapi-drift, stack-pins | no |
 | coverage | shellcheck, unit, sql-lint | no |
-| full, canary | quick's plus endpoint, install | yes |
+| full, canary | quick's plus endpoint, install, sync, pattern, regression, reinstall | yes, and the shared HAF |
 | baseline | unit, endpoint, install | yes |
 
 `static` and `system` are unbound: AIDEV runs neither for a project.
 
+### The synced lane
+
+`sync`, `pattern`, `regression` and `reinstall` are CI's synced lane over a
+copy-on-write clone of AIDEV's shared 5M-block HAF (`sandbox.external` provider
+`haf/haf`, `haf_shared.clone_run_database`), dropped when the script exits. CI installs
+and syncs as `haf_admin`; here everything runs as `haf_shared_consumer`, the clone's
+only login, which hive/haf's `.aidev/shared-haf/app-roles/haf_stats.sql` makes a member
+of `haf_stats_owner` (haf#391). That is why `db/builtin_roles.sql` touches a role,
+membership or role setting only when it lacks what the file sets, and grants
+`hafd`/`hive` only as a role holding their grant option: the consumer may do neither.
+Where it differs from CI:
+
+- the block processing runs `haf_app_driver.py` as `haf_stats_owner` with
+  `--stop-at-block=5000000`, not the `haf-stats-process` container; the
+  block-processing healthcheck and the rewriter request in CI's `sync` are not run;
+- PostgREST logs in as the consumer, not `haf_stats_owner`, and switches to the same
+  anon role;
+- `reinstall` compares a catalog snapshot (`.aidev/schema_snapshot.sql`), not
+  `pg_dump --schema-only`: the runtime's pg_dump is older than the shared HAF's
+  server, which it refuses. It leaves out the consumer's own membership of
+  `haf_stats_owner`, and `haf_stats_app.refresh_rc_op_stats()` when the install could
+  not create it (PL/Python is untrusted: only a superuser may);
+- `regression` runs as the consumer, which reads `hafd.contexts` through
+  `hive_applications_owner_group`.
+
+**Bound in `full` and `canary`.** In the clone `haf_stats_user` is in no HAF group,
+and the consumer holds no grant option on `hafd` or `hive`, so `db/builtin_roles.sql`
+cannot grant it its reads there. The shared HAF's clone template grants them instead
+(haf#392): `USAGE` on `hafd` and `hive`, `SELECT` on their tables and `EXECUTE` on
+`hive`'s functions, as `db/builtin_roles.sql` does as `haf_admin`. Without them the
+install stops at its `GET /sync-status` assertion (`hive.is_instance_ready()` as
+`haf_stats_user`) and every endpoint that reads `hafd` answers 42501; a
+`db/builtin_roles.sql` "cannot read schema" warning in `sync.log` is that
+case. The profile's `sandbox.external` names the provider, which publishes its
+endpoint in `AIDEV_EXTERNAL_HAF_HOST`/`_PORT`, and `full`'s and `canary`'s `timeout:`
+is sized from the recorded runs in `project.yaml`'s comment. To run the lane by hand,
+with the provider's endpoint (`api_v1.shared_service_endpoints` on central):
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w \
+    -e AIDEV_EXTERNAL_HAF_HOST=<host> -e AIDEV_EXTERNAL_HAF_PORT=<port> "$image" \
+    .aidev/run-checks.sh synced sync pattern regression reinstall
+```
+
 ### Not bound
 
-- **The synced lane** — `pattern-test` (the tavern tests not marked `negative` or
-  `synthetic`: exact mainnet values), `regression-test` (`scripts/run_verification.sh`)
-  and `reinstall-test` (schema-dump identity and `tests/expected_privileges.txt` after
-  a second install). They run over CI's 5M-block replay with haf_stats installed and
-  synced as `haf_admin`. AIDEV's shared 5M-block HAF is reached as a consumer role
-  that may not create roles or grant `hive_applications_owner_group`, which
-  `db/builtin_roles.sql` does on every install, and it has no haf_stats roles. Until
-  both change, those lanes are CI's alone: a change to block processing or to a
-  mainnet-valued endpoint is judged by them on the handoff merge request, not by
-  AIDEV's gates.
 - **haf-drift, haf-drift-develop** — they fetch hive/haf over the network.
 
 New exact-value tavern patterns (the synced lane's) cannot be produced by AIDEV: it

@@ -346,7 +346,7 @@ if fetch "authorization.sql"; then
     need "${C}POLICY${S}sp_applications_delete_hive_context${S}ON${S}hafd\.contexts${S}FOR${S}DELETE" \
         "scripts/uninstall_app.sh reasons about exactly this policy."
     need "^${S}REVOKE${S}EXECUTE${S}ON${S}ALL${S}FUNCTIONS${S}IN${S}SCHEMA${S}hive${S}FROM${S}PUBLIC${B}" \
-        "tests/ci_haf_stub.sql reproduces it; it is what makes db/builtin_roles.sql:86 falsifiable in CI."
+        "tests/ci_haf_stub.sql reproduces it; it is what makes db/builtin_roles.sql:130 falsifiable in CI."
     need "^${S}GRANT${S}EXECUTE${S}ON${S}ALL${S}FUNCTIONS${S}IN${S}SCHEMA${S}hive${S}TO.*hive_applications_group${B}" \
         "The paired grant. The REVOKE alone is the half that cannot break anything."
 else

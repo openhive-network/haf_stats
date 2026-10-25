@@ -35,7 +35,7 @@
 -- Roles HAF provides
 --
 -- ci_setup.sql creates the app's own roles and the two hive_applications groups, but not
--- haf_admin -- HAF's superrole, which db/builtin_roles.sql:63 grants haf_stats_owner to.
+-- haf_admin -- HAF's superrole, which db/builtin_roles.sql:89 grants haf_stats_owner to.
 -- On a real node HAF has already created it, so the dependency is invisible to every lane
 -- that runs against one.
 --
@@ -580,15 +580,15 @@ $$;
 -- The node's own ACL for the functions haf_stats actually calls is explicit, not PUBLIC:
 --   hive.is_instance_ready  -> haf_admin=X, hive_applications_group=X, haf_maintainer=X,
 --                              haf_stats_owner=X, haf_stats_user=X
--- i.e. db/builtin_roles.sql:81 and :86 have both run there and are visible in pg_proc.proacl.
+-- i.e. db/builtin_roles.sql:127 and :130 have both run there and are visible in pg_proc.proacl.
 --
--- WHAT THIS DOES AND DOES NOT BUY. It makes db/builtin_roles.sql:86 falsifiable:
+-- WHAT THIS DOES AND DOES NOT BUY. It makes db/builtin_roles.sql:130 falsifiable:
 -- haf_stats_user is NOINHERIT and in no group, so without :86 it has no EXECUTE at all, and
 -- install_app.sh's `SET ROLE haf_stats_user; ... hive.is_instance_ready()` step fails the
 -- install. tests/ci_install_verify.sql asserts it directly as well.
 --
 -- It does NOT make :81 falsifiable. haf_stats_owner inherits EXECUTE through
--- hive_applications_group via the GRANT below, so deleting :81 changes nothing here --
+-- hive_applications_group via the GRANT below, so deleting :127 changes nothing here --
 -- and nothing on a node either, where HAF issues the same group grant. :81 is
 -- belt-and-braces, and no assertion can defend a grant that nothing needs.
 --
@@ -597,7 +597,7 @@ $$;
 -- testapi's was, carries
 --   haf_stats_user  rolinherit = t, LOGIN, and a DIRECT member of hive_applications_group
 -- The #88 installer removes the group edge, after which only the INHERIT flag still
--- differs. db/builtin_roles.sql:15 creates it LOGIN NOINHERIT and never grants that group,
+-- differs. db/builtin_roles.sql:17 creates it LOGIN NOINHERIT and never grants that group,
 -- so this lane models a FRESH install, or any node whose role that file created.
 -- Consequence for :86: load-bearing in the state this lane models -- and on a node with the
 -- 9a77508 role too, once the group edge is gone. It was redundant there only while the group supplied EXECUTE.
@@ -673,7 +673,7 @@ BEGIN
     -- the sequence above exercises (the policies it guards are not enforced for the
     -- superuser loading this file: postgres owns hafd.contexts and RLS there is ENABLE,
     -- not FORCE). The haf_admin -> haf_stats_owner membership arm lives in
-    -- tests/ci_install_verify.sql because that GRANT is db/builtin_roles.sql:63's, i.e.
+    -- tests/ci_install_verify.sql because that GRANT is db/builtin_roles.sql:89's, i.e.
     -- the install's. The roles themselves already exist here -- ci_setup.sql creates them
     -- before this file loads.
     IF NOT hive.can_impersonate('haf_admin', 'haf_admin') THEN
