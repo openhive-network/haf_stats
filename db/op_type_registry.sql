@@ -112,9 +112,9 @@ AS $fn$
     FROM (
         VALUES
         -- Resolved by NAME into locals. expected_id is NULL: the id is never assumed.
-        ('hive::protocol::author_reward_operation',              NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::author_reward_operation',              NULL::INT, 'db/process_financial.sql, db/process_block_range.sql, endpoints/endpoint_schema.sql'),
         ('hive::protocol::comment_benefactor_reward_operation',  NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
-        ('hive::protocol::curation_reward_operation',            NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
+        ('hive::protocol::curation_reward_operation',            NULL::INT, 'db/process_financial.sql, db/process_block_range.sql, endpoints/endpoint_schema.sql'),
         ('hive::protocol::claim_reward_balance_operation',       NULL::INT, 'db/process_financial.sql'),
         ('hive::protocol::interest_operation',                   NULL::INT, 'db/process_financial.sql, db/process_block_range.sql'),
         ('hive::protocol::transfer_to_savings_operation',        NULL::INT, 'db/process_financial.sql'),
@@ -140,7 +140,7 @@ AS $fn$
         ('hive::protocol::comment_operation',                    1,
             'db/process_block_range.sql, db/process_content_stats.sql, db/process_content_cohorts.sql (id 1)'),
         ('hive::protocol::transfer_operation',                   2,
-            'db/process_financial.sql (by name), db/process_block_range.sql (id 2)'),
+            'db/process_financial.sql, endpoints/endpoint_schema.sql (by name), db/process_block_range.sql (id 2)'),
         ('hive::protocol::delete_comment_operation',             17,
             'db/process_content_stats.sql (id 17, in IN (17, 73))'),
         ('hive::protocol::custom_json_operation',                18,

@@ -7,9 +7,8 @@
 # its DDL or waits to, so any such line here is a guard that is wrongly TRUE.
 #
 # tests/ci_lock_holder.sql catches a wrongly-TRUE guard too, but only on the statements that take
-# ACCESS EXCLUSIVE. The DELETE (ROW EXCLUSIVE) and the VALIDATE (SHARE UPDATE EXCLUSIVE) queue no
-# reader, so the holder never sees them -- and a DELETE guard stuck at TRUE would rescan
-# account_financial_daily on every install.
+# ACCESS EXCLUSIVE. A guarded statement taking a weaker lock queues no reader, so the holder never
+# sees it -- and one stuck at TRUE would still rerun on every install.
 set -uo pipefail
 
 log="$(mktemp)"

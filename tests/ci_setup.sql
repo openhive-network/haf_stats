@@ -667,13 +667,13 @@ INSERT INTO haf_stats_app.app_config (swagger_base_url) VALUES ('/ci-base-url');
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
-    category TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+    op_type_id SMALLINT NOT NULL,
+    is_outgoing BOOLEAN NOT NULL,
     hive_nai BIGINT NOT NULL DEFAULT 0,
     hbd_nai BIGINT NOT NULL DEFAULT 0,
     vests_nai BIGINT NOT NULL DEFAULT 0,
     op_count INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (account_id, day, category, direction)
+    PRIMARY KEY (account_id, day, op_type_id, is_outgoing)
 );
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.custom_json_app_registry (

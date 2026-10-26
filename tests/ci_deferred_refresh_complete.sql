@@ -5,8 +5,55 @@
 --
 -- The rebuild runs in a transaction that is rolled back, so the rollups are left as the
 -- deferred refresh wrote them for the steps after this one.
+--
+-- The deferred refresh also pruned the presence sets it was the last to need
+-- (prune_content_presence, db/process_content_stats.sql): network_voter_daily keeps the oldest
+-- week or month the next batch's refresh can touch, network_author_daily that or the 181-day
+-- cohort window, whichever is older. That is checked first. A from-genesis rebuild can then
+-- restate unique voters/authors only for the periods those sets still cover in full, so the two
+-- rollups that count them have their unique counts compared from the voter floor on (the
+-- months before it were restated during the sync, as the sets were pruned).
 
 SET ROLE haf_stats_owner;
+
+CREATE TEMP TABLE presence_floor AS
+SELECT
+    LEAST(DATE_TRUNC('week', lo.day), DATE_TRUNC('month', lo.day))::DATE AS voters,
+    LEAST(LEAST(DATE_TRUNC('week', lo.day), DATE_TRUNC('month', lo.day))::DATE, head.day - 181) AS authors
+FROM (SELECT MAX(s.last_processed_block) AS block FROM haf_stats_app.app_status AS s) AS last
+CROSS JOIN LATERAL (
+    SELECT b.created_at::DATE AS day FROM hafd.blocks AS b WHERE b.num = GREATEST((last.block / 1200) * 1200, 1)
+) AS lo
+CROSS JOIN LATERAL (
+    SELECT b.created_at::DATE AS day FROM hafd.blocks AS b WHERE b.num = last.block
+) AS head;
+
+DO $pruned$
+DECLARE
+    _f presence_floor%ROWTYPE;
+BEGIN
+    SELECT * INTO _f FROM presence_floor;
+    IF _f.voters IS NULL THEN
+        RAISE EXCEPTION 'cannot compute the presence-set floors from the last processed block';
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.network_voter_daily WHERE day < _f.voters) THEN
+        RAISE EXCEPTION 'network_voter_daily still holds rows before % (oldest %): the deferred refresh did not prune it',
+            _f.voters, (SELECT MIN(day) FROM haf_stats_backend.network_voter_daily);
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.network_author_daily WHERE day < _f.authors) THEN
+        RAISE EXCEPTION 'network_author_daily still holds rows before % (oldest %): the deferred refresh did not prune it',
+            _f.authors, (SELECT MIN(day) FROM haf_stats_backend.network_author_daily);
+    END IF;
+    -- The author floor may predate the chain (it does at 5M blocks), so its kept rows are
+    -- looked for up to the voter floor rather than on the floor itself.
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_backend.network_voter_daily WHERE day = _f.voters)
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_backend.network_author_daily WHERE day BETWEEN _f.authors AND _f.voters) THEN
+        RAISE EXCEPTION 'the presence sets lost rows at or after their floors (voters from %, authors from %): pruned too far',
+            _f.voters, _f.authors;
+    END IF;
+    RAISE NOTICE 'presence sets pruned: network_voter_daily from %, network_author_daily from %', _f.voters, _f.authors;
+END
+$pruned$;
 
 DO $cleared$
 BEGIN
@@ -26,11 +73,23 @@ CREATE TEMP TABLE deferred_rollup_md5 (
     md5 TEXT
 );
 
+-- Whole rows, except the unique counts of the periods before the voter floor (see the header):
+-- those rows are compared on their additive columns only.
 CREATE FUNCTION pg_temp.rollup_md5(_rollup TEXT, OUT row_count BIGINT, OUT md5 TEXT)
 LANGUAGE plpgsql
 AS $fn$
+DECLARE
+    _floor CONSTANT DATE := (SELECT f.voters FROM presence_floor AS f);
+    _row TEXT := CASE _rollup
+        WHEN 'haf_stats_backend.network_vote_period_counts' THEN format(
+            'CASE WHEN t.period >= %L THEN t::TEXT ELSE ROW(t.period_type, t.period, t.upvotes, t.downvotes, t.unvotes, t.self_votes)::TEXT END', _floor)
+        WHEN 'haf_stats_backend.network_content_period_counts' THEN format(
+            'CASE WHEN t.period >= %L THEN t::TEXT ELSE ROW(t.period_type, t.period, t.posts, t.comments)::TEXT END', _floor)
+        ELSE 't::TEXT'
+    END;
 BEGIN
-    EXECUTE format('SELECT count(*), md5(string_agg(t::TEXT, ''|'' ORDER BY t::TEXT)) FROM %s AS t', _rollup)
+    EXECUTE format('SELECT count(*), md5(string_agg(r, ''|'' ORDER BY r)) FROM (SELECT %s AS r FROM %s AS t) AS x',
+                   _row, _rollup)
         INTO row_count, md5;
 END
 $fn$;

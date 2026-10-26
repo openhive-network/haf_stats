@@ -12,108 +12,48 @@ SET ROLE haf_stats_owner;
 -- income/expense vocabulary. Drop it (haf_stats issue #26).
 DROP TABLE IF EXISTS haf_stats_backend.op_financial_categories;
 
+-- category and direction as compact codes: the category is the op type's own id
+-- (hafd.operation_types.id -- every one used is pinned by name in db/op_type_registry.sql) and
+-- the direction a boolean. As TEXT they repeated in every row, in the primary key and in the
+-- leaderboard index, ~30 bytes a row. The endpoints still serve and accept the canonical names
+-- ('author_reward_operation', ...) and 'incoming'/'outgoing'.
+--
+-- A table in the earlier TEXT shape (category TEXT, direction TEXT -- including the
+-- income/expense vocabulary of 4a915dd) is dropped and created again empty: deployments are
+-- replayed, so no row is converted. The DDL runs through apply_schema_migration's lock-safe
+-- retries (db/schema_migration.sql) and only while the table still has a category column, so
+-- every later install takes no lock here. Repopulating it is scripts/rebuild_financial.sh, or
+-- a replay.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = to_regclass('haf_stats_backend.account_financial_daily')
+            AND a.attname = 'category'
+            AND NOT a.attisdropped
+    ) THEN
+        PERFORM haf_stats_app.apply_schema_migration(
+            TRUE,
+            'DROP TABLE haf_stats_backend.account_financial_daily',
+            'account_financial_daily: the TEXT category/direction shape, recreated empty in the compact shape'
+        );
+        RAISE WARNING 'haf_stats: account_financial_daily was in the old TEXT category/direction shape and has been recreated EMPTY. Stop the processor and run scripts/rebuild_financial.sh (or replay) to repopulate it; until then the financial endpoints report nothing for history.';
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_financial_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
-    category TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+    op_type_id SMALLINT NOT NULL,
+    is_outgoing BOOLEAN NOT NULL,
     hive_nai BIGINT NOT NULL DEFAULT 0,
     hbd_nai BIGINT NOT NULL DEFAULT 0,
     vests_nai BIGINT NOT NULL DEFAULT 0,
     op_count INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (account_id, day, category, direction)
-);
-
--- Migrate already-deployed tables created with the old income/expense CHECK:
--- CREATE TABLE IF NOT EXISTS is a no-op when the table exists, so the stale
--- constraint would otherwise reject the new incoming/outgoing inserts. NOT VALID
--- skips re-checking existing rows; the DELETE below removes them outright so the
--- constraint holds for everything that remains.
--- Guarded so a node that already carries the canonical constraint runs none of this (#96):
--- ALTER TABLE takes ACCESS EXCLUSIVE before it evaluates IF [NOT] EXISTS, ADD CONSTRAINT and
--- VALIDATE have no IF clause at all, and this table is named by get_network_top_accounts' four
--- reward and transfer metrics -- bounded ranges and the all-time default alike, since a skipped
--- UNION arm is still locked (#95). The only lock left on the normal path is the instant ACCESS
--- SHARE pg_get_constraintdef() takes below, which is a reader's own lock.
---
--- "Canonical" below means: the definition names exactly two literals, 'incoming' then
--- 'outgoing'. The DELETE and VALIDATE guards rely on that classification. No shipped revision
--- had any other shape containing those two literals (4a915dd: income/expense; since then: the
--- canonical IN list), so it holds for every deployment this upgrade can meet.
-SELECT haf_stats_app.apply_schema_migration(
-    EXISTS (
-        SELECT 1
-        FROM pg_constraint AS c
-        WHERE
-            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-            AND c.conname = 'account_financial_daily_direction_check'
-            AND (
-                pg_get_constraintdef(c.oid) NOT LIKE '%''incoming''%''outgoing''%'
-                -- ... and nothing else: a definition listing a third value contains both
-                -- literals too, and develop replaced such a constraint unconditionally.
-                OR (
-                    SELECT count(*)
-                    FROM regexp_matches(pg_get_constraintdef(c.oid), '''[^'']*''', 'g')
-                ) <> 2
-            )
-    ),
-    'ALTER TABLE haf_stats_backend.account_financial_daily
-     DROP CONSTRAINT IF EXISTS account_financial_daily_direction_check',
-    'account_financial_daily: drop the pre-canonical direction CHECK'
-);
-
-SELECT haf_stats_app.apply_schema_migration(
-    NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint AS c
-        WHERE
-            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-            AND c.conname = 'account_financial_daily_direction_check'
-    ),
-    'ALTER TABLE haf_stats_backend.account_financial_daily
-     ADD CONSTRAINT account_financial_daily_direction_check
-     CHECK (direction IN (''incoming'', ''outgoing'')) NOT VALID',
-    'account_financial_daily.direction CHECK'
-);
-
--- Production resumes block processing immediately after install, and the new
--- canonical-keyed upserts never overwrite rows written under the old
--- income/expense + display-name vocabulary. Delete those stale rows here so the
--- endpoint can never serve a mix of both vocabularies. Idempotent: a no-op once
--- only canonical rows remain (and on fresh installs). Historical coverage is
--- restored by scripts/rebuild_financial.sh (forward processing only fills new
--- blocks).
--- Guarded like the statements around it (#96): a VALIDATED canonical CHECK proves no row
--- violates it, so this scan has nothing to find. It takes only ROW EXCLUSIVE, which readers
--- pass, but it is a full scan of the largest table in this file on every install.
-SELECT haf_stats_app.apply_schema_migration(
-    NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint AS c
-        WHERE
-            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-            AND c.conname = 'account_financial_daily_direction_check'
-            AND c.convalidated
-    ),
-    'DELETE FROM haf_stats_backend.account_financial_daily
-     WHERE direction NOT IN (''incoming'', ''outgoing'')',
-    'account_financial_daily: delete pre-canonical rows'
-);
-
--- VALIDATE takes SHARE UPDATE EXCLUSIVE, which readers pass -- but it scans the whole table,
--- so skip it once the constraint is validated (#96).
-SELECT haf_stats_app.apply_schema_migration(
-    EXISTS (
-        SELECT 1
-        FROM pg_constraint AS c
-        WHERE
-            c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-            AND c.conname = 'account_financial_daily_direction_check'
-            AND NOT c.convalidated
-    ),
-    'ALTER TABLE haf_stats_backend.account_financial_daily
-     VALIDATE CONSTRAINT account_financial_daily_direction_check',
-    'account_financial_daily.direction CHECK: validate'
+    PRIMARY KEY (account_id, day, op_type_id, is_outgoing)
 );
 
 -- No (account_id, day) index: the primary key leads with exactly that, so it serves
@@ -132,8 +72,8 @@ DROP INDEX CONCURRENTLY IF EXISTS haf_stats_backend.idx_afd_account_day;
 -- account-wide category scan off this index too.
 -- Columns are a subset of the PK, so this index adds no new HOT-blocking
 -- attributes to the additive nai/op_count upserts.
-CREATE INDEX IF NOT EXISTS idx_afd_category_direction_day
-ON haf_stats_backend.account_financial_daily (category, direction, day);
+CREATE INDEX IF NOT EXISTS idx_afd_op_type_outgoing_day
+ON haf_stats_backend.account_financial_daily (op_type_id, is_outgoing, day);
 
 GRANT SELECT ON haf_stats_backend.account_financial_daily TO haf_stats_user;
 
@@ -182,7 +122,8 @@ GRANT SELECT ON haf_stats_backend.account_financial_monthly TO haf_stats_user;
 -- REPLACE semantics (DO UPDATE SET = EXCLUDED): each run fully restates the months it
 -- covers from daily, matching refresh_active_users_periods. Passing NULL _hi restates
 -- from _lo forward (one-time genesis backfill). Only the leaderboard categories are
--- materialised (see the table comment above).
+-- materialised (see the table comment above). This small rollup keeps the categories' names
+-- and the direction words, which the daily table stores as codes.
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_financial_monthly;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_financial_monthly(
     _lo DATE,
@@ -193,23 +134,41 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+    _author_reward_id   SMALLINT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation');
+    _curation_reward_id SMALLINT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation');
+    _transfer_id        SMALLINT := (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation');
 BEGIN
     INSERT INTO haf_stats_backend.account_financial_monthly
         (account_id, month, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
     SELECT
-        f.account_id,
-        DATE_TRUNC('month', f.day)::DATE,
-        f.category,
-        f.direction,
-        SUM(f.hive_nai)::BIGINT,
-        SUM(f.hbd_nai)::BIGINT,
-        SUM(f.vests_nai)::BIGINT,
-        SUM(f.op_count)::BIGINT
-    FROM haf_stats_backend.account_financial_daily f
-    WHERE f.category IN ('author_reward_operation', 'curation_reward_operation', 'transfer_operation')
-      AND f.day >= _month_lo
-      AND (_hi IS NULL OR f.day <= _hi)
-    GROUP BY f.account_id, DATE_TRUNC('month', f.day)::DATE, f.category, f.direction
+        m.account_id,
+        m.month,
+        CASE m.op_type_id
+            WHEN _author_reward_id   THEN 'author_reward_operation'
+            WHEN _curation_reward_id THEN 'curation_reward_operation'
+            ELSE 'transfer_operation'
+        END,
+        CASE WHEN m.is_outgoing THEN 'outgoing' ELSE 'incoming' END,
+        m.hive_nai,
+        m.hbd_nai,
+        m.vests_nai,
+        m.op_count
+    FROM (
+        SELECT
+            f.account_id,
+            DATE_TRUNC('month', f.day)::DATE AS month,
+            f.op_type_id,
+            f.is_outgoing,
+            SUM(f.hive_nai)::BIGINT  AS hive_nai,
+            SUM(f.hbd_nai)::BIGINT   AS hbd_nai,
+            SUM(f.vests_nai)::BIGINT AS vests_nai,
+            SUM(f.op_count)::BIGINT  AS op_count
+        FROM haf_stats_backend.account_financial_daily f
+        WHERE f.op_type_id IN (_author_reward_id, _curation_reward_id, _transfer_id)
+          AND f.day >= _month_lo
+          AND (_hi IS NULL OR f.day <= _hi)
+        GROUP BY f.account_id, DATE_TRUNC('month', f.day)::DATE, f.op_type_id, f.is_outgoing
+    ) m
     ON CONFLICT (account_id, month, category, direction) DO UPDATE SET
         hive_nai  = EXCLUDED.hive_nai,
         hbd_nai   = EXCLUDED.hbd_nai,
@@ -224,15 +183,16 @@ $$;
 -- Single pass: one INSERT … SELECT over the batch's staged financial ops
 -- (prepare_batch_ops, db/process_block_range.sql), joined to a VALUES list of impact rules
 -- that fans each op out into one row per affected account and direction, in the normalized
--- shape (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, 1), with 0 in
+-- shape (account_id, day, op_type_id, is_outgoing, hive_nai, hbd_nai, vests_nai, 1), with 0 in
 -- the amount columns it doesn't touch. The outer GROUP BY does all
 -- aggregation, collapsing every same-key row before the INSERT — so a single
 -- uniform ON CONFLICT can sum the three amount columns, and the
 -- "ON CONFLICT DO UPDATE cannot affect row a second time" error (which fires
 -- when two source rows target the same conflict key) cannot occur.
 --
--- category = canonical Hive operation type name; direction = incoming/outgoing
--- (aligns with the block explorer's ops vocabulary, haf_stats issue #26).
+-- category = the op's type (served as its canonical Hive operation type name, stored as its
+-- id); direction = incoming/outgoing (stored as is_outgoing). Aligns with the block explorer's
+-- ops vocabulary, haf_stats issue #26.
 -- Op-type ids are resolved once into locals from hafd.operation_types, whose
 -- names are fully qualified with the 'hive::protocol::' prefix (same lookup
 -- pattern as process_account_cohorts.sql / process_witness_blocks.sql; the
@@ -295,12 +255,12 @@ PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[
 ]);
 
 INSERT INTO haf_stats_backend.account_financial_daily
-    (account_id, day, category, direction, hive_nai, hbd_nai, vests_nai, op_count)
+    (account_id, day, op_type_id, is_outgoing, hive_nai, hbd_nai, vests_nai, op_count)
 SELECT
     account_id,
     day,
-    category,
-    direction,
+    op_type_id,
+    is_outgoing,
     SUM(hive_nai)::BIGINT,
     SUM(hbd_nai)::BIGINT,
     SUM(vests_nai)::BIGINT,
@@ -309,8 +269,8 @@ FROM (
     SELECT
         a.id AS account_id,
         o.day,
-        r.category,
-        r.direction,
+        o.op_type_id,
+        r.is_outgoing,
         COALESCE((o.body_value -> r.hive_field  ->> 'amount')::BIGINT, 0)
         + CASE WHEN (o.body_value -> r.split_field ->> 'nai') = '@@000000021'
                THEN COALESCE((o.body_value -> r.split_field ->> 'amount')::BIGINT, 0) ELSE 0 END AS hive_nai,
@@ -330,50 +290,50 @@ FROM (
         -- carries two of the three: transfers, savings and the internal market move HIVE or
         -- HBD, and a vesting withdrawal deposits HIVE or VESTS.
         -- 1. Author rewards: incoming for the post author.
-        (_author_reward_id,              'author_reward_operation',              'incoming', 'author',        'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
+        (_author_reward_id,              FALSE, 'author',        'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
         -- 2. Comment benefactor rewards: incoming for the benefactor.
-        (_comment_benefactor_reward_id,  'comment_benefactor_reward_operation',  'incoming', 'benefactor',    'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
+        (_comment_benefactor_reward_id,  FALSE, 'benefactor',    'hive_payout',  'hbd_payout', 'vesting_payout', NULL),
         -- 3. Curation rewards: incoming for the curator (VESTS only).
-        (_curation_reward_id,            'curation_reward_operation',            'incoming', 'curator',       NULL,           NULL,         'reward',         NULL),
+        (_curation_reward_id,            FALSE, 'curator',       NULL,           NULL,         'reward',         NULL),
         -- 4. Claim reward balance: incoming for the claiming account.
-        (_claim_reward_balance_id,       'claim_reward_balance_operation',       'incoming', 'account',       'reward_hive',  'reward_hbd', 'reward_vests',   NULL),
+        (_claim_reward_balance_id,       FALSE, 'account',       'reward_hive',  'reward_hbd', 'reward_vests',   NULL),
         -- 5. HBD savings interest: incoming for the account owner (HBD only).
-        (_interest_id,                   'interest_operation',                   'incoming', 'owner',         NULL,           'interest',   NULL,             NULL),
+        (_interest_id,                   FALSE, 'owner',         NULL,           'interest',   NULL,             NULL),
         -- 6-7. Transfers: outgoing for the sender, incoming for the receiver.
-        (_transfer_id,                   'transfer_operation',                   'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
-        (_transfer_id,                   'transfer_operation',                   'incoming', 'to',            NULL,           NULL,         NULL,             'amount'),
+        (_transfer_id,                   TRUE,  'from',          NULL,           NULL,         NULL,             'amount'),
+        (_transfer_id,                   FALSE, 'to',            NULL,           NULL,         NULL,             'amount'),
         -- 8. Transfer to savings: outgoing for the sender.
-        (_transfer_to_savings_id,        'transfer_to_savings_operation',        'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
+        (_transfer_to_savings_id,        TRUE,  'from',          NULL,           NULL,         NULL,             'amount'),
         -- 9. Transfer from savings (the request): outgoing for the sender.
-        (_transfer_from_savings_id,      'transfer_from_savings_operation',      'outgoing', 'from',          NULL,           NULL,         NULL,             'amount'),
+        (_transfer_from_savings_id,      TRUE,  'from',          NULL,           NULL,         NULL,             'amount'),
         -- 10. Fill transfer from savings: incoming for the receiver.
-        (_fill_transfer_from_savings_id, 'fill_transfer_from_savings_operation', 'incoming', 'to',            NULL,           NULL,         NULL,             'amount'),
+        (_fill_transfer_from_savings_id, FALSE, 'to',            NULL,           NULL,         NULL,             'amount'),
         -- 11. Power up (transfer_to_vesting): outgoing for the initiator (HIVE spent).
-        (_transfer_to_vesting_id,        'transfer_to_vesting_operation',        'outgoing', 'from',          'amount',       NULL,         NULL,             NULL),
+        (_transfer_to_vesting_id,        TRUE,  'from',          'amount',       NULL,         NULL,             NULL),
         -- 12. Power down (fill_vesting_withdraw): incoming for the deposit recipient.
         -- `deposited` is credited to to_account (usually == from_account, but a
         -- withdrawal route can send it elsewhere) and may be HIVE (normal power-down)
         -- or VESTS (route that re-vests). `withdrawn` is the from_account's own VESTS
         -- leaving its vesting balance, not a value inflow, so it is not recorded here.
-        (_fill_vesting_withdraw_id,      'fill_vesting_withdraw_operation',      'incoming', 'to_account',    NULL,           NULL,         NULL,             'deposited'),
+        (_fill_vesting_withdraw_id,      FALSE, 'to_account',    NULL,           NULL,         NULL,             'deposited'),
         -- 13. Witness pay (producer_reward): incoming for the block producer (VESTS only).
-        (_producer_reward_id,            'producer_reward_operation',            'incoming', 'producer',      NULL,           NULL,         'vesting_shares', NULL),
+        (_producer_reward_id,            FALSE, 'producer',      NULL,           NULL,         'vesting_shares', NULL),
         -- 14. Liquidity reward: incoming for the owner (HIVE only).
-        (_liquidity_reward_id,           'liquidity_reward_operation',           'incoming', 'owner',         'payout',       NULL,         NULL,             NULL),
+        (_liquidity_reward_id,           FALSE, 'owner',         'payout',       NULL,         NULL,             NULL),
         -- 15. Proposal pay (DHF): incoming for the proposal receiver (HBD only).
-        (_proposal_pay_id,               'proposal_pay_operation',               'incoming', 'receiver',      NULL,           'payment',    NULL,             NULL),
+        (_proposal_pay_id,               FALSE, 'receiver',      NULL,           'payment',    NULL,             NULL),
         -- 16-19. Fill order: each owner pays one side and receives the other.
-        (_fill_order_id,                 'fill_order_operation',                 'outgoing', 'current_owner', NULL,           NULL,         NULL,             'current_pays'),
-        (_fill_order_id,                 'fill_order_operation',                 'incoming', 'current_owner', NULL,           NULL,         NULL,             'open_pays'),
-        (_fill_order_id,                 'fill_order_operation',                 'outgoing', 'open_owner',    NULL,           NULL,         NULL,             'open_pays'),
-        (_fill_order_id,                 'fill_order_operation',                 'incoming', 'open_owner',    NULL,           NULL,         NULL,             'current_pays')
-    ) AS r (op_type_id, category, direction, party_field, hive_field, hbd_field, vests_field, split_field)
+        (_fill_order_id,                 TRUE,  'current_owner', NULL,           NULL,         NULL,             'current_pays'),
+        (_fill_order_id,                 FALSE, 'current_owner', NULL,           NULL,         NULL,             'open_pays'),
+        (_fill_order_id,                 TRUE,  'open_owner',    NULL,           NULL,         NULL,             'open_pays'),
+        (_fill_order_id,                 FALSE, 'open_owner',    NULL,           NULL,         NULL,             'current_pays')
+    ) AS r (op_type_id, is_outgoing, party_field, hive_field, hbd_field, vests_field, split_field)
         ON r.op_type_id = o.op_type_id
     JOIN hafd.accounts a ON a.name = (o.body_value ->> r.party_field)
 
 ) impacts
-GROUP BY account_id, day, category, direction
-ON CONFLICT (account_id, day, category, direction) DO UPDATE SET
+GROUP BY account_id, day, op_type_id, is_outgoing
+ON CONFLICT (account_id, day, op_type_id, is_outgoing) DO UPDATE SET
     hive_nai  = account_financial_daily.hive_nai  + EXCLUDED.hive_nai,
     hbd_nai   = account_financial_daily.hbd_nai   + EXCLUDED.hbd_nai,
     vests_nai = account_financial_daily.vests_nai + EXCLUDED.vests_nai,

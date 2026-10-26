@@ -12,16 +12,19 @@ SET ROLE haf_stats_owner;
 --
 -- "Created content again" means a new post OR comment create, not an edit. The
 -- processor reuses haf_stats_backend.network_author_daily, which is maintained by
--- process_content_stats.sql from the canonical comment_registry create-vs-edit
--- classifier (find_comment hit = edit, miss = create). Reusing that table keeps
--- this feature aligned with get_network_content_volume and avoids duplicating the
--- chain's comment_operation classification here.
+-- process_content_stats.sql from the deployment's create-vs-edit classification
+-- (the comment_registry replay, or hivemind's creations -- see "Content source"
+-- there). Reusing that table keeps this feature aligned with
+-- get_network_content_volume and avoids duplicating the classification here. That
+-- table keeps only the cohort window (181 days) before the batch being processed
+-- (prune_content_presence), which is all Step 2 below reads.
 --
 -- The first root post itself is found directly from comment_operation where
 -- parent_author = ''. In forward block processing, the first time an account
 -- appears with a root post is necessarily the account's first root-post create;
 -- an edit would require that (author, permlink) to already exist from an earlier
--- operation.
+-- operation. So it needs no create-vs-edit state and is the same on either
+-- content source.
 --
 -- Retention windows are day-granular because network_author_daily is day-grain:
 -- another create on the same calendar day as the first post is intentionally not

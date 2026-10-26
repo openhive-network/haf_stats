@@ -3421,20 +3421,34 @@ BEGIN
             MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
+    -- The table stores the category as its op type id and the direction as is_outgoing; the
+    -- response names them as it always has, mapped once per aggregated row, and is ordered by
+    -- those names exactly as before.
     RETURN QUERY
     SELECT
-        TO_CHAR(DATE_TRUNC("granularity", afd.day), 'YYYY-MM-DD') AS period,
-        afd.category,
-        afd.direction,
-        SUM(afd.hive_nai)::BIGINT,
-        SUM(afd.hbd_nai)::BIGINT,
-        SUM(afd.vests_nai)::BIGINT,
-        SUM(afd.op_count)::INT
-    FROM haf_stats_backend.account_financial_daily afd
-    JOIN hafd.accounts ha ON ha.id = afd.account_id
-    WHERE ha.name  = "account"
-      AND afd.day BETWEEN _from AND _to
-    GROUP BY 1, 2, 3
+        g.period,
+        replace(ot.name, 'hive::protocol::', '')::TEXT AS category,
+        CASE WHEN g.is_outgoing THEN 'outgoing' ELSE 'incoming' END::TEXT AS direction,
+        g.hive_nai,
+        g.hbd_nai,
+        g.vests_nai,
+        g.op_count
+    FROM (
+        SELECT
+            TO_CHAR(DATE_TRUNC("granularity", afd.day), 'YYYY-MM-DD') AS period,
+            afd.op_type_id,
+            afd.is_outgoing,
+            SUM(afd.hive_nai)::BIGINT  AS hive_nai,
+            SUM(afd.hbd_nai)::BIGINT   AS hbd_nai,
+            SUM(afd.vests_nai)::BIGINT AS vests_nai,
+            SUM(afd.op_count)::INT     AS op_count
+        FROM haf_stats_backend.account_financial_daily afd
+        JOIN hafd.accounts ha ON ha.id = afd.account_id
+        WHERE ha.name  = "account"
+          AND afd.day BETWEEN _from AND _to
+        GROUP BY 1, 2, 3
+    ) g
+    JOIN hafd.operation_types ot ON ot.id = g.op_type_id
     ORDER BY 1, 2, 3;
 END;
 $$;
@@ -3541,6 +3555,9 @@ DECLARE
     _from DATE;
     _to DATE;
     _account_id INT;
+    -- account_financial_daily keys its category by op type id: resolved once per request.
+    _author_reward_id CONSTANT SMALLINT := (
+        SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation');
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -3588,8 +3605,8 @@ BEGIN
         FROM haf_stats_backend.account_financial_daily afd
         WHERE afd.account_id = _account_id
           AND afd.day BETWEEN _from AND _to
-          AND afd.category = 'author_reward_operation'
-          AND afd.direction = 'incoming'
+          AND afd.op_type_id = _author_reward_id
+          AND NOT afd.is_outgoing
         GROUP BY 1
     )
     SELECT
@@ -7304,6 +7321,13 @@ DECLARE
     _to DATE;
     _category TEXT;
     _direction TEXT;
+    -- account_financial_daily stores the category as its op type id and the direction as
+    -- is_outgoing (the monthly and all-time rollups keep the names): the request's category
+    -- and direction are mapped to those once, here, not per row.
+    _category_id SMALLINT;
+    _outgoing BOOLEAN;
+    _transfer_id CONSTANT SMALLINT := (
+        SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::transfer_operation');
     _balance_rel TEXT;
     -- Window decomposition for the daily/monthly hybrid (issue #37): full interior
     -- months are read from the *_monthly rollups; the partial leading/trailing months
@@ -7417,12 +7441,16 @@ BEGIN
     IF _use_fast THEN
     -- ===================== fast paths (unchanged, pre-#39) =====================
     -- Reward + transfer metrics share account_financial_daily; the
-    -- (category, direction, day) index makes each branch a targeted range scan.
+    -- (op_type_id, is_outgoing, day) index makes each branch a targeted range scan.
     -- Accounts are resolved AFTER aggregation + LIMIT (top N names only).
     IF "metric" IN ('author_rewards', 'curation_rewards') THEN
         _category := CASE "metric"
             WHEN 'author_rewards' THEN 'author_reward_operation'
             ELSE 'curation_reward_operation'
+        END;
+        _category_id := CASE "metric"
+            WHEN 'author_rewards' THEN (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation')
+            ELSE (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation')
         END;
 
         RETURN QUERY
@@ -7467,12 +7495,12 @@ BEGIN
                     UNION ALL
                     SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
                     FROM haf_stats_backend.account_financial_daily f
-                    WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
+                    WHERE NOT _alltime AND f.op_type_id = _category_id AND NOT f.is_outgoing
                       AND f.day BETWEEN _lead_from AND _lead_to
                     UNION ALL
                     SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
                     FROM haf_stats_backend.account_financial_daily f
-                    WHERE NOT _alltime AND f.category = _category AND f.direction = 'incoming'
+                    WHERE NOT _alltime AND f.op_type_id = _category_id AND NOT f.is_outgoing
                       AND f.day BETWEEN _trail_from AND _trail_to
                 ) s
                 GROUP BY s.account_id
@@ -7498,6 +7526,7 @@ BEGIN
             WHEN 'transfer_volume_in' THEN 'incoming'
             ELSE 'outgoing'
         END;
+        _outgoing := _direction = 'outgoing';
 
         RETURN QUERY
         -- Transfers carry HIVE or HBD (never VESTS); HIVE is the native unit and
@@ -7531,12 +7560,12 @@ BEGIN
                     UNION ALL
                     SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
                     FROM haf_stats_backend.account_financial_daily f
-                    WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
+                    WHERE NOT _alltime AND f.op_type_id = _transfer_id AND f.is_outgoing = _outgoing
                       AND f.day BETWEEN _lead_from AND _lead_to
                     UNION ALL
                     SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
                     FROM haf_stats_backend.account_financial_daily f
-                    WHERE NOT _alltime AND f.category = 'transfer_operation' AND f.direction = _direction
+                    WHERE NOT _alltime AND f.op_type_id = _transfer_id AND f.is_outgoing = _outgoing
                       AND f.day BETWEEN _trail_from AND _trail_to
                 ) s
                 GROUP BY s.account_id
@@ -7686,6 +7715,10 @@ BEGIN
             WHEN 'author_rewards' THEN 'author_reward_operation'
             ELSE 'curation_reward_operation'
         END;
+        _category_id := CASE "metric"
+            WHEN 'author_rewards' THEN (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation')
+            ELSE (SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::curation_reward_operation')
+        END;
         _pop_select := format($pop$
             SELECT a.account_id, a.hive_nai AS hive, a.hbd_nai AS hbd, a.vests_nai AS vests, a.op_count AS ops
               FROM haf_stats_backend.account_financial_alltime a
@@ -7701,15 +7734,15 @@ BEGIN
                 UNION ALL
                 SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
                   FROM haf_stats_backend.account_financial_daily f
-                 WHERE NOT %1$L::boolean AND f.category = %2$L AND f.direction = 'incoming'
+                 WHERE NOT %1$L::boolean AND f.op_type_id = %9$L::smallint AND NOT f.is_outgoing
                    AND f.day BETWEEN %5$L AND %6$L
                 UNION ALL
                 SELECT f.account_id, f.hive_nai, f.hbd_nai, f.vests_nai, f.op_count
                   FROM haf_stats_backend.account_financial_daily f
-                 WHERE NOT %1$L::boolean AND f.category = %2$L AND f.direction = 'incoming'
+                 WHERE NOT %1$L::boolean AND f.op_type_id = %9$L::smallint AND NOT f.is_outgoing
                    AND f.day BETWEEN %7$L AND %8$L
               ) s GROUP BY s.account_id
-        $pop$, _alltime, _category, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to);
+        $pop$, _alltime, _category, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to, _category_id);
 
     ELSIF "metric" IN ('transfer_volume_in', 'transfer_volume_out') THEN
         _direction := CASE "metric"
@@ -7731,15 +7764,16 @@ BEGIN
                 UNION ALL
                 SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
                   FROM haf_stats_backend.account_financial_daily f
-                 WHERE NOT %1$L::boolean AND f.category = 'transfer_operation' AND f.direction = %2$L
+                 WHERE NOT %1$L::boolean AND f.op_type_id = %9$L::smallint AND f.is_outgoing = %10$L::boolean
                    AND f.day BETWEEN %5$L AND %6$L
                 UNION ALL
                 SELECT f.account_id, f.hive_nai, f.hbd_nai, f.op_count
                   FROM haf_stats_backend.account_financial_daily f
-                 WHERE NOT %1$L::boolean AND f.category = 'transfer_operation' AND f.direction = %2$L
+                 WHERE NOT %1$L::boolean AND f.op_type_id = %9$L::smallint AND f.is_outgoing = %10$L::boolean
                    AND f.day BETWEEN %7$L AND %8$L
               ) s GROUP BY s.account_id
-        $pop$, _alltime, _direction, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to);
+        $pop$, _alltime, _direction, _mm_from, _mm_to, _lead_from, _lead_to, _trail_from, _trail_to,
+            _transfer_id, _direction = 'outgoing');
 
     ELSIF "metric" = 'transaction_count' THEN
         _pop_select := format($pop$
