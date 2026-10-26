@@ -253,7 +253,7 @@ def _services() -> dict:
 
 
 @pytest.mark.parametrize("path", _executed_files(), ids=lambda p: p.name)
-def test_every_executed_alter_table_is_lock_guarded(path: Path):
+def test_every_executed_alter_table_is_lock_guarded(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     found = ["%s:%d (%s)" % (path.name, _line(text, pos), why) for pos, why in _unguarded(text)]
     assert not found, (
@@ -263,7 +263,7 @@ def test_every_executed_alter_table_is_lock_guarded(path: Path):
     )
 
 
-def test_install_app_runs_no_alter_table_inline():
+def test_install_app_runs_no_alter_table_inline() -> None:
     inline = [line.strip() for line in _install_lines() if ALTER.search(line)]
     assert not inline, (
         "install_app.sh runs ALTER TABLE inline, where no scan of db/ can see it (#96). Put it in "
@@ -271,7 +271,7 @@ def test_install_app_runs_no_alter_table_inline():
     )
 
 
-def test_the_install_order_parser_sees_every_file():
+def test_the_install_order_parser_sees_every_file() -> None:
     """A file loaded in a spelling RUN_SQL does not match would go unscanned and unordered."""
     seen = set(_names(_install_order())) | {p.name for p in _installed_sql_files()}
     missed = sorted({m.group(1) for line in _install_lines() for m in SQL_NAME.finditer(line)} - seen)
@@ -281,7 +281,7 @@ def test_the_install_order_parser_sees_every_file():
     )
 
 
-def test_the_guard_is_defined_before_any_caller_in_install_app():
+def test_the_guard_is_defined_before_any_caller_in_install_app() -> None:
     by_name = {p.name: p for p in _executed_files()}
     order = _names(_install_order())
     assert DEFINER in order, "%s is not run by install_app.sh" % DEFINER
@@ -296,7 +296,7 @@ def test_the_guard_is_defined_before_any_caller_in_install_app():
     )
 
 
-def test_the_stub_lane_loads_the_guard_before_its_callers():
+def test_the_stub_lane_loads_the_guard_before_its_callers() -> None:
     """The endpoint-tests lane psql's db/ files directly, without db/haf_stats_app.sql.
 
     Leaving the definition out of that chain fails it with `function haf_stats_app.
@@ -317,7 +317,7 @@ def test_the_stub_lane_loads_the_guard_before_its_callers():
     )
 
 
-def test_every_guarded_call_runs_before_the_lock_holders_marker():
+def test_every_guarded_call_runs_before_the_lock_holders_marker() -> None:
     """tests/ci_lock_holder.sql stops watching when refresh_top_accounts_alltime() gets a new OID.
 
     That only means "past every migration" if the file that re-creates the function runs after
@@ -348,7 +348,7 @@ def test_every_guarded_call_runs_before_the_lock_holders_marker():
     )
 
 
-def test_the_lock_holder_watches_every_table_the_guarded_ddl_names():
+def test_the_lock_holder_watches_every_table_the_guarded_ddl_names() -> None:
     migrated = {table for _, _, table, _ in _calls()}
 
     locks = re.findall(r"\bLOCK\s+TABLE\s+([^;]*?)\s+IN\s+(\w+(?:\s+\w+)?)\s+MODE", _mask(HOLDER.read_text(encoding="utf-8")),
@@ -375,7 +375,7 @@ def test_the_lock_holder_watches_every_table_the_guarded_ddl_names():
     )
 
 
-def test_break_schema_and_verify_exercise_every_guarded_upgrade():
+def test_break_schema_and_verify_exercise_every_guarded_upgrade() -> None:
     """Without break-schema only comment_registry.community's DDL ever ran in CI. Keep it that way
     for every NEW upgrade too: each has to be undone before install-again and checked after it."""
     broken = re.sub(r"\s+", " ", _mask(BREAK.read_text(encoding="utf-8")))
@@ -420,7 +420,7 @@ def test_break_schema_and_verify_exercise_every_guarded_upgrade():
     assert not gaps, "\n  ".join(["guarded upgrades CI never runs:"] + gaps)
 
 
-def test_install_test_wires_the_runtime_checks():
+def test_install_test_wires_the_runtime_checks() -> None:
     """Parsed, not grepped: a comment saying `lock-holder:` satisfied the grep version, and a
     `service_started` condition in place of `service_completed_successfully` let the holder's
     verdict gate nothing."""
@@ -452,7 +452,7 @@ def test_install_test_wires_the_runtime_checks():
     assert "../tests/ci_install_no_upgrade.sh:/ci_install_no_upgrade.sh:ro" in svc["install-under-lock"]["volumes"]
 
 
-def test_the_no_upgrade_check_greps_for_what_the_helper_prints():
+def test_the_no_upgrade_check_greps_for_what_the_helper_prints() -> None:
     script = NO_UPGRADE.read_text(encoding="utf-8")
     grepped = re.findall(r"grep -F '([^']+)' \"\$log\"", script)
     assert len(grepped) == 1, "ci_install_no_upgrade.sh must grep its install log for the helper's prefix"
@@ -466,7 +466,7 @@ def test_the_no_upgrade_check_greps_for_what_the_helper_prints():
     )
 
 
-def test_the_scanner_reads_sql_the_way_psql_does():
+def test_the_scanner_reads_sql_the_way_psql_does() -> None:
     """Each case below was a wrong verdict in an earlier version of this file."""
     def flagged(sql: str) -> bool:
         return bool(_unguarded(sql))
