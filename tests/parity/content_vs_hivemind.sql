@@ -30,7 +30,8 @@
 --   block time, so a time window disagrees at day edges); haf_stats buckets by block time.
 --
 -- WHEN IT DOES NOT RUN, IT SAYS SO. A WARNING containing "NOT RUN" (exit status 0) when
--- hivemind is not in the live stage (massive sync drops the hive_posts indexes this uses
+-- haf_stats takes its content from hivemind (the comparison is then true by construction),
+-- when hivemind is not in the live stage (massive sync drops the hive_posts indexes this uses
 -- and advances its context head before its data) or an index is missing/invalid. An ERROR
 -- when hivemind_app exists but this role cannot read it or the two hafd.contexts rows (a
 -- missing haf_stats/hivemind_app context row reads the same), when a needed
@@ -117,6 +118,16 @@ BEGIN
     SELECT current_block_num INTO _hivemind_head FROM hafd.contexts WHERE name = 'hivemind_app';
     IF _haf_stats_head IS NULL OR _hivemind_head IS NULL THEN
         RAISE EXCEPTION 'content oracle: no haf_stats/hivemind_app row in hafd.contexts visible to role % (row-level security: needs hive_applications_group, so run it as haf_admin; or the app is not installed)', current_user;
+    END IF;
+
+    -- On a node whose haf_stats takes its creations FROM hivemind (db/process_content_stats.sql,
+    -- "Content source"), both sides are hivemind's rows and agree by construction: a pass here
+    -- would say nothing. Nested IFs: the function is only resolved where it exists.
+    IF to_regprocedure('haf_stats_app.content_source()') IS NOT NULL THEN
+        IF haf_stats_app.content_source() = 'hivemind' THEN
+            RAISE WARNING 'content oracle: NOT RUN - this node sources its content from hivemind (haf_stats_app.content_source()), so haf_stats'' posts and comments are hivemind''s own and agree by construction';
+            RETURN;
+        END IF;
     END IF;
 
     _stage := hive.get_current_stage_name('hivemind_app');

@@ -106,7 +106,7 @@ scripts/
                             Rebuilds network content-volume tables and per-account content
                             columns (repairs double-counts / stale post over-reporting) and
                             populates the community dimension on already-synced nodes
-  rebuild_financial.sh      Rebuilds account financial aggregates after category changes
+  rebuild_financial.sh      Rebuilds account financial aggregates after a shape or category change
   rebuild_network_custom_json.sh
                             Rebuilds network custom_json usage (network_custom_json_daily)
                             on already-synced nodes (forward-only otherwise)
@@ -163,6 +163,12 @@ decimal GB.
 | `account_financial_daily` | 29 GB | 108 M |
 | `comment_registry` | 28 GB | 133 M |
 | the other 30 tables | 30 GB | |
+
+These figures predate issue #110, which stores `account_financial_daily`'s category and
+direction as compact codes, lets a node with hivemind leave `comment_registry` empty (see
+[Content source](#content-source)) and prunes the processor-only `network_voter_daily` /
+`network_author_daily` to the window the processor still reads. Measured on a replay at
+block 44.8M that was ~11 GB of avoidable on-disk size (ZFS lz4); re-measure after a replay.
 
 For comparison, the app schemas on the same node:
 
@@ -319,8 +325,12 @@ after install, with the block processor stopped:
 ```
 
 It reads `network_author_daily`, so `get_network_content_volume` must already be
-installed with its history present. `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may
-be supplied as environment variables. Restart the processor after it completes.
+installed with its history present. The processor keeps only the last 181 days of that
+table (the cohort window), so for a rebuild reaching further back run
+`./scripts/rebuild_content_volume.sh` first, which restores its full history, and this
+script right after it, before the processor starts. `FROM_BLOCK`, `TO_BLOCK`, and
+`BATCH_SIZE` may be supplied as environment variables. Restart the processor after it
+completes.
 
 For a one-time full-history rebuild, raise `BATCH_SIZE` well above the `10000`
 default — content cohorts are heavy per block (a `comment_operation` scan plus a
@@ -332,12 +342,15 @@ rebuild's final refresh — run it as a maintenance window.
 
 ### Rebuilding financial aggregates
 
-The financial category/direction vocabulary changed in issue #26 (canonical
-op-type names + `incoming`/`outgoing`). On an already-populated deployment the old
-rows are keyed differently and are never overwritten, so they must be cleared and
-reprocessed. Stop the block processor first, re-run `install_app.sh` (it migrates
-and validates the direction CHECK, deletes legacy rows, and drops the legacy
-`op_financial_categories` table), then:
+`account_financial_daily` stores each row's category as its operation type id and its
+direction as a boolean (issue #110); the endpoints still serve and accept the canonical
+op-type names (`author_reward_operation`, ...) and `incoming`/`outgoing`. An install that
+finds the table in an earlier shape -- TEXT `category`/`direction` columns, whichever
+vocabulary they hold (issue #26 changed it) -- **drops it and creates it again, empty**,
+and says so with a warning: no row is converted. Until it is repopulated the financial
+endpoints, author rewards in `get_account_content_stats` and the bounded-range reward and
+transfer leaderboards report nothing for history. Stop the block processor first, run
+`install_app.sh`, then:
 
 ```bash
 ./scripts/rebuild_financial.sh
@@ -364,6 +377,15 @@ starts from a clean slate:
 ```bash
 ./scripts/rebuild_content_volume.sh
 ```
+
+It replays from the deployment's [content source](#content-source): the
+`comment_registry` replay, or hivemind's creations. `HAF_STATS_CONTENT_SOURCE=internal` or
+`=hivemind` switches the recorded source first, which is how an existing deployment changes
+source short of a replay; on the hivemind source the script refuses to start unless hivemind
+has already reached the app's last processed block. It also restores
+`network_author_daily`'s full history, which the processor otherwise keeps only for the
+cohort window: if the content cohorts need rebuilding too, run
+`rebuild_content_cohorts.sh` right after this one, before the processor starts.
 
 This same script also repairs a stale over-report in **`account_content_daily`**'s
 content columns (`get_account_content_stats`): before the create/edit dedup landed
@@ -981,6 +1003,63 @@ it sees no context row, and the app looks decades behind. Point such a check at
 check's container. haf_api_node's own haf_stats check calls `/sync-status` over HTTP and is
 unaffected. The group's `TRUNCATE` grant itself is HAF's —
 [hive/haf#348](https://gitlab.syncad.com/hive/haf/-/work_items/348).
+
+## Content source
+
+Counting posts and comments means telling a `comment_operation` that creates a comment from
+one that edits it, which only the chain's live-comment state can decide (a delete followed
+by the same author/permlink is a new creation). haf_stats has two ways to know, chosen once
+per deployment:
+
+* **`internal`** replays that state in `comment_registry` (the largest per-row table at head,
+  almost all of it the permlink key).
+* **`hivemind`** reads the creations hivemind already stores: `hivemind_app.hive_posts` has
+  one row per creation, a re-creation after delete included, with its block, depth, parent
+  and community. `comment_registry` then stays empty. Content volume, the account content
+  counts, community activity, unique authors, author retention and the engagement post set
+  all come out the same; `post_engagement`'s vote and reply counts still come from the
+  operations.
+
+`install_app.sh` decides and records it. With `--content-source=auto` (the default;
+`HAF_STATS_CONTENT_SOURCE` sets it too) a new deployment takes `hivemind` when the
+`hivemind_app` schema exists and `haf_stats_owner` can read the columns it needs, and
+`internal` otherwise; a deployment that already has a source keeps it, and one that processed
+blocks before the choice existed counts as `internal`. `--content-source=hivemind` or
+`=internal` forces it. The reads are granted by `db/builtin_roles.sql` -- `USAGE` on
+`hivemind_app` and `SELECT` on `hive_posts`, `hive_accounts`, `hive_permlink_data`,
+`hive_communities` and `hive_state`, to `haf_stats_owner` only -- when hivemind is installed
+and the installing role may grant them (its owner or a superuser). **A node that installs
+hivemind after haf_stats gets them by re-running `install_app.sh`.**
+
+The source is never switched per batch: blocks processed from hivemind leave
+`comment_registry` without their state, so the two cannot be mixed. Changing it on a
+deployment that has processed blocks is refused at install; do it with
+`HAF_STATS_CONTENT_SOURCE=<source> ./scripts/rebuild_content_volume.sh` (processor stopped)
+or a replay.
+
+On the hivemind source the processor never reads past hivemind: each content-stats batch
+ends at or below hivemind's context block (`hafd.contexts.current_block_num`, capped by its
+`hive_state.last_completed_block_num`), and while hivemind is behind -- or has dropped the
+`hive_posts` `block_num_created` index for its own massive sync -- the processor waits for
+it rather than falling back. A haf_stats replay alongside a hivemind replay therefore moves
+at hivemind's pace. `haf_stats.hivemind_wait_timeout` (seconds, a session setting on the
+processor's connection) turns a longer wait into an error; unset, it waits.
+
+**Known difference on the hivemind source.** hivemind's massive sync drops a re-created
+reply whose parent was also deleted and re-created in the same batch
+([hivemind#394](https://gitlab.syncad.com/hive/hivemind/-/issues/394)): on 52 days of
+2016–2021, up to 1.33% of a day's comments. A hivemind-sourced node inherits that -- those
+comments are missing from its counts, and their operations are counted as edits -- where
+the internal source matches hived's `post_count`. `tests/parity/content_vs_hivemind.sql`
+reports `NOT RUN` on such a node, since both sides are then hivemind's.
+
+`network_voter_daily` and `network_author_daily`, the sets the vote and content rollups
+count unique voters and authors from, are read only by the processor, which deletes what it
+can no longer reach: voters before the oldest week or month the next refresh can touch,
+authors before that or the 181-day cohort window. A full refresh of
+`network_vote_period_counts` / `network_content_period_counts` from genesis therefore cannot
+restate unique counts for pruned periods; `rebuild_content_volume.sh` restores the author
+set's history.
 
 ## Community Attribution
 

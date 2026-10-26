@@ -87,6 +87,9 @@ run_case 'massive sync is NOT RUN' 0 \
 run_case 'missing index is NOT RUN' 0 \
     'NOT RUN - hivemind_app.hive_posts lacks a valid' \
     'DROP INDEX hivemind_app.hive_posts_block_num_created_idx;'
+run_case 'hivemind-sourced node is NOT RUN' 0 \
+    'NOT RUN - this node sources its content from hivemind' \
+    "INSERT INTO haf_stats_app.content_source_config (source) VALUES ('hivemind');"
 # Wrong role -> an error naming the fix, not a skip.
 run_case 'role without hivemind access' 3 \
     'cannot read hive_posts/hive_accounts/hive_state; run it as haf_admin' \

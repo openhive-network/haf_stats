@@ -63,7 +63,7 @@ SQL_NAME = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_]+\.sql)\b")
 DOLQ = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 IDENT = re.compile(r"[A-Za-z0-9_$]")
 TABLE = r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*"
-DDL_TABLE = re.compile(r"^\s*(?:ALTER\s+TABLE|DELETE\s+FROM)\s+(%s)\b" % TABLE, re.IGNORECASE)
+DDL_TABLE = re.compile(r"^\s*(?:ALTER\s+TABLE|DELETE\s+FROM|DROP\s+TABLE)\s+(%s)\b" % TABLE, re.IGNORECASE)
 COMPOSE_INSTALL = ROOT / "docker" / "docker-compose-ci-install.yml"
 COMPOSE_STUB = ROOT / "docker" / "docker-compose-ci.yml"
 HOLDER = ROOT / "tests" / "ci_lock_holder.sql"
@@ -239,7 +239,8 @@ def _calls() -> list[tuple[str, int, str, str]]:
             ]
             assert len(ddl) == 1, (
                 "%s:%d: cannot tell which table this %s call migrates -- pass its DDL as ONE plain "
-                "'ALTER TABLE <schema.table> ...' or 'DELETE FROM <schema.table> ...' literal"
+                "'ALTER TABLE <schema.table> ...', 'DELETE FROM <schema.table> ...' or "
+                "'DROP TABLE <schema.table>' literal"
                 % (path.name, _line(text, s), GUARD)
             )
             calls.append((path.name, _line(text, s), DDL_TABLE.match(ddl[0]).group(1).lower(), ddl[0]))
@@ -403,6 +404,14 @@ def test_break_schema_and_verify_exercise_every_guarded_upgrade():
                     gaps.append("%s: ci_break_schema.sql does not %s CONSTRAINT %s" % (where, verb, name))
             if name not in verify_raw:
                 gaps.append("%s: ci_install_verify.sql does not check %s" % (where, name))
+        elif re.match(r"\s*DROP\s+TABLE\b", ddl, re.IGNORECASE):
+            # A table replaced by a new shape: break-schema must put the old shape back, and
+            # verify must look at the table the install recreated.
+            if not re.search(r"\bCREATE TABLE %s\b" % re.escape(table), broken, re.I):
+                gaps.append("%s: ci_break_schema.sql does not re-create %s in the shape the DROP replaces"
+                            % (where, table))
+            if table not in verify_raw:
+                gaps.append("%s: ci_install_verify.sql does not check %s" % (where, table))
         elif ddl.lstrip().upper().startswith("DELETE"):
             if not re.search(r"\bINSERT INTO %s\b" % re.escape(table), broken, re.I):
                 gaps.append("%s: ci_break_schema.sql writes no row for the DELETE on %s to remove" % (where, table))

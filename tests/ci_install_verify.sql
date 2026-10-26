@@ -310,11 +310,11 @@ $shim$;
 
 -- The upgrade branch of the guarded migrations actually ran. (#96)
 --
--- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: twelve columns
--- dropped, rc_estimated put back, the pre-canonical income/expense CHECK restored NOT VALID, and
--- one 'income' and one 'incoming' row written. Without break-schema only one of the 17 migration statements
--- (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or a catalog
--- test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
+-- tests/ci_break_schema.sql undid all 14 guarded upgrades before install-again: twelve columns
+-- dropped, rc_estimated put back, and account_financial_daily put back in its TEXT
+-- category/direction shape with one row. Without break-schema only one of the 14 migration
+-- statements (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or
+-- a catalog test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
 DO $upgraded$
 DECLARE
@@ -367,32 +367,28 @@ BEGIN
         RAISE EXCEPTION 'install: no dropped column on % - break-schema did not run against this database', _wrong;
     END IF;
 
-    SELECT pg_get_constraintdef(c.oid) INTO _def
-    FROM pg_constraint AS c
-    WHERE c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-      AND c.conname = 'account_financial_daily_direction_check'
-      AND c.convalidated;
-    IF _def IS NULL THEN
-        RAISE EXCEPTION 'install: account_financial_daily has no VALIDATED direction CHECK - the guarded constraint swap did not run';
+    -- account_financial_daily: break-schema put the TEXT category/direction shape back, with a
+    -- row in it; install-again must have dropped it and created the compact shape, empty.
+    SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ', ' ORDER BY a.attnum)
+    INTO _def
+    FROM pg_attribute AS a
+    WHERE a.attrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+      AND a.attnum > 0
+      AND NOT a.attisdropped;
+    IF _def IS DISTINCT FROM 'account_id integer, day date, op_type_id smallint, is_outgoing boolean, hive_nai bigint, hbd_nai bigint, vests_nai bigint, op_count integer' THEN
+        RAISE EXCEPTION 'install: account_financial_daily is not in the compact shape after install-again: %', _def;
     END IF;
-    IF _def NOT LIKE '%''incoming''%''outgoing''%' OR _def LIKE '%''income''%' THEN
-        RAISE EXCEPTION 'install: account_financial_daily still carries a pre-canonical direction CHECK: %', _def;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.account_financial_daily) THEN
+        RAISE EXCEPTION 'install: account_financial_daily still holds rows - the TEXT-shaped table break-schema wrote was not recreated';
     END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM haf_stats_backend.account_financial_daily
-        WHERE account_id = 900901 AND direction = 'income'
-    ) THEN
-        RAISE EXCEPTION 'install: the pre-canonical income row break-schema wrote is still there - the guarded DELETE did not run';
+    IF to_regclass('haf_stats_backend.idx_afd_op_type_outgoing_day') IS NULL THEN
+        RAISE EXCEPTION 'install: the recreated account_financial_daily lacks its leaderboard index idx_afd_op_type_outgoing_day';
     END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM haf_stats_backend.account_financial_daily
-        WHERE account_id = 900901 AND direction = 'incoming'
-    ) THEN
-        RAISE EXCEPTION 'install: the canonical incoming row break-schema wrote is gone - the guarded DELETE removed a row it must keep';
+    IF NOT has_table_privilege('haf_stats_user', 'haf_stats_backend.account_financial_daily', 'SELECT') THEN
+        RAISE EXCEPTION 'install: the recreated account_financial_daily is not readable by haf_stats_user';
     END IF;
 
-    RAISE NOTICE 'install verified: install-again re-applied all 17 guarded upgrades (12 columns back, rc_estimated gone, canonical CHECK validated, the income row deleted and the incoming row kept)';
+    RAISE NOTICE 'install verified: install-again re-applied all 14 guarded upgrades (12 columns back, rc_estimated gone, account_financial_daily recreated compact and empty)';
 END
 $upgraded$;
 

@@ -20,9 +20,18 @@
 #                       haf_stats_app is warned about and ignored, not refused
 #   --is_forking=FALSE  Accepted for compatibility with the upstream module template.
 #                       TRUE is warned about and ignored -- see below.
+#   --content-source=SRC
+#                       auto, internal or hivemind: where post/comment creations come
+#                       from (default: $HAF_STATS_CONTENT_SOURCE, else auto; see below)
 #   --help,-h,-?        Show this and exit                      # --- help-end ---
 #
 # ENVIRONMENT:
+#   HAF_STATS_CONTENT_SOURCE=auto|internal|hivemind
+#       The --content-source default (the flag wins). auto keeps the deployment's recorded
+#       source, and on a new one picks hivemind when hivemind_app is installed and readable,
+#       internal otherwise. Changing the source of a deployment that has processed blocks is
+#       refused: that takes scripts/rebuild_content_volume.sh or a replay (README, "Content
+#       source").
 #   HAF_STATS_SKIP_OP_TYPE_ASSERT=1
 #       Last resort. Downgrades the op-type assertion's fatal arms (steps 3d/8f) to a warning so
 #       an install can complete over a condition that would normally abort it. The check still
@@ -41,6 +50,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 SWAGGER_URL="localhost"
+CONTENT_SOURCE="${HAF_STATS_CONTENT_SOURCE:-auto}"
 
 # Off unless explicitly set to 1. Anything else (including "true") is treated as off, so a typo
 # fails safe - i.e. towards the assertion still being able to stop a bad install.
@@ -67,6 +77,7 @@ print_help() {
 for arg in "$@"; do
     case "$arg" in
         --swagger-url=*) require_flag_value "$arg"; SWAGGER_URL="${arg#*=}" ;;
+        --content-source=*) require_flag_value "$arg"; CONTENT_SOURCE="${arg#*=}" ;;
 
         # Matching balance_tracker, haf_block_explorer and hivesense, whose docker
         # entrypoints forward these. Without them the documented upstream operator form,
@@ -173,6 +184,15 @@ for arg in "$@"; do
     esac
 done
 
+case "${CONTENT_SOURCE}" in
+    auto|internal|hivemind) ;;
+    *)
+        log "ERROR: content source '${CONTENT_SOURCE}' is not one of auto, internal, hivemind"
+        log "       (from --content-source= or HAF_STATS_CONTENT_SOURCE)."
+        exit 2
+        ;;
+esac
+
 wait_for_postgres
 
 log "Installing haf_stats schema..."
@@ -256,6 +276,17 @@ run_sql_file "${SCRIPT_DIR}/../db/op_type_registry.sql"
 #     is about to replace - making the fix uninstallable. Step 8f re-runs it unscoped.
 log "Verifying op-type dependencies against hafd.operation_types..."
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.assert_op_types(FALSE, ${OP_TYPE_BYPASS}); RESET ROLE;"
+
+# 3e. Content source (db/process_content_stats.sql, "Content source"): decided here, once per
+#     deployment, and recorded; the processor never switches it per batch. After the gate above
+#     and before anything processes a block. On stdin with -v for the same reason as the
+#     swagger write below: the value travels out-of-band, never through the SQL text.
+log "Selecting the content source (requested: ${CONTENT_SOURCE})..."
+psql_cmd -v content_source="${CONTENT_SOURCE}" <<'SQL'
+    SET ROLE haf_stats_owner;
+    SELECT haf_stats_app.select_content_source(:'content_source');
+    RESET ROLE;
+SQL
 
 # 4. Seed lookup tables (DApp registry)
 run_sql_file "${SCRIPT_DIR}/../db/seed_data.sql"

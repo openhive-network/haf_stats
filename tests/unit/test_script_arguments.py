@@ -91,7 +91,7 @@ def test_install_help_lists_every_accepted_flag(bash, tmp_path):
     without this failing.
     """
     out = run(bash, tmp_path, INSTALL, "--help").stdout
-    for flag in ("--swagger-url", "--host", "--port", "--user", "--is_forking", "--help"):
+    for flag in ("--swagger-url", "--host", "--port", "--user", "--is_forking", "--content-source", "--help"):
         assert flag in out, f"{flag} missing from install_app.sh --help"
 
 
@@ -111,7 +111,7 @@ def test_help_does_not_run_off_the_end_of_the_file(bash, tmp_path):
     """
     out = run(bash, tmp_path, INSTALL, "--help").stdout
     assert "psql_cmd" not in out
-    assert out.count("\n") < 20
+    assert out.count("\n") < 25
 
 
 # --- rejections -------------------------------------------------------------------

@@ -292,3 +292,42 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Read access to hivemind for the hivemind content source (db/process_content_stats.sql,
+-- "Content source"): USAGE on hivemind_app and SELECT on exactly the tables that path reads.
+--
+-- Only where hivemind_app exists, and only by an installer that may grant it (its owner or a
+-- superuser) -- the same posture as the hafd/hive grants above; anyone else gets a WARNING and
+-- the install picks the internal source. To haf_stats_owner alone: the block processor is the
+-- only reader, and the PostgREST anon role has no use for it. A node that installs hivemind
+-- after haf_stats gets these by re-running scripts/install_app.sh.
+--
+-- Static statements, each guarded on its table: a GRANT whose object is built at run time is
+-- one tests/unit/test_privileges_pinned.py refuses to trust.
+DO $$
+BEGIN
+    IF to_regnamespace('hivemind_app') IS NULL THEN
+        RETURN;
+    END IF;
+    IF NOT has_schema_privilege('hivemind_app', 'USAGE WITH GRANT OPTION') THEN
+        RAISE WARNING 'hivemind_app exists, but % (the installing role) may not grant USAGE on it: the hivemind content source stays unavailable. Run scripts/install_app.sh as the schema''s owner or a superuser to enable it.', current_user;
+        RETURN;
+    END IF;
+    GRANT USAGE ON SCHEMA hivemind_app TO haf_stats_owner;
+    IF to_regclass('hivemind_app.hive_posts') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_posts TO haf_stats_owner;
+    END IF;
+    IF to_regclass('hivemind_app.hive_accounts') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_accounts TO haf_stats_owner;
+    END IF;
+    IF to_regclass('hivemind_app.hive_permlink_data') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_permlink_data TO haf_stats_owner;
+    END IF;
+    IF to_regclass('hivemind_app.hive_communities') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_communities TO haf_stats_owner;
+    END IF;
+    IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_state TO haf_stats_owner;
+    END IF;
+END
+$$;

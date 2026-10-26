@@ -11,8 +11,11 @@
 #
 # Reads haf_stats_backend.network_author_daily (the chain-exact created-content
 # set maintained by process_content_stats / get_network_content_volume), so that
-# feature must be installed with its history present before running this. Step 1
-# (first-post detection) reads hive.operations_view directly and does not need it.
+# feature must be installed with its history present before running this. The
+# processor keeps only the cohort window (181 days) of that table, so for a rebuild
+# reaching further back run scripts/rebuild_content_volume.sh first -- it restores the
+# full history -- and this right after it, with the processor still stopped. Step 1
+# (first-post detection) reads the comment operations directly and does not need it.
 #
 # Stop the haf_stats processor before running this script -- stop the haf-stats-process
 # container, which is the only thing that works under both the legacy loop and the HAF
