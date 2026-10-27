@@ -346,16 +346,18 @@ BEGIN
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
     WITH
     -- Presence set + per-account op counts: per-class rows plus the -1 ALL rollup
-    -- (every authored op). COUNT(DISTINCT op_id), not COUNT(*): get_required_authorities
-    -- can emit the same account under several roles for one op, and that is still one
-    -- operation for that account.
+    -- (every authored op). COUNT(*) counts operations: the shared table holds each
+    -- (op_id, account_id) once (its primary key), so an account that
+    -- get_required_authorities names under several roles of one op is still one row, and
+    -- within a group every row is a different op. A plain count lets the planner
+    -- hash-aggregate instead of sorting for a DISTINCT.
     membership AS (
-        SELECT day, op_class, account_id, COUNT(DISTINCT op_id) AS ops
+        SELECT day, op_class, account_id, COUNT(*) AS ops
         FROM haf_stats_batch_authored_ops
         WHERE op_class IS NOT NULL
         GROUP BY day, op_class, account_id
         UNION ALL
-        SELECT day, -1::SMALLINT, account_id, COUNT(DISTINCT op_id)
+        SELECT day, -1::SMALLINT, account_id, COUNT(*)
         FROM haf_stats_batch_authored_ops
         GROUP BY day, account_id
     ),
@@ -371,16 +373,22 @@ BEGIN
             ops = aud.ops + EXCLUDED.ops
         RETURNING 1
     ),
-    -- Operation volume: COUNT(DISTINCT op_id) per class plus the -1 ALL rollup. DISTINCT
-    -- collapses multisig fan-out so a multi-signer op counts as one operation.
-    op_counts AS (
-        SELECT day, op_class, COUNT(DISTINCT op_id) AS operations
+    -- One row per authored op, so a multi-signer op counts as one operation. An op's day and
+    -- op_class are its own, so DISTINCT over the three keeps exactly one row per op: one
+    -- DISTINCT the planner can hash, instead of two COUNT(DISTINCT op_id), each a sort.
+    batch_op AS MATERIALIZED (
+        SELECT DISTINCT day, op_class, op_id
         FROM haf_stats_batch_authored_ops
+    ),
+    -- Operation volume per class plus the -1 ALL rollup.
+    op_counts AS (
+        SELECT day, op_class, COUNT(*) AS operations
+        FROM batch_op
         WHERE op_class IS NOT NULL
         GROUP BY day, op_class
         UNION ALL
-        SELECT day, -1::SMALLINT, COUNT(DISTINCT op_id)
-        FROM haf_stats_batch_authored_ops
+        SELECT day, -1::SMALLINT, COUNT(*)
+        FROM batch_op
         GROUP BY day
     )
     INSERT INTO haf_stats_backend.active_user_ops_daily (day, op_class, operations)

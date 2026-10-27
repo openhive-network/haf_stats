@@ -72,6 +72,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_rollups.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_split_equality.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_active_users.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_custom_json_batch_equality.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql &&
         sh /ci_content_oracle.sh
@@ -94,6 +96,12 @@ services:
       # The single-op short cut of exact_rc_for_range / exact_rc_for_ops against the full split
       # they replaced, kept verbatim in the file.
       - ../tests/ci_exact_rc_split_equality.sql:/ci_exact_rc_split_equality.sql:ro
+      # The custom_json-era batch staging (prepare_batch_ops' full set, the authored ops' key,
+      # process_active_users' counts, the rollups' signers and exact RC) against the statements
+      # it replaced, kept verbatim in the file, plus mutation checks. Needs the real
+      # process_active_users, which nothing else in this lane loads.
+      - ../db/process_active_users.sql:/process_active_users.sql:ro
+      - ../tests/ci_custom_json_batch_equality.sql:/ci_custom_json_batch_equality.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.
