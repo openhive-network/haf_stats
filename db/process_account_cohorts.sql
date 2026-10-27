@@ -265,10 +265,20 @@ BEGIN
     -- half-open range [op_id(first,0), op_id(last+1,0))) once for both this processor
     -- and process_active_users.
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
-    WITH batch_authored AS MATERIALIZED (
-        -- Preserve the old retention grain: one row per account per op timestamp.
-        SELECT DISTINCT account_id, op_time
-        FROM haf_stats_batch_authored_ops
+    -- One member probe per distinct batch account, not per (account, op time): most of the
+    -- batch's authors are no member or a fully active one, and probing per op time repeated
+    -- each lookup for every op the account signed. The members left are few, so the batch's
+    -- ops are hash-joined to them. BOOL_OR over every op equals it over the distinct
+    -- (account, op time) pairs, so the flags are the same.
+    WITH open_members AS MATERIALIZED (
+        SELECT m.account_id, m.created_at
+        FROM (
+            SELECT DISTINCT account_id
+            FROM haf_stats_batch_authored_ops
+        ) b
+        JOIN haf_stats_backend.account_cohort_members m
+              ON m.account_id = b.account_id
+        WHERE NOT (m.active_7d AND m.active_30d AND m.active_90d)
     )
     UPDATE haf_stats_backend.account_cohort_members acm
     SET
@@ -287,11 +297,10 @@ BEGIN
             BOOL_OR(
                 ba.op_time >= m.created_at + INTERVAL '90 days'
             ) AS active_90d
-        FROM batch_authored ba
-        JOIN haf_stats_backend.account_cohort_members m
+        FROM haf_stats_batch_authored_ops ba
+        JOIN open_members m
               ON m.account_id = ba.account_id
-        WHERE NOT (m.active_7d AND m.active_30d AND m.active_90d)
-          AND ba.op_time >= m.created_at + INTERVAL '7 days'
+        WHERE ba.op_time >= m.created_at + INTERVAL '7 days'
           AND ba.op_time <  m.created_at + INTERVAL '180 days'
         GROUP BY m.account_id
     ) ra
