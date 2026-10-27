@@ -55,6 +55,12 @@
 #        skips; the stub lane runs it for real (tests/ci_content_oracle.sh). On a
 #        production node run that FILE on its own, not this script, whose other guards
 #        take locks and rewrite tables inside rolled-back transactions.
+#   9. tests/parity/authored_ops_signers.sql (issue #112)
+#        prepare_batch_authored_ops reads the signers of vote, comment, transfer and
+#        custom_json ops from their bodies rather than through
+#        hive.get_required_authorities. Runs it over windows of the replay and asserts
+#        its (op, account) pairs for those four types are exactly the ones
+#        hive.get_required_authorities gives. Rolled back; writes only temp tables.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user[/--database] connect straight to the DB over TCP. Used
@@ -110,10 +116,10 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/8: parity (independent in-DB re-derivation) ====="
+echo "===== Guard 1/9: parity (independent in-DB re-derivation) ====="
 run_sql_file tests/parity/mainnet_metrics_parity.sql
 
-echo "===== Guard 2/8: regression (vs external hived snapshot) ====="
+echo "===== Guard 2/9: regression (vs external hived snapshot) ====="
 if [[ "$MODE" == "tcp" ]]; then
   # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
   bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}" --database="${PG_DB}"
@@ -137,22 +143,25 @@ else
   fi
 fi
 
-echo "===== Guard 3/8: content-volume rebuild consistency (issue #42) ====="
+echo "===== Guard 3/9: content-volume rebuild consistency (issue #42) ====="
 run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 
-echo "===== Guard 4/8: community derivation vs hivemind (issue #47) ====="
+echo "===== Guard 4/9: community derivation vs hivemind (issue #47) ====="
 run_sql_file tests/parity/community_vs_hivemind.sql
 
-echo "===== Guard 5/8: interactions op-ceiling guard (issue #48) ====="
+echo "===== Guard 5/9: interactions op-ceiling guard (issue #48) ====="
 run_sql_file tests/parity/interactions_cap.sql
 
-echo "===== Guard 6/8: witness blocks rebuild consistency (issue #54) ====="
+echo "===== Guard 6/9: witness blocks rebuild consistency (issue #54) ====="
 run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
 
-echo "===== Guard 7/8: HAF context vs app_status parity (issue #55) ====="
+echo "===== Guard 7/9: HAF context vs app_status parity (issue #55) ====="
 run_sql_file tests/parity/context_vs_app_status.sql
 
-echo "===== Guard 8/8: post/comment counts vs hivemind (issues #42, #45, #63) ====="
+echo "===== Guard 8/9: post/comment counts vs hivemind (issues #42, #45, #63) ====="
 run_sql_file tests/parity/content_vs_hivemind.sql
 
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle) ====="
+echo "===== Guard 9/9: authored-ops signers vs hive.get_required_authorities (issue #112) ====="
+run_sql_file tests/parity/authored_ops_signers.sql
+
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle + authored-ops signers) ====="
