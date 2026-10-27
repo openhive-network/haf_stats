@@ -170,6 +170,14 @@ direction as compact codes, lets a node with hivemind leave `comment_registry` e
 `network_author_daily` to the window the processor still reads. Measured on a replay at
 block 44.8M that was ~11 GB of avoidable on-disk size (ZFS lz4); re-measure after a replay.
 
+They also predate issue #120, which keys `account_custom_json_daily` and
+`network_custom_json_daily` on HAF's `custom_json_type_id` (SMALLINT, `hafd.custom_json_types`)
+instead of the id text: ~13 bytes less per row, in the heap and again in the primary key. The
+install converts an existing node's tables in place, once, keeping their rows. The account table's
+rewrite holds its ACCESS EXCLUSIVE lock throughout and takes a while on a large node (~5 s per
+million rows measured, so ~45 min at the 561 M rows above, plus the I/O); the install says so
+before it starts, and an id with no `hafd.custom_json_types` entry fails it with nothing changed.
+
 For comparison, the app schemas on the same node:
 
 | Schema | Size |
@@ -1429,7 +1437,8 @@ on every install, so change it there rather than in the database. If you lower `
 
 `network_op_daily`, `network_custom_json_daily` and `account_custom_json_daily` carry `rc_exact`,
 filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`, computed once per
-batch for all three by `haf_stats_app.prepare_batch_exact_rc`). A row's
+batch for all three by `haf_stats_app.prepare_batch_exact_rc`, and joined to the batch's custom_json
+operations once for both custom_json rollups by `haf_stats_app.prepare_batch_custom_json_ops`). A row's
 `rc_exact` is set only when every operation it counts had a recorded cost; otherwise it is NULL and
 the endpoints price that row with the estimate. A day that a batch without recorded costs touched
 stays NULL, so a row is never half exact. In `account_custom_json_daily` a custom_json signed by

@@ -622,8 +622,9 @@ $$;
 -- The search_path pin is belt-and-braces rather than a fix. Everything reached from here
 -- resolves schema-qualified, and the unqualified tables in the block path --
 -- haf_stats_batch_ops and haf_stats_batch_authored_ops (process_block_range.sql),
--- haf_stats_community_batch_stage (process_content_stats.sql) and
--- haf_stats_batch_exact_rc (exact_rc.sql) -- are all TEMP, and
+-- haf_stats_community_batch_stage (process_content_stats.sql),
+-- haf_stats_batch_exact_rc (exact_rc.sql) and haf_stats_batch_custom_json_ops
+-- (process_custom_json.sql) -- are all TEMP, and
 -- pg_temp is searched first for relations whether or not it is listed. But the legacy
 -- loop inherits `"$user", public` from haf_stats_owner's session (verified on the node:
 -- the role carries no rolconfig) while the driver's connection is not ours to assume, and

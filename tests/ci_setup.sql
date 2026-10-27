@@ -68,8 +68,59 @@ CREATE TABLE IF NOT EXISTS hafd.operations (
     -- block-level virtual op); NULLABLE here on purpose, so the many fixture rows that never
     -- set it belong to no transaction and are priced with the estimate, exactly as before,
     -- instead of all landing in a transaction 0 of their block.
-    trx_in_block SMALLINT
+    trx_in_block SMALLINT,
+    -- HAF's key for a custom_json op's id (hafd.custom_json_types); NULL for other op types. Set
+    -- by the trigger below, as HAF sets it when it writes the op, so fixtures never write it.
+    custom_json_type_id SMALLINT
 );
+
+-- hafd.custom_json_types: HAF's dictionary of custom_json ids, which both custom_json rollups key
+-- on and the endpoints map back to the text. The ids are assigned in the order first seen, as HAF
+-- assigns them.
+CREATE TABLE IF NOT EXISTS hafd.custom_json_types (
+    id SMALLINT PRIMARY KEY,
+    custom_json_id VARCHAR(32) NOT NULL UNIQUE
+);
+
+-- The id of a custom_json id text, added to the dictionary when it is new. Used by the trigger,
+-- and by the fixtures that write rollup rows by hand (as haf_stats_owner, hence the DEFINER: the
+-- stub's hafd tables are the bootstrap superuser's).
+CREATE OR REPLACE FUNCTION hafd.ci_custom_json_type_id(_custom_json_id TEXT)
+RETURNS SMALLINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    _id SMALLINT;
+BEGIN
+    IF _custom_json_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+    SELECT t.id INTO _id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = _custom_json_id;
+    IF _id IS NULL THEN
+        INSERT INTO hafd.custom_json_types (id, custom_json_id)
+        SELECT COALESCE(MAX(t.id), 0) + 1, _custom_json_id FROM hafd.custom_json_types AS t
+        RETURNING id INTO _id;
+    END IF;
+    RETURN _id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION hafd.ci_operations_custom_json_type()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.custom_json_type_id := CASE WHEN NEW.op_type_id = 18
+                                    THEN hafd.ci_custom_json_type_id(NEW.body_value ->> 'id') END;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER ci_operations_custom_json_type
+BEFORE INSERT OR UPDATE OF op_type_id, body_value ON hafd.operations
+FOR EACH ROW EXECUTE FUNCTION hafd.ci_operations_custom_json_type();
 
 -- #44: the per-transaction RC cost haf_stats_app.exact_rc_for_ops splits across a
 -- transaction's operations. Real HAF has more columns (trx_hash is its primary key); these
@@ -964,12 +1015,12 @@ ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
-    json_id TEXT NOT NULL,
+    custom_json_type_id SMALLINT NOT NULL,
     op_count INT NOT NULL DEFAULT 0,
     op_bytes BIGINT NOT NULL DEFAULT 0,
     -- #44 part 2: the rollup's exact RC, NULL unless every op in the row had one.
     rc_exact BIGINT,
-    PRIMARY KEY (account_id, day, json_id)
+    PRIMARY KEY (account_id, day, custom_json_type_id)
 );
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 
@@ -1072,14 +1123,16 @@ ON CONFLICT DO NOTHING;
 -- (06-01, cheap) = 20*100+500*10 = 7000; Social Graph (06-10, pricey) = 10*1000+50*100 =
 -- 15000; Uncategorized (06-10, pricey + big payload) = 5*1000+800*100 = 85000. Total 113000,
 -- so Uncategorized is 7.69% of ops but 75.22% of estimated RC - proving per-day pricing.
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
-VALUES
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, custom_json_type_id, op_count, op_bytes)
+SELECT v.account_id, v.day::DATE, hafd.ci_custom_json_type_id(v.json_id), v.op_count, v.op_bytes
+FROM (VALUES
     (2001, '2020-06-01', 'sm_claim_daily', 25, 200),
     (2001, '2020-06-05', 'sm_battle', 5, 100),
     (2001, '2020-06-01', 'ssc-mainnet-hive', 20, 500),
     (2001, '2020-06-10', 'follow', 10, 50),
     (2001, '2020-06-10', 'mystery_app', 5, 800),
     (2001, '2020-07-01', 'sm_market', 999, 9990)
+) AS v (account_id, day, json_id, op_count, op_bytes)
 ON CONFLICT DO NOTHING;
 
 -- Network RC utilization stub: network_op_daily (mirrors db/process_network_ops.sql) + per-op
@@ -1131,7 +1184,7 @@ ON CONFLICT DO NOTHING;
 
 -- Network custom_json usage stub: network_custom_json_daily (mirrors
 -- db/process_network_custom_json.sql), read by get_network_custom_json_usage and
--- get_network_top_custom_json. Keyed by the raw custom_json id, priced at read time by the
+-- get_network_top_custom_json. Keyed by the custom_json id's hafd.custom_json_types id, priced at read time by the
 -- op-18 rc_op_stats_daily rates seeded above (2020-06-01: 100/10, 2020-06-08: 1000/100).
 -- Rows are chosen so each day's (op_count, op_bytes) total equals the op-18 network_op_daily
 -- row above (06-05 -> 25/250, 06-10 -> 10/100), demonstrating the cross-rollup invariant
@@ -1147,21 +1200,23 @@ ON CONFLICT DO NOTHING;
 -- matches no individual group, and limit_count=2 exercises the boundary.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.network_custom_json_daily (
     day DATE NOT NULL,
-    json_id TEXT NOT NULL,
+    custom_json_type_id SMALLINT NOT NULL,
     op_count BIGINT NOT NULL DEFAULT 0,
     op_bytes BIGINT NOT NULL DEFAULT 0,
     -- #44 part 2: the rollup's exact RC, NULL unless every op in the row had one.
     rc_exact BIGINT,
-    PRIMARY KEY (day, json_id)
+    PRIMARY KEY (day, custom_json_type_id)
 );
 GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
 
-INSERT INTO haf_stats_backend.network_custom_json_daily (day, json_id, op_count, op_bytes)
-VALUES
-('2020-06-05', 'follow', 12, 120),
-('2020-06-05', 'sm_claim_daily', 8, 80),
-('2020-06-05', 'actifit', 5, 50),
-('2020-06-10', 'follow', 10, 100)
+INSERT INTO haf_stats_backend.network_custom_json_daily (day, custom_json_type_id, op_count, op_bytes)
+SELECT v.day::DATE, hafd.ci_custom_json_type_id(v.json_id), v.op_count, v.op_bytes
+FROM (VALUES
+    ('2020-06-05', 'follow', 12, 120),
+    ('2020-06-05', 'sm_claim_daily', 8, 80),
+    ('2020-06-05', 'actifit', 5, 50),
+    ('2020-06-10', 'follow', 10, 100)
+) AS v (day, json_id, op_count, op_bytes)
 ON CONFLICT DO NOTHING;
 
 -- (account-operations fixtures for rctester are seeded into hive.account_operations_view
@@ -1169,29 +1224,29 @@ ON CONFLICT DO NOTHING;
 
 -- rctester custom_json for the group_by=app test: 2 sm_claim_daily ops on 2021-03-01,
 -- priced by the op-18 base+byte rate effective then (2020-06-08: 1000/100) = 2*1000+200*100 = 22000.
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
-VALUES (3001, '2021-03-01', 'sm_claim_daily', 2, 200)
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, custom_json_type_id, op_count, op_bytes)
+VALUES (3001, '2021-03-01', hafd.ci_custom_json_type_id('sm_claim_daily'), 2, 200)
 ON CONFLICT DO NOTHING;
 
 -- #44: rcexact's two sm_claim_daily ops on 2021-03-20, so the timeline's app_filter branch (which
 -- finds candidate ids in this rollup) reaches the raw ops and prices them exactly. This hand-written
 -- row has no rc_exact, so its group_by=app figure is the byte-aware ESTIMATE, 2*1000 + 200*100 =
 -- 22000 (tests/ci_exact_rc_rollups.sql builds real rows with the processors).
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
-VALUES (3101, '2021-03-20', 'sm_claim_daily', 2, 200)
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, custom_json_type_id, op_count, op_bytes)
+VALUES (3101, '2021-03-20', hafd.ci_custom_json_type_id('sm_claim_daily'), 2, 200)
 ON CONFLICT DO NOTHING;
 
--- cattester (4001) custom_json rollup: the per-json_id candidate set the timeline's
--- category_filter/app_filter resolve against (one row per json_id it signed in block 4000).
+-- cattester (4001) custom_json rollup: the per-id candidate set the timeline's
+-- category_filter/app_filter resolve against (one row per id it signed in block 4000).
 -- sm_claim_daily + risingstar both resolve to the Gaming category (two distinct DApps);
 -- mystery_cat resolves to no registered app -> Uncategorized. Counts mirror the one op-18 event
 -- each in account_operations_view; the timeline prices per event via rc_avg_cost, so these
 -- op_count/op_bytes only gate the candidate-id fast path, not the returned rc_consumed.
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes)
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, custom_json_type_id, op_count, op_bytes)
 VALUES
-    (4001, '2020-06-01', 'sm_claim_daily', 1, 100),
-    (4001, '2020-06-01', 'risingstar', 1, 100),
-    (4001, '2020-06-01', 'mystery_cat', 1, 100)
+    (4001, '2020-06-01', hafd.ci_custom_json_type_id('sm_claim_daily'), 1, 100),
+    (4001, '2020-06-01', hafd.ci_custom_json_type_id('risingstar'), 1, 100),
+    (4001, '2020-06-01', hafd.ci_custom_json_type_id('mystery_cat'), 1, 100)
 ON CONFLICT DO NOTHING;
 
 RESET ROLE;

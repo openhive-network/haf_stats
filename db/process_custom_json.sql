@@ -15,9 +15,12 @@ SET ROLE haf_stats_owner;
 -- a rate recalibration needs no historical backfill. op_bytes is octet_length(body_value),
 -- the payload-size proxy the byte rate is calibrated against (see process_rc.sql).
 --
--- The id is mapped to an app + category by the existing custom_json_app_registry
--- (seed_data.sql); the endpoint resolves it at read time with a starts_with() prefix match,
--- so no classification is stored here.
+-- The id is stored as HAF's custom_json_type_id (hafd.operations.custom_json_type_id, a SMALLINT
+-- key of hafd.custom_json_types), not as its text: 2 bytes instead of ~14 in every row and again in
+-- the primary key, and the batch groups on it without reading the JSON. The endpoints map it back
+-- to the text through hafd.custom_json_types, and to an app + category by the existing
+-- custom_json_app_registry (seed_data.sql) with a starts_with() prefix match at read time, so no
+-- classification is stored here.
 
 -- ---------------------------------------------------------------------------
 -- Table
@@ -26,13 +29,13 @@ SET ROLE haf_stats_owner;
 CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     account_id INT NOT NULL,
     day DATE NOT NULL,
-    json_id TEXT NOT NULL,
+    custom_json_type_id SMALLINT NOT NULL,
     op_count INT NOT NULL DEFAULT 0,
     -- Summed payload size of these ops (octet_length of the op value); additive. The RC
     -- estimate is op_count * base_rc + op_bytes * byte_rc, applied at read time from the
     -- rc_op_stats_daily rates - inputs are stored, not the weighted RC (see process_rc.sql).
     op_bytes BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (account_id, day, json_id)
+    PRIMARY KEY (account_id, day, custom_json_type_id)
 );
 
 -- Idempotent migration from the earlier op-weighted rc_estimated column (issue #32):
@@ -89,16 +92,114 @@ SELECT haf_stats_app.apply_schema_migration(
     'account_custom_json_daily.rc_exact'
 );
 
+-- The custom_json id was stored as json_id TEXT until #120. Rewritten in place, each id to its
+-- hafd.custom_json_types id: the rows are history the processor has already been through, so the
+-- table is converted rather than dropped and replayed. ALTER COLUMN ... TYPE rewrites the table and
+-- rebuilds its primary key in the one statement, under ACCESS EXCLUSIVE for the whole rewrite: on a
+-- large deployment that is a while (measured ~5 s per million rows, so ~30 min at 320M rows, plus
+-- the I/O of the table), and readers of the table wait for it. An id HAF has no entry for fails the
+-- statement (haf_stats_app.custom_json_type_id_of), and the table is left as it was. Guarded: no
+-- lock where json_id is already gone (#96).
+DO $notice$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS
+            AND a.attname = 'json_id'
+            AND NOT a.attisdropped
+    ) THEN
+        -- From pg_class, which takes no lock on the table (pg_total_relation_size would).
+        RAISE NOTICE 'haf_stats: rewriting account_custom_json_daily (~% rows, % heap) from json_id TEXT to custom_json_type_id SMALLINT. On a large deployment this takes a while (~5 s per million rows, ~30 min at 320M rows), and readers of the table wait for it.',
+            (SELECT GREATEST(c.reltuples, 0)::BIGINT FROM pg_class AS c WHERE c.oid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS),
+            (SELECT pg_size_pretty(c.relpages::BIGINT * current_setting('block_size')::BIGINT) FROM pg_class AS c WHERE c.oid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS);
+    END IF;
+END
+$notice$;
+
+SELECT haf_stats_app.apply_schema_migration(
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_backend.account_custom_json_daily'::REGCLASS
+            AND a.attname = 'json_id'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_backend.account_custom_json_daily
+     ALTER COLUMN json_id TYPE SMALLINT USING haf_stats_app.custom_json_type_id_of(json_id);
+     ALTER TABLE haf_stats_backend.account_custom_json_daily
+     RENAME COLUMN json_id TO custom_json_type_id',
+    'account_custom_json_daily.json_id -> custom_json_type_id'
+);
+
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
+
+-- ---------------------------------------------------------------------------
+-- The batch's custom_json ops with an id, as both custom_json rollups (account_custom_json_rows
+-- below, network_custom_json_rows in process_network_custom_json.sql) group and sum them: day,
+-- custom_json_type_id (staged by prepare_batch_ops), payload size and exact RC share
+-- (prepare_batch_exact_rc, db/exact_rc.sql), NULL where the op has none. The shares are joined to
+-- the ops here, once per batch, instead of in each rollup. Only custom_json: network_op_rows reads
+-- every non-virtual op once anyway, and copying them all here costs more than the join it would
+-- save. An op with no id is in no row of either rollup (custom_json_type_id is part of both keys),
+-- so it is not staged.
+-- Staged like prepare_batch_exact_rc: transaction-local range key, ON COMMIT DROP table.
+-- ---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_custom_json_ops(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_custom_json_ops(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+DECLARE
+    _range_key TEXT := _first_block::TEXT || ':' || _last_block::TEXT;
+BEGIN
+    IF current_setting('haf_stats.batch_custom_json_ops_range', TRUE) = _range_key
+       AND TO_REGCLASS('pg_temp.haf_stats_batch_custom_json_ops') IS NOT NULL THEN
+        RETURN;
+    END IF;
+
+    PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
+
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_batch_custom_json_ops (
+        op_id BIGINT NOT NULL,
+        day DATE NOT NULL,
+        custom_json_type_id SMALLINT NOT NULL,
+        op_bytes INT,
+        rc_exact BIGINT
+    ) ON COMMIT DROP;
+
+    TRUNCATE haf_stats_batch_custom_json_ops;
+
+    INSERT INTO haf_stats_batch_custom_json_ops (op_id, day, custom_json_type_id, op_bytes, rc_exact)
+    SELECT ov.op_id, ov.day, ov.custom_json_type_id, ov.op_bytes, ex.rc_exact
+    FROM haf_stats_batch_ops AS ov
+    LEFT JOIN haf_stats_batch_exact_rc AS ex ON ex.op_id = ov.op_id
+    WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
+      AND ov.custom_json_type_id IS NOT NULL;
+
+    ANALYZE haf_stats_batch_custom_json_ops;
+    PERFORM set_config('haf_stats.batch_custom_json_ops_range', _range_key, TRUE);
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One pass over the batch's staged custom_json ops (prepare_batch_ops, db/process_block_range.sql,
--- which network_custom_json_rows and process_community_registry read too), fanned out to one
--- row per signer. op_count is
--- additive (DO UPDATE adds), so each block range must be processed exactly once - the same
--- exactly-once assumption the other additive counters rely on.
+-- One row per (custom_json op, signer), the op_class 5 rows prepare_batch_authored_ops
+-- (db/process_block_range.sql) already resolved for process_active_users: an op's distinct
+-- signers across required_posting_auths and required_auths, each resolved to its account id.
+-- Each takes the op's day, custom_json_type_id, payload size and exact RC share from
+-- prepare_batch_custom_json_ops above. op_count is additive (DO UPDATE adds), so each block range
+-- must be processed exactly once - the same exactly-once assumption the other additive counters
+-- rely on.
 -- ---------------------------------------------------------------------------
 
 -- The rows process_custom_json adds for a block range, before they are merged into the table: one per
@@ -109,64 +210,24 @@ CREATE OR REPLACE FUNCTION haf_stats_app.account_custom_json_rows(
     _first_block INT,
     _last_block INT
 )
-RETURNS TABLE (account_id INT, day DATE, json_id TEXT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
+RETURNS TABLE (account_id INT, day DATE, custom_json_type_id SMALLINT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
 VOLATILE
 SET jit = OFF
-SET from_collapse_limit = '16'
-SET join_collapse_limit = '16'
 AS $$
 BEGIN
-PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
+PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
+PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS (
-    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
-    SELECT c.op_id AS operation_id, c.rc_exact
-    FROM haf_stats_batch_exact_rc AS c
-),
-ops AS MATERIALIZED (
-    -- One custom_json op per row, with its id, the day it landed, its payload size, and its
-    -- exact RC share where its transaction recorded one (#44).
-    SELECT
-        ov.op_id,
-        ov.day,
-        ov.body_value ->> 'id' AS json_id,
-        ov.body_value AS body,
-        ov.op_bytes,
-        ex.rc_exact
-    FROM haf_stats_batch_ops ov
-    LEFT JOIN ex ON ex.operation_id = ov.op_id
-    WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-),
--- Fan each op out to its signer(s): required_posting_auths UNION required_auths.
--- UNION (not UNION ALL) dedups an account listed under both auths so it counts the op once.
--- The op's payload size and exact RC ride along; for a (rare) multi-signer op each signer is
--- attributed the full op_bytes and the full rc_exact, consistent with op_count counting the op
--- once per signer (the network rollup counts it once).
-signers AS (
-    SELECT o.op_id, o.day, o.json_id, o.op_bytes, o.rc_exact, s.signer
-    FROM ops o
-    CROSS JOIN LATERAL (
-        SELECT jsonb_array_elements_text(o.body -> 'required_posting_auths') AS signer
-        UNION
-        SELECT jsonb_array_elements_text(o.body -> 'required_auths')
-    ) s
-    WHERE o.json_id IS NOT NULL
-),
--- Resolve the DISTINCT signer-name set once (anti-seq-scan idiom, mirrors
--- process_active_users); a busy bot recurs thousands of times per batch.
-name_ids AS MATERIALIZED (
-    SELECT av.name, av.id
-    FROM hive.accounts_view av
-    WHERE av.name IN (SELECT DISTINCT signer FROM signers)
-)
-SELECT ni.id::INT, sg.day, sg.json_id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT,
+-- A multi-signer op attributes the full op_bytes and the full rc_exact to each signer,
+-- consistent with op_count counting the op once per signer (the network rollup counts it once).
+SELECT a.account_id, cj.day, cj.custom_json_type_id, COUNT(*)::INT, SUM(cj.op_bytes)::BIGINT,
        -- Exact only when every op of the group has its share (#44); otherwise NULL.
-       CASE WHEN COUNT(sg.rc_exact) = COUNT(*) THEN SUM(sg.rc_exact) END::BIGINT
-FROM signers sg
-JOIN name_ids ni ON ni.name = sg.signer
-GROUP BY ni.id, sg.day, sg.json_id;
+       CASE WHEN COUNT(cj.rc_exact) = COUNT(*) THEN SUM(cj.rc_exact) END::BIGINT
+FROM haf_stats_batch_authored_ops a
+JOIN haf_stats_batch_custom_json_ops cj ON cj.op_id = a.op_id
+WHERE a.op_class = 5   -- custom_json_operation
+GROUP BY a.account_id, cj.day, cj.custom_json_type_id;
 END;
 $$;
 
@@ -181,10 +242,10 @@ SET jit = OFF
 AS $$
 BEGIN
 
-INSERT INTO haf_stats_backend.account_custom_json_daily AS acj (account_id, day, json_id, op_count, op_bytes, rc_exact)
-SELECT r.account_id, r.day, r.json_id, r.op_count, r.op_bytes, r.rc_exact
+INSERT INTO haf_stats_backend.account_custom_json_daily AS acj (account_id, day, custom_json_type_id, op_count, op_bytes, rc_exact)
+SELECT r.account_id, r.day, r.custom_json_type_id, r.op_count, r.op_bytes, r.rc_exact
 FROM haf_stats_app.account_custom_json_rows(_first_block, _last_block) AS r
-ON CONFLICT (account_id, day, json_id) DO UPDATE SET
+ON CONFLICT (account_id, day, custom_json_type_id) DO UPDATE SET
     op_count = acj.op_count + EXCLUDED.op_count,
     op_bytes = acj.op_bytes + EXCLUDED.op_bytes,
     rc_exact = acj.rc_exact + EXCLUDED.rc_exact;

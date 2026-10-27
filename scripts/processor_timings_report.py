@@ -49,6 +49,7 @@ PROCESSORS: tuple[str, ...] = (
     "process_content_stats",
     "process_content_cohorts",
     "prepare_batch_exact_rc",
+    "prepare_batch_custom_json_ops",
     "process_custom_json",
     "process_network_ops",
     "process_network_custom_json",

@@ -310,9 +310,10 @@ $shim$;
 
 -- The upgrade branch of the guarded migrations actually ran. (#96)
 --
--- tests/ci_break_schema.sql undid all 14 guarded upgrades before install-again: twelve columns
--- dropped, rc_estimated put back, and account_financial_daily put back in its TEXT
--- category/direction shape with one row. Without break-schema only one of the 14 migration
+-- tests/ci_break_schema.sql undid all 16 guarded upgrades before install-again: twelve columns
+-- dropped, rc_estimated put back, account_financial_daily put back in its TEXT
+-- category/direction shape with one row, and both custom_json rollups put back on json_id TEXT
+-- with one row each. Without break-schema only one of the 16 migration
 -- statements (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or
 -- a catalog test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
@@ -331,6 +332,10 @@ BEGIN
         ('haf_stats_backend.account_custom_json_daily', 'rc_exact', TRUE),
         ('haf_stats_backend.network_op_daily', 'rc_exact', TRUE),
         ('haf_stats_backend.network_custom_json_daily', 'rc_exact', TRUE),
+        ('haf_stats_backend.account_custom_json_daily', 'custom_json_type_id', TRUE),
+        ('haf_stats_backend.account_custom_json_daily', 'json_id', FALSE),
+        ('haf_stats_backend.network_custom_json_daily', 'custom_json_type_id', TRUE),
+        ('haf_stats_backend.network_custom_json_daily', 'json_id', FALSE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_7d', TRUE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_30d', TRUE),
         ('haf_stats_backend.account_cohort_retention', 'eligible_at_90d', TRUE),
@@ -388,7 +393,33 @@ BEGIN
         RAISE EXCEPTION 'install: the recreated account_financial_daily is not readable by haf_stats_user';
     END IF;
 
-    RAISE NOTICE 'install verified: install-again re-applied all 14 guarded upgrades (12 columns back, rc_estimated gone, account_financial_daily recreated compact and empty)';
+    -- The custom_json rollups: converted in place, not recreated - break-schema's rows are kept,
+    -- under follow's hafd.custom_json_types id, and the keys and index are on the new column.
+    IF (SELECT string_agg(format('%s/%s/%s=%s', a.account_id, a.day, a.custom_json_type_id, a.op_count), ',')
+        FROM haf_stats_backend.account_custom_json_daily AS a)
+       IS DISTINCT FROM format('900902/2016-03-24/%s=3', (SELECT t.id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = 'follow')) THEN
+        RAISE EXCEPTION 'install: account_custom_json_daily does not hold break-schema''s follow row under follow''s custom_json_type_id';
+    END IF;
+    IF (SELECT string_agg(format('%s/%s=%s/%s', n.day, n.custom_json_type_id, n.op_count, n.op_bytes), ',')
+        FROM haf_stats_backend.network_custom_json_daily AS n)
+       IS DISTINCT FROM format('2016-03-24/%s=4/40', (SELECT t.id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = 'follow')) THEN
+        RAISE EXCEPTION 'install: network_custom_json_daily does not hold break-schema''s follow row under follow''s custom_json_type_id';
+    END IF;
+    SELECT string_agg(pg_get_constraintdef(c.oid), ', ' ORDER BY c.conrelid::REGCLASS::TEXT) INTO _def
+    FROM pg_constraint AS c
+    WHERE c.conrelid IN ('haf_stats_backend.account_custom_json_daily'::REGCLASS,
+                         'haf_stats_backend.network_custom_json_daily'::REGCLASS)
+      AND c.contype = 'p';
+    IF _def IS DISTINCT FROM 'PRIMARY KEY (account_id, day, custom_json_type_id), PRIMARY KEY (day, custom_json_type_id)' THEN
+        RAISE EXCEPTION 'install: the custom_json rollups'' primary keys are %', _def;
+    END IF;
+    IF to_regclass('haf_stats_backend.idx_ncj_json_id_day') IS NOT NULL
+       OR (SELECT pg_get_indexdef(to_regclass('haf_stats_backend.idx_ncj_custom_json_type_id_day')))
+          IS DISTINCT FROM 'CREATE INDEX idx_ncj_custom_json_type_id_day ON haf_stats_backend.network_custom_json_daily USING btree (custom_json_type_id, day)' THEN
+        RAISE EXCEPTION 'install: network_custom_json_daily''s id-leading index is not idx_ncj_custom_json_type_id_day on (custom_json_type_id, day)';
+    END IF;
+
+    RAISE NOTICE 'install verified: install-again re-applied all 16 guarded upgrades (12 columns back, rc_estimated gone, account_financial_daily recreated compact and empty, both custom_json rollups converted to custom_json_type_id with their rows)';
 END
 $upgraded$;
 

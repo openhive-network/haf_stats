@@ -83,11 +83,15 @@ CREATE TEMP VIEW actual_rc AS
 SELECT 'nod' AS rollup, day::TEXT || '/' || op_type_id AS k, op_count::BIGINT, rc_exact
 FROM haf_stats_backend.network_op_daily WHERE day IN ('2021-03-20', '2021-03-21')
 UNION ALL
-SELECT 'ncj', day::TEXT || '/' || json_id, op_count::BIGINT, rc_exact
-FROM haf_stats_backend.network_custom_json_daily WHERE day IN ('2021-03-20', '2021-03-21')
+SELECT 'ncj', n.day::TEXT || '/' || t.custom_json_id, n.op_count::BIGINT, n.rc_exact
+FROM haf_stats_backend.network_custom_json_daily AS n
+JOIN hafd.custom_json_types AS t ON t.id = n.custom_json_type_id
+WHERE n.day IN ('2021-03-20', '2021-03-21')
 UNION ALL
-SELECT 'acj', account_id::TEXT || '/' || day::TEXT || '/' || json_id, op_count::BIGINT, rc_exact
-FROM haf_stats_backend.account_custom_json_daily WHERE account_id IN (3101, 3102);
+SELECT 'acj', a.account_id::TEXT || '/' || a.day::TEXT || '/' || t.custom_json_id, a.op_count::BIGINT, a.rc_exact
+FROM haf_stats_backend.account_custom_json_daily AS a
+JOIN hafd.custom_json_types AS t ON t.id = a.custom_json_type_id
+WHERE a.account_id IN (3101, 3102);
 
 DO $rollups$
 DECLARE
@@ -289,11 +293,11 @@ DELETE FROM hafd.blocks WHERE num IN (6504, 6505);
 INSERT INTO haf_stats_backend.network_op_daily (day, op_type_id, op_count, op_bytes, rc_exact)
 SELECT r.day, r.op_type_id, r.op_count, r.op_bytes, r.rc_exact
 FROM haf_stats_app.network_op_rows(6503, 6503) AS r WHERE r.op_type_id = 18;
-INSERT INTO haf_stats_backend.network_custom_json_daily (day, json_id, op_count, op_bytes, rc_exact)
-SELECT r.day, r.json_id, r.op_count, r.op_bytes, r.rc_exact
+INSERT INTO haf_stats_backend.network_custom_json_daily (day, custom_json_type_id, op_count, op_bytes, rc_exact)
+SELECT r.day, r.custom_json_type_id, r.op_count, r.op_bytes, r.rc_exact
 FROM haf_stats_app.network_custom_json_rows(6503, 6503) AS r;
-INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, json_id, op_count, op_bytes, rc_exact)
-SELECT r.account_id, r.day, r.json_id, r.op_count, r.op_bytes, r.rc_exact
+INSERT INTO haf_stats_backend.account_custom_json_daily (account_id, day, custom_json_type_id, op_count, op_bytes, rc_exact)
+SELECT r.account_id, r.day, r.custom_json_type_id, r.op_count, r.op_bytes, r.rc_exact
 FROM haf_stats_app.account_custom_json_rows(6503, 6503) AS r;
 
 -- A window that mixes an exact row and a NULL one, per row, in the endpoints that sum rollup rows:
@@ -305,7 +309,7 @@ FROM haf_stats_app.account_custom_json_rows(6503, 6503) AS r;
 UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL
 WHERE account_id = 3101 AND day = '2021-03-21';
 UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL
-WHERE day = '2021-03-21' AND json_id = 'sm_claim_daily';
+WHERE day = '2021-03-21' AND custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
 
 DO $mixed$
 DECLARE
@@ -390,14 +394,14 @@ UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL WHERE day
 UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL WHERE account_id IN (3101, 3102);
 -- Pass 1: wrong op_count on rcother's follow row, the network follow row and the op-18 row.
 UPDATE haf_stats_backend.account_custom_json_daily SET op_count = op_count + 1
-WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
+WHERE account_id = 3102 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
 UPDATE haf_stats_backend.network_custom_json_daily SET op_count = op_count + 1
-WHERE day = '2021-03-20' AND json_id = 'follow';
+WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
 UPDATE haf_stats_backend.network_op_daily SET op_count = op_count + 1
 WHERE day = '2021-03-20' AND op_type_id = 18;
 -- A row that already holds a value: the backfill must leave it as it is, even when it differs.
 UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = 1
-WHERE day = '2021-03-20' AND json_id = 'sm_claim_daily';
+WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
 UPDATE haf_stats_app.app_status SET last_processed_block = 6503;
 
 DO $backfill$
@@ -427,18 +431,18 @@ BEGIN
     -- Pass 2: counts put back, every 2021-03-20 row NULL again, and wrong op_bytes instead on
     -- rcother's sm_claim_daily row, the network follow row and the op-18 row.
     UPDATE haf_stats_backend.account_custom_json_daily SET op_count = op_count - 1
-    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
+    WHERE account_id = 3102 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_custom_json_daily SET op_count = op_count - 1
-    WHERE day = '2021-03-20' AND json_id = 'follow';
+    WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_op_daily SET op_count = op_count - 1
     WHERE day = '2021-03-20' AND op_type_id = 18;
     UPDATE haf_stats_backend.network_op_daily SET rc_exact = NULL WHERE day = '2021-03-20';
     UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20';
     UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = NULL WHERE day = '2021-03-20' AND account_id IN (3101, 3102);
     UPDATE haf_stats_backend.account_custom_json_daily SET op_bytes = op_bytes + 1
-    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    WHERE account_id = 3102 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.network_custom_json_daily SET op_bytes = op_bytes + 1
-    WHERE day = '2021-03-20' AND json_id = 'follow';
+    WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_op_daily SET op_bytes = op_bytes + 1
     WHERE day = '2021-03-20' AND op_type_id = 18;
 
@@ -466,9 +470,9 @@ BEGIN
     --     the same key on 2021-03-20, so only the day keeps them apart (checked below: 2021-03-21
     --     must stay untouched).
     UPDATE haf_stats_backend.account_custom_json_daily SET op_bytes = op_bytes - 1
-    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    WHERE account_id = 3102 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.network_custom_json_daily SET op_bytes = op_bytes - 1
-    WHERE day = '2021-03-20' AND json_id = 'follow';
+    WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_op_daily SET op_bytes = op_bytes - 1
     WHERE day = '2021-03-20' AND op_type_id = 18;
     UPDATE haf_stats_backend.network_op_daily SET rc_exact = NULL WHERE day = '2021-03-20';
@@ -477,21 +481,21 @@ BEGIN
     UPDATE haf_stats_backend.network_op_daily SET rc_exact = 1
     WHERE day = '2021-03-20' AND op_type_id = 18;
     UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = 1
-    WHERE account_id = 3101 AND day = '2021-03-20' AND json_id = 'sm_claim_daily';
+    WHERE account_id = 3101 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.account_custom_json_daily SET rc_exact = 1, op_count = op_count + 1
-    WHERE account_id = 3102 AND day = '2021-03-20' AND json_id = 'follow';
+    WHERE account_id = 3102 AND day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_custom_json_daily SET rc_exact = 1, op_bytes = op_bytes + 1
-    WHERE day = '2021-03-20' AND json_id = 'follow';
+    WHERE day = '2021-03-20' AND custom_json_type_id = hafd.ci_custom_json_type_id('follow');
     UPDATE haf_stats_backend.network_op_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.network_op_daily AS s
     WHERE t.day = '2021-03-21' AND s.day = '2021-03-20' AND t.op_type_id = 18 AND s.op_type_id = 18;
     UPDATE haf_stats_backend.network_custom_json_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.network_custom_json_daily AS s
-    WHERE t.day = '2021-03-21' AND s.day = '2021-03-20' AND t.json_id = 'sm_claim_daily' AND s.json_id = 'sm_claim_daily';
+    WHERE t.day = '2021-03-21' AND s.day = '2021-03-20' AND t.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily') AND s.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.account_custom_json_daily AS t SET op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.account_custom_json_daily AS s
     WHERE t.account_id = 3101 AND s.account_id = 3101 AND t.day = '2021-03-21' AND s.day = '2021-03-20'
-      AND t.json_id = 'sm_claim_daily' AND s.json_id = 'sm_claim_daily';
+      AND t.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily') AND s.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
 
     SELECT string_agg(b.rollup || '=' || b.rows_set || '/' || b.rows_mismatched, ' ' ORDER BY b.rollup) INTO _set
     FROM haf_stats_app.backfill_rc_exact('2021-03-20') AS b;
@@ -527,17 +531,17 @@ BEGIN
     UPDATE haf_stats_backend.network_custom_json_daily AS t
     SET rc_exact = NULL, op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.network_custom_json_daily AS s
-    WHERE t.day = '2021-03-20' AND s.day = '2021-03-20' AND t.json_id = 'follow' AND s.json_id = 'sm_claim_daily';
+    WHERE t.day = '2021-03-20' AND s.day = '2021-03-20' AND t.custom_json_type_id = hafd.ci_custom_json_type_id('follow') AND s.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.account_custom_json_daily AS t
     SET rc_exact = NULL, op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.account_custom_json_daily AS s
     WHERE t.account_id = 3102 AND s.account_id = 3102 AND t.day = '2021-03-20' AND s.day = '2021-03-20'
-      AND t.json_id = 'follow' AND s.json_id = 'sm_claim_daily';
+      AND t.custom_json_type_id = hafd.ci_custom_json_type_id('follow') AND s.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
     UPDATE haf_stats_backend.account_custom_json_daily AS t
     SET rc_exact = NULL, op_count = s.op_count, op_bytes = s.op_bytes
     FROM haf_stats_backend.account_custom_json_daily AS s
     WHERE t.account_id = 3102 AND s.account_id = 3101 AND t.day = '2021-03-20' AND s.day = '2021-03-20'
-      AND t.json_id = 'sm_claim_daily' AND s.json_id = 'sm_claim_daily';
+      AND t.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily') AND s.custom_json_type_id = hafd.ci_custom_json_type_id('sm_claim_daily');
 
     SELECT string_agg(b.rollup || '=' || b.rows_set || '/' || b.rows_mismatched, ' ' ORDER BY b.rollup) INTO _set
     FROM haf_stats_app.backfill_rc_exact('2021-03-20') AS b;
