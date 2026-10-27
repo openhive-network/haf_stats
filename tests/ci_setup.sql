@@ -112,8 +112,9 @@ CREATE OR REPLACE VIEW hive.accounts_view AS
     SELECT id, name FROM hafd.accounts;
 
 -- hive.get_required_authorities(body): real HAF returns the accounts that had to
--- sign an operation. The stub resolves the synthetic '_signer' field the cohort
--- fixture sets on its operation bodies (authorless ops yield no row).
+-- sign an operation. The stub resolves the synthetic '_signer' field the fixtures set on
+-- operation bodies (authorless ops yield no row). prepare_batch_authored_ops does not ask it
+-- for vote, comment, transfer and custom_json ops, whose signers it reads from their bodies.
 CREATE OR REPLACE FUNCTION hive.get_required_authorities(_body JSONB)
 RETURNS TABLE(account_name TEXT) LANGUAGE sql IMMUTABLE AS $$
     SELECT _body -> 'value' ->> '_signer'
