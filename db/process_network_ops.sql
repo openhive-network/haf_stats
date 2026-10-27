@@ -51,8 +51,8 @@ GRANT SELECT ON haf_stats_backend.network_op_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One pass over the batch's staged non-virtual ops (prepare_batch_ops,
--- db/process_block_range.sql), aggregated to (day, op_type). op_count/op_bytes
+-- One pass over the batch's staged non-virtual ops (prepare_batch_rollup_ops, db/exact_rc.sql,
+-- over prepare_batch_ops, db/process_block_range.sql), aggregated to (day, op_type). op_count/op_bytes
 -- are additive (DO UPDATE adds), so each block range must be processed exactly once - the same
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
@@ -71,25 +71,19 @@ VOLATILE
 SET jit = OFF
 AS $$
 BEGIN
-PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
+-- The batch's non-virtual ops with their exact shares, staged once for the three rollups
+-- (prepare_batch_rollup_ops, db/exact_rc.sql).
+PERFORM haf_stats_app.prepare_batch_rollup_ops(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS (
-    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
-    SELECT c.op_id AS operation_id, c.rc_exact
-    FROM haf_stats_batch_exact_rc AS c
-)
 SELECT
-    ov.day,
-    ov.op_type_id,
+    ro.day,
+    ro.op_type_id,
     COUNT(*)::BIGINT,
-    SUM(ov.op_bytes)::BIGINT,
+    SUM(ro.op_bytes)::BIGINT,
     -- Exact only when every op of the group has its share (#44); otherwise NULL.
-    CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
-FROM haf_stats_batch_ops ov
-JOIN hafd.operation_types ot ON ot.id = ov.op_type_id AND ot.is_virtual = FALSE
-LEFT JOIN ex ON ex.operation_id = ov.op_id
-GROUP BY ov.day, ov.op_type_id;
+    CASE WHEN COUNT(ro.rc_exact) = COUNT(*) THEN SUM(ro.rc_exact) END::BIGINT
+FROM haf_stats_batch_rollup_ops ro
+GROUP BY ro.day, ro.op_type_id;
 END;
 $$;
 

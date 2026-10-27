@@ -1429,7 +1429,8 @@ on every install, so change it there rather than in the database. If you lower `
 
 `network_op_daily`, `network_custom_json_daily` and `account_custom_json_daily` carry `rc_exact`,
 filled by their processors from the same split (`haf_stats_app.exact_rc_for_range`, computed once per
-batch for all three by `haf_stats_app.prepare_batch_exact_rc`). A row's
+batch for all three by `haf_stats_app.prepare_batch_exact_rc` and joined to the batch's operations
+once, by `haf_stats_app.prepare_batch_rollup_ops`). A row's
 `rc_exact` is set only when every operation it counts had a recorded cost; otherwise it is NULL and
 the endpoints price that row with the estimate. A day that a batch without recorded costs touched
 stays NULL, so a row is never half exact. In `account_custom_json_daily` a custom_json signed by

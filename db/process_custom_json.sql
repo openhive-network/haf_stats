@@ -94,9 +94,9 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One pass over the batch's staged custom_json ops (prepare_batch_ops, db/process_block_range.sql,
--- which network_custom_json_rows and process_community_registry read too), fanned out to one
--- row per signer. op_count is
+-- One pass over the batch's custom_json ops (prepare_batch_rollup_ops, db/exact_rc.sql, which
+-- network_custom_json_rows reads too), fanned out to one row per signer through the batch's
+-- authored ops (prepare_batch_authored_ops, db/process_block_range.sql). op_count is
 -- additive (DO UPDATE adds), so each block range must be processed exactly once - the same
 -- exactly-once assumption the other additive counters rely on.
 -- ---------------------------------------------------------------------------
@@ -117,56 +117,26 @@ SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 AS $$
 BEGIN
-PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
+-- The signers are the custom_json rows of the batch's authored ops (op_class 5,
+-- prepare_batch_authored_ops, db/process_block_range.sql): each op's distinct accounts across
+-- required_posting_auths and required_auths, resolved to ids. An account listed under both
+-- counts the op once. The op's id, day, payload size and exact RC come from the per-op rows
+-- prepare_batch_rollup_ops (db/exact_rc.sql) stages once for the three rollups.
+PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
+PERFORM haf_stats_app.prepare_batch_rollup_ops(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS (
-    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
-    SELECT c.op_id AS operation_id, c.rc_exact
-    FROM haf_stats_batch_exact_rc AS c
-),
-ops AS MATERIALIZED (
-    -- One custom_json op per row, with its id, the day it landed, its payload size, and its
-    -- exact RC share where its transaction recorded one (#44).
-    SELECT
-        ov.op_id,
-        ov.day,
-        ov.body_value ->> 'id' AS json_id,
-        ov.body_value AS body,
-        ov.op_bytes,
-        ex.rc_exact
-    FROM haf_stats_batch_ops ov
-    LEFT JOIN ex ON ex.operation_id = ov.op_id
-    WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-),
--- Fan each op out to its signer(s): required_posting_auths UNION required_auths.
--- UNION (not UNION ALL) dedups an account listed under both auths so it counts the op once.
--- The op's payload size and exact RC ride along; for a (rare) multi-signer op each signer is
--- attributed the full op_bytes and the full rc_exact, consistent with op_count counting the op
--- once per signer (the network rollup counts it once).
-signers AS (
-    SELECT o.op_id, o.day, o.json_id, o.op_bytes, o.rc_exact, s.signer
-    FROM ops o
-    CROSS JOIN LATERAL (
-        SELECT jsonb_array_elements_text(o.body -> 'required_posting_auths') AS signer
-        UNION
-        SELECT jsonb_array_elements_text(o.body -> 'required_auths')
-    ) s
-    WHERE o.json_id IS NOT NULL
-),
--- Resolve the DISTINCT signer-name set once (anti-seq-scan idiom, mirrors
--- process_active_users); a busy bot recurs thousands of times per batch.
-name_ids AS MATERIALIZED (
-    SELECT av.name, av.id
-    FROM hive.accounts_view av
-    WHERE av.name IN (SELECT DISTINCT signer FROM signers)
-)
-SELECT ni.id::INT, sg.day, sg.json_id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT,
+-- For a (rare) multi-signer op each signer is attributed the full op_bytes and the full
+-- rc_exact, consistent with op_count counting the op once per signer (the network rollup counts
+-- it once).
+SELECT au.account_id, ro.day, ro.json_id, COUNT(*)::INT, SUM(ro.op_bytes)::BIGINT,
        -- Exact only when every op of the group has its share (#44); otherwise NULL.
-       CASE WHEN COUNT(sg.rc_exact) = COUNT(*) THEN SUM(sg.rc_exact) END::BIGINT
-FROM signers sg
-JOIN name_ids ni ON ni.name = sg.signer
-GROUP BY ni.id, sg.day, sg.json_id;
+       CASE WHEN COUNT(ro.rc_exact) = COUNT(*) THEN SUM(ro.rc_exact) END::BIGINT
+FROM haf_stats_batch_authored_ops au
+JOIN haf_stats_batch_rollup_ops ro ON ro.op_id = au.op_id
+WHERE au.op_class = 5          -- custom_json_operation
+  AND ro.op_type_id = 18       -- hive::protocol::custom_json_operation
+  AND ro.json_id IS NOT NULL
+GROUP BY au.account_id, ro.day, ro.json_id;
 END;
 $$;
 

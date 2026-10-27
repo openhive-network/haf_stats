@@ -346,16 +346,17 @@ BEGIN
     PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
     WITH
     -- Presence set + per-account op counts: per-class rows plus the -1 ALL rollup
-    -- (every authored op). COUNT(DISTINCT op_id), not COUNT(*): get_required_authorities
-    -- can emit the same account under several roles for one op, and that is still one
-    -- operation for that account.
+    -- (every authored op). get_required_authorities can emit the same account under several
+    -- roles for one op, and that is still one operation for that account: the table's
+    -- (op_id, account_id) primary key already holds it once, so COUNT(*) counts distinct ops
+    -- and can be hash-aggregated where COUNT(DISTINCT op_id) sorts.
     membership AS (
-        SELECT day, op_class, account_id, COUNT(DISTINCT op_id) AS ops
+        SELECT day, op_class, account_id, COUNT(*) AS ops
         FROM haf_stats_batch_authored_ops
         WHERE op_class IS NOT NULL
         GROUP BY day, op_class, account_id
         UNION ALL
-        SELECT day, -1::SMALLINT, account_id, COUNT(DISTINCT op_id)
+        SELECT day, -1::SMALLINT, account_id, COUNT(*)
         FROM haf_stats_batch_authored_ops
         GROUP BY day, account_id
     ),
@@ -371,17 +372,26 @@ BEGIN
             ops = aud.ops + EXCLUDED.ops
         RETURNING 1
     ),
-    -- Operation volume: COUNT(DISTINCT op_id) per class plus the -1 ALL rollup. DISTINCT
-    -- collapses multisig fan-out so a multi-signer op counts as one operation.
+    -- Operation volume: distinct ops per class plus the -1 ALL rollup. The inner GROUP BY
+    -- collapses multisig fan-out so a multi-signer op counts as one operation; as a grouping
+    -- of its own it can be hashed, where COUNT(DISTINCT op_id) sorts every row.
     op_counts AS (
-        SELECT day, op_class, COUNT(DISTINCT op_id) AS operations
-        FROM haf_stats_batch_authored_ops
-        WHERE op_class IS NOT NULL
-        GROUP BY day, op_class
+        SELECT d.day, d.op_class, COUNT(*) AS operations
+        FROM (
+            SELECT day, op_class, op_id
+            FROM haf_stats_batch_authored_ops
+            WHERE op_class IS NOT NULL
+            GROUP BY day, op_class, op_id
+        ) AS d
+        GROUP BY d.day, d.op_class
         UNION ALL
-        SELECT day, -1::SMALLINT, COUNT(DISTINCT op_id)
-        FROM haf_stats_batch_authored_ops
-        GROUP BY day
+        SELECT d.day, -1::SMALLINT, COUNT(*)
+        FROM (
+            SELECT day, op_id
+            FROM haf_stats_batch_authored_ops
+            GROUP BY day, op_id
+        ) AS d
+        GROUP BY d.day
     )
     INSERT INTO haf_stats_backend.active_user_ops_daily (day, op_class, operations)
     SELECT day, op_class, operations FROM op_counts

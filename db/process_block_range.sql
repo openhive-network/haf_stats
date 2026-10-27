@@ -172,6 +172,14 @@ BEGIN
 
     INSERT INTO haf_stats_batch_ops
         (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
+    -- The range's blocks as a set, hashed against the operations. Joined to hafd.blocks
+    -- directly, the operations range is estimated at a few hundred rows whatever its size, so
+    -- the planner probes hafd.blocks once per operation.
+    WITH b AS MATERIALIZED (
+        SELECT bl.num, bl.created_at
+        FROM hafd.blocks AS bl
+        WHERE bl.num BETWEEN _first_block AND _last_block
+    )
     SELECT
         o.id,
         b.num,
@@ -182,7 +190,7 @@ BEGIN
         o.body_value,
         CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
     FROM hafd.operations AS o
-    JOIN hafd.blocks AS b ON b.num = hafd.operation_id_to_block_num(o.id)
+    JOIN b ON b.num = hafd.operation_id_to_block_num(o.id)
     LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id
     -- Both forms of the range: the id range is the operations primary key's, which suits the
     -- batch's full set; the derived block number is the Index Cond of
@@ -235,9 +243,15 @@ BEGIN
         account_id INT NOT NULL,
         op_time TIMESTAMP NOT NULL,
         day DATE NOT NULL,
-        op_class SMALLINT,
-        PRIMARY KEY (op_id, account_id)
+        op_class SMALLINT
     ) ON COMMIT DROP;
+
+    -- The primary key is added after the load, as on haf_stats_batch_exact_rc (exact_rc.sql):
+    -- the rows arrive in name order, and building the key once is several times cheaper than
+    -- inserting each of them into it. Dropped first so a second staging in the same
+    -- transaction loads without it too.
+    ALTER TABLE haf_stats_batch_authored_ops
+        DROP CONSTRAINT IF EXISTS haf_stats_batch_authored_ops_pkey;
 
     -- Plain hive.get_required_authorities first, for the types whose signers are not read from
     -- the body, in one subtransaction for the whole statement. Only if it fails is the
@@ -341,6 +355,9 @@ BEGIN
         END;
     END LOOP;
 
+    -- authored's DISTINCT makes (op_id, account_id) unique; process_active_users counts on it.
+    ALTER TABLE haf_stats_batch_authored_ops
+        ADD CONSTRAINT haf_stats_batch_authored_ops_pkey PRIMARY KEY (op_id, account_id);
     PERFORM set_config('haf_stats.batch_authored_ops_range', _range_key, FALSE);
 END;
 $$;
@@ -379,10 +396,12 @@ BEGIN
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_stats', _first_block, _last_block, _t, '{vote_operation,comment_operation,delete_comment_operation,ineffective_delete_comment_operation}', NULL); END IF;
     PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_cohorts', _first_block, _last_block, _t, '{comment_operation}', NULL); END IF;
-    -- The three rollups below each call this first and find it done; called here so its
-    -- work is one step of its own rather than part of whichever rollup runs first.
+    -- The three rollups below each call these first and find them done; called here so their
+    -- work is a step of its own rather than part of whichever rollup runs first.
     PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+    PERFORM haf_stats_app.prepare_batch_rollup_ops(_first_block, _last_block);
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_rollup_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
     PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
     PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);

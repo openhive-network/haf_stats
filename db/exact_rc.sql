@@ -360,6 +360,59 @@ BEGIN
 END;
 $$;
 
+-- The batch's non-virtual operations as the three rollups group and sum them - day, op type,
+-- payload size, custom_json id - each with its exact RC share, or NULL where it has none. The
+-- shares are joined to the staged operations here, once per batch, instead of once in each rollup;
+-- and the custom_json id is read from the body once for both custom_json rollups. Staged and keyed
+-- like prepare_batch_exact_rc above: transaction-local range key, ON COMMIT DROP table.
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_rollup_ops(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_rollup_ops(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+DECLARE
+    _range_key TEXT := _first_block::TEXT || ':' || _last_block::TEXT;
+BEGIN
+    IF current_setting('haf_stats.batch_rollup_ops_range', TRUE) = _range_key
+       AND TO_REGCLASS('pg_temp.haf_stats_batch_rollup_ops') IS NOT NULL THEN
+        RETURN;
+    END IF;
+
+    PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+    PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
+
+    CREATE TEMP TABLE IF NOT EXISTS haf_stats_batch_rollup_ops (
+        op_id BIGINT NOT NULL,
+        day DATE NOT NULL,
+        op_type_id SMALLINT NOT NULL,
+        op_bytes INT,
+        json_id TEXT,
+        rc_exact BIGINT
+    ) ON COMMIT DROP;
+
+    TRUNCATE haf_stats_batch_rollup_ops;
+
+    INSERT INTO haf_stats_batch_rollup_ops (op_id, day, op_type_id, op_bytes, json_id, rc_exact)
+    SELECT
+        ov.op_id,
+        ov.day,
+        ov.op_type_id,
+        ov.op_bytes,
+        CASE WHEN ov.op_type_id = 18 THEN ov.body_value ->> 'id' END,   -- custom_json_operation
+        ex.rc_exact
+    FROM haf_stats_batch_ops AS ov
+    JOIN hafd.operation_types AS ot ON ot.id = ov.op_type_id AND ot.is_virtual = FALSE
+    LEFT JOIN haf_stats_batch_exact_rc AS ex ON ex.op_id = ov.op_id;
+
+    ANALYZE haf_stats_batch_rollup_ops;
+    PERFORM set_config('haf_stats.batch_rollup_ops_range', _range_key, TRUE);
+END;
+$$;
+
 -- Fill rc_exact on the three daily rollups for ONE past day (#44, part 2). Rows built before the
 -- column existed, or while their day was only partly processed after an upgrade, carry NULL;
 -- this recomputes the day from the chain and fills them.
