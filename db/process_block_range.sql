@@ -111,6 +111,8 @@ $$;
 --
 -- op_bytes is the payload-size proxy the RC estimate is calibrated against (process_rc.sql),
 -- serialized once here for the three rollups that sum it, and only for non-virtual ops.
+-- custom_json_type_id is HAF's key for a custom_json op's id (hafd.custom_json_types), the key
+-- both custom_json rollups store; NULL for every other op type.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_ops;
@@ -161,7 +163,8 @@ BEGIN
         op_time TIMESTAMP NOT NULL,
         day DATE NOT NULL,
         body_value JSONB,
-        op_bytes INT
+        op_bytes INT,
+        custom_json_type_id SMALLINT
     ) ON COMMIT DROP;
 
     TRUNCATE haf_stats_batch_ops;
@@ -177,7 +180,7 @@ BEGIN
         -- range scan of hafd.operations per block, a plan the estimate cannot change. OFFSET 0
         -- keeps the LATERAL subquery from being flattened back into an ordinary join.
         INSERT INTO haf_stats_batch_ops
-            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
+            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes, custom_json_type_id)
         SELECT
             o.id,
             b.num,
@@ -186,10 +189,11 @@ BEGIN
             b.created_at,
             b.created_at::DATE,
             o.body_value,
-            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
+            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END,
+            o.custom_json_type_id
         FROM hafd.blocks AS b
         CROSS JOIN LATERAL (
-            SELECT op.id, op.trx_in_block, op.op_type_id, op.body_value
+            SELECT op.id, op.trx_in_block, op.op_type_id, op.body_value, op.custom_json_type_id
             FROM hafd.operations AS op
             WHERE op.id >= hafd.operation_id(b.num, 0)
               AND op.id < hafd.operation_id(b.num + 1, 0)
@@ -203,7 +207,7 @@ BEGIN
         -- the rebuild scripts stage one or two types over up to the whole chain), so each is
         -- joined to its block by an index probe.
         INSERT INTO haf_stats_batch_ops
-            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
+            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes, custom_json_type_id)
         SELECT
             o.id,
             b.num,
@@ -212,7 +216,8 @@ BEGIN
             b.created_at,
             b.created_at::DATE,
             o.body_value,
-            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
+            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END,
+            o.custom_json_type_id
         FROM hafd.operations AS o
         JOIN hafd.blocks AS b ON b.num = hafd.operation_id_to_block_num(o.id)
         LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id

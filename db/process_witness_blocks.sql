@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.witness_blocks_daily (
 );
 
 -- No secondary index, deliberately. The endpoint's witness= filter matches on the SECOND PK
--- column, which is what earned network_custom_json_daily its reversed idx_ncj_json_id_day - but
--- that table holds a few million (day, json_id) rows and this one holds tens of thousands per
+-- column, which is what earned network_custom_json_daily its reversed idx_ncj_custom_json_type_id_day
+-- - but that table holds a few million (day, id) rows and this one holds tens of thousands per
 -- year, two orders of magnitude less. Every read is already bounded by the day range, and the
 -- unfiltered worst case (a full-history witness= scan over the whole replay corpus, 68,623 rows)
 -- is a few hundred pages. Under the standard issue #53 applied when it dropped idx_acd /

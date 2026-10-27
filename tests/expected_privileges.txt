@@ -13,6 +13,7 @@ function haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=
 function haf_stats_app.content_source() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.continue_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.create_context_if_not_exists() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.custom_json_type_id_of(_json_id text) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
