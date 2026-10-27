@@ -155,11 +155,27 @@ BEGIN
         ) AS o
         JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id AND NOT ot.is_virtual
     ),
+    tx_size AS MATERIALIZED (
+        -- A single-op transaction's split is the identity (see exact_rc_for_range), so only the
+        -- operations of multi-op transactions go through the rate lookups and windows below.
+        SELECT x.block_num, x.trx_in_block, MAX(x.rc_cost) AS rc_cost,
+               COUNT(*) AS n_ops, MAX(x.id) AS last_id
+        FROM tx_ops AS x
+        GROUP BY x.block_num, x.trx_in_block
+    ),
+    multi_ops AS MATERIALIZED (
+        SELECT x.block_num, x.trx_in_block, x.rc_cost, x.day, x.id, x.op_type_id
+        FROM tx_ops AS x
+        JOIN tx_size AS n
+          ON n.block_num = x.block_num
+         AND n.trx_in_block = x.trx_in_block
+         AND n.n_ops > 1
+    ),
     weight AS MATERIALIZED (
         -- One rate lookup per (op type, day), not per operation.
         SELECT k.op_type_id, k.day,
                GREATEST(haf_stats_app.rc_avg_cost(k.op_type_id, k.day), 1)::NUMERIC AS w
-        FROM (SELECT DISTINCT x.op_type_id, x.day FROM tx_ops AS x) AS k
+        FROM (SELECT DISTINCT x.op_type_id, x.day FROM multi_ops AS x) AS k
     ),
     share AS (
         SELECT x.id, x.block_num, x.trx_in_block, x.rc_cost,
@@ -167,7 +183,7 @@ BEGIN
                -- quotient a hair below an integer could round up to it. DIV truncates exactly.
                DIV(x.rc_cost * wt.w, SUM(wt.w) OVER tx)::BIGINT AS floor_share,
                ROW_NUMBER() OVER (PARTITION BY x.block_num, x.trx_in_block ORDER BY x.id DESC) AS from_last
-        FROM tx_ops AS x
+        FROM multi_ops AS x
         JOIN weight AS wt ON wt.op_type_id = x.op_type_id AND wt.day = x.day
         WINDOW tx AS (PARTITION BY x.block_num, x.trx_in_block)
     ),
@@ -182,7 +198,11 @@ BEGIN
     -- A hashed join to the asked-for ids, not `= ANY(_op_ids)`: ANY scans the array for every
     -- row, which is quadratic in the number of ops.
     SELECT st.id, st.rc::BIGINT
-    FROM settled AS st
+    FROM (
+        SELECT n.last_id AS id, n.rc_cost AS rc FROM tx_size AS n WHERE n.n_ops = 1
+        UNION ALL
+        SELECT s.id, s.rc FROM settled AS s
+    ) AS st
     JOIN (SELECT DISTINCT u.id FROM unnest(_op_ids) AS u(id)) AS want ON want.id = st.id;
 END;
 $$;
@@ -235,12 +255,28 @@ BEGIN
         WHERE t.block_num BETWEEN _first_block AND _last_block
           AND t.rc_cost IS NOT NULL
     ),
-    tx_ops AS MATERIALIZED (
-        SELECT p.block_num, p.trx_in_block, p.rc_cost, p.day, o.op_id AS id, o.op_type_id
+    tx_size AS MATERIALIZED (
+        -- Most transactions carry one user operation, and for such a transaction the split below
+        -- is the identity (DIV(rc_cost * w, w) = rc_cost, remainder 0) whatever its weight. So
+        -- each transaction's operations are counted in one hashed aggregate, and the rate lookups
+        -- and sorted windows run only over the operations of multi-op transactions.
+        SELECT p.block_num, p.trx_in_block, MAX(p.rc_cost) AS rc_cost, MAX(p.day) AS day,
+               COUNT(*) AS n_ops, MAX(o.op_id) AS last_id
         FROM haf_stats_batch_ops AS o
         JOIN priced_tx AS p
           ON p.block_num = o.block_num
          AND p.trx_in_block = o.trx_in_block
+        JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id AND NOT ot.is_virtual
+        WHERE o.trx_in_block >= 0
+        GROUP BY p.block_num, p.trx_in_block
+    ),
+    tx_ops AS MATERIALIZED (
+        SELECT n.block_num, n.trx_in_block, n.rc_cost, n.day, o.op_id AS id, o.op_type_id
+        FROM haf_stats_batch_ops AS o
+        JOIN tx_size AS n
+          ON n.block_num = o.block_num
+         AND n.trx_in_block = o.trx_in_block
+         AND n.n_ops > 1
         JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id AND NOT ot.is_virtual
         WHERE o.trx_in_block >= 0
     ),
@@ -265,6 +301,10 @@ BEGIN
                       ELSE 0 END AS rc
         FROM share AS s
     )
+    SELECT n.last_id, n.rc_cost
+    FROM tx_size AS n
+    WHERE n.n_ops = 1
+    UNION ALL
     SELECT st.id, st.rc::BIGINT
     FROM settled AS st;
 END;
@@ -280,8 +320,9 @@ GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stat
 -- it, the key is set transaction-local, so it ends with the ON COMMIT DROP table (and rolls back
 -- with it) instead of outliving it.
 --
--- The table has a PRIMARY KEY on op_id, so an operation split twice would stop the batch rather
--- than count twice.
+-- The table gets a PRIMARY KEY on op_id, so an operation split twice stops the batch rather than
+-- counting twice. It is added after the load: the rows arrive in hash order, and building the key
+-- once is cheaper than inserting each of them into it.
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_exact_rc(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_exact_rc(
     _first_block INT,
@@ -300,16 +341,20 @@ BEGIN
     END IF;
 
     CREATE TEMP TABLE IF NOT EXISTS haf_stats_batch_exact_rc (
-        op_id BIGINT NOT NULL PRIMARY KEY,
+        op_id BIGINT NOT NULL,
         rc_exact BIGINT NOT NULL
     ) ON COMMIT DROP;
 
     TRUNCATE haf_stats_batch_exact_rc;
+    -- Dropped first so a second staging in the same transaction loads without it too.
+    ALTER TABLE haf_stats_batch_exact_rc DROP CONSTRAINT IF EXISTS haf_stats_batch_exact_rc_pkey;
 
     INSERT INTO haf_stats_batch_exact_rc (op_id, rc_exact)
     SELECT e.operation_id, e.rc_exact
     FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block) AS e;
 
+    ALTER TABLE haf_stats_batch_exact_rc
+        ADD CONSTRAINT haf_stats_batch_exact_rc_pkey PRIMARY KEY (op_id);
     ANALYZE haf_stats_batch_exact_rc;
     PERFORM set_config('haf_stats.batch_exact_rc_range', _range_key, TRUE);
 END;

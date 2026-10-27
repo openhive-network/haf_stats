@@ -71,6 +71,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_privileges.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_guard.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_rollups.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_exact_rc_split_equality.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql &&
         sh /ci_content_oracle.sh
@@ -90,6 +91,9 @@ services:
       - ../db/process_network_custom_json.sql:/process_network_custom_json.sql:ro
       - ../db/process_custom_json.sql:/process_custom_json.sql:ro
       - ../tests/ci_exact_rc_rollups.sql:/ci_exact_rc_rollups.sql:ro
+      # The single-op short cut of exact_rc_for_range / exact_rc_for_ops against the full split
+      # they replaced, kept verbatim in the file.
+      - ../tests/ci_exact_rc_split_equality.sql:/ci_exact_rc_split_equality.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.
