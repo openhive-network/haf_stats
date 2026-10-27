@@ -83,12 +83,14 @@ BEGIN
 END;
 $$;
 
--- The replaced rollup functions, verbatim but for their names.
+-- The replaced rollup functions, verbatim but for their names and for the key they return: the id
+-- they read from the body is mapped to its hafd.custom_json_types id, the column the rollups store
+-- now, so the shipped functions' staged custom_json_type_id is checked against the body's id.
 CREATE FUNCTION pg_temp.account_custom_json_rows_before(
     _first_block INT,
     _last_block INT
 )
-RETURNS TABLE (account_id INT, day DATE, json_id TEXT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
+RETURNS TABLE (account_id INT, day DATE, custom_json_type_id SMALLINT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
 VOLATILE
 SET jit = OFF
@@ -140,12 +142,13 @@ name_ids AS MATERIALIZED (
     FROM hive.accounts_view av
     WHERE av.name IN (SELECT DISTINCT signer FROM signers)
 )
-SELECT ni.id::INT, sg.day, sg.json_id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT,
+SELECT ni.id::INT, sg.day, cjt.id, COUNT(*)::INT, SUM(sg.op_bytes)::BIGINT,
        -- Exact only when every op of the group has its share (#44); otherwise NULL.
        CASE WHEN COUNT(sg.rc_exact) = COUNT(*) THEN SUM(sg.rc_exact) END::BIGINT
 FROM signers sg
 JOIN name_ids ni ON ni.name = sg.signer
-GROUP BY ni.id, sg.day, sg.json_id;
+JOIN hafd.custom_json_types cjt ON cjt.custom_json_id = sg.json_id
+GROUP BY ni.id, sg.day, cjt.id;
 END;
 $$;
 
@@ -154,7 +157,7 @@ CREATE FUNCTION pg_temp.network_custom_json_rows_before(
     _first_block INT,
     _last_block INT
 )
-RETURNS TABLE (day DATE, json_id TEXT, op_count BIGINT, op_bytes BIGINT, rc_exact BIGINT)
+RETURNS TABLE (day DATE, custom_json_type_id SMALLINT, op_count BIGINT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
 VOLATILE
 SET jit = OFF
@@ -170,16 +173,17 @@ WITH ex AS (
 )
 SELECT
     ov.day,
-    ov.body_value ->> 'id' AS json_id,
+    cjt.id,
     COUNT(*)::BIGINT,
     SUM(ov.op_bytes)::BIGINT,
     -- Exact only when every op of the group has its share (#44); otherwise NULL.
     CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
 FROM haf_stats_batch_ops ov
 LEFT JOIN ex ON ex.operation_id = ov.op_id
+JOIN hafd.custom_json_types cjt ON cjt.custom_json_id = ov.body_value ->> 'id'
 WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
   AND ov.body_value ->> 'id' IS NOT NULL
-GROUP BY ov.day, ov.body_value ->> 'id';
+GROUP BY ov.day, cjt.id;
 END;
 $$;
 
@@ -200,7 +204,8 @@ BEGIN
 
         -- The replaced statement, over the op types the full set staged.
         _n := pg_temp.ci_diff(
-            'SELECT op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value::TEXT, op_bytes
+            'SELECT op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value::TEXT, op_bytes,
+                    custom_json_type_id
              FROM haf_stats_batch_ops',
             format($q$
             SELECT
@@ -211,7 +216,8 @@ BEGIN
                 b.created_at,
                 b.created_at::DATE,
                 o.body_value::TEXT,
-                CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
+                CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END,
+                o.custom_json_type_id
             FROM hafd.operations AS o
             JOIN hafd.blocks AS b ON b.num = hafd.operation_id_to_block_num(o.id)
             LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id
@@ -281,9 +287,10 @@ BEGIN
     -- And by value, so a fixture the reference also got wrong cannot pass: bob signs 6610:3 once
     -- (both lists), the op without an id is in no row, follow on 2021-10-05 mixes a priced op
     -- with an op of no transaction (NULL), 2021-10-06's sm_claim_daily is unpriced (NULL).
-    IF (SELECT string_agg(format('%s/%s/%s=%s/%s/%s', r.account_id, r.day, r.json_id, r.op_count, r.op_bytes,
-                                 coalesce(r.rc_exact::TEXT, 'NULL')), ',' ORDER BY r.account_id, r.day, r.json_id)
-        FROM haf_stats_app.account_custom_json_rows(6610, 6612) AS r)
+    IF (SELECT string_agg(format('%s/%s/%s=%s/%s/%s', r.account_id, r.day, cjt.custom_json_id, r.op_count, r.op_bytes,
+                                 coalesce(r.rc_exact::TEXT, 'NULL')), ',' ORDER BY r.account_id, r.day, cjt.custom_json_id)
+        FROM haf_stats_app.account_custom_json_rows(6610, 6612) AS r
+        JOIN hafd.custom_json_types AS cjt ON cjt.id = r.custom_json_type_id)
        IS DISTINCT FROM
        (SELECT string_agg(x, ',' ORDER BY x) FROM unnest(ARRAY[
            format('66101/2021-10-05/follow=2/%s/NULL', (SELECT sum(octet_length(body_value::TEXT)) FROM hafd.operations WHERE id IN (6610000002, 6610000007))),

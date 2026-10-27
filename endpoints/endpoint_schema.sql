@@ -4571,31 +4571,44 @@ BEGIN
         ORDER BY agg.rc_consumed DESC, agg.label;
     ELSE
         -- group_by = 'app' or 'category': size-aware custom_json from the pre-aggregated
-        -- account_custom_json_daily (op_count + op_bytes per json_id, base+byte op-18 rate),
-        -- rolled up to the registered DApp name (resolve_dapp_name) or, for group_by='category',
+        -- account_custom_json_daily (op_count + op_bytes per custom_json id, base+byte op-18
+        -- rate), summed per id first, so the id's text (hafd.custom_json_types) and its label are
+        -- looked up once per distinct id rather than per daily row; then rolled up to the
+        -- registered DApp name (resolve_dapp_name) or, for group_by='category',
         -- one registry level further to the DApp's category (resolve_dapp_category, unmatched
-        -- ids -> 'Uncategorized'). Distinct json_ids sharing a label merge (e.g. 'sm_' and
+        -- ids -> 'Uncategorized'). Distinct ids sharing a label merge (e.g. 'sm_' and
         -- 'splinterlands' -> Splinterlands; Splinterlands + Rising Star -> Gaming). Plus one
         -- 'non-custom_json' bucket for all other signed ops (op_count * avg_cost), so totals
         -- still cover 100% of the account's RC. The two modes differ ONLY in the label resolver,
         -- so a category total reconciles exactly with the app totals summed by category (and with
         -- get_account_dapp_footprint's categories[].rc_estimated).
         RETURN QUERY
-        WITH cj AS (
-            SELECT CASE WHEN group_by = 'category'
-                        THEN haf_stats_app.resolve_dapp_category(acj.json_id)
-                        ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END AS label,
-                   SUM(acj.op_count)::BIGINT     AS op_count,
-                   SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed,
+        WITH cj_by_id AS (
+            -- rc_consumed stays NUMERIC here and is cast once per label below, as the single-level
+            -- SUM did, so splitting the sum in two changes no figure.
+            SELECT acj.custom_json_type_id,
+                   SUM(acj.op_count)             AS op_count,
+                   SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)) AS rc_consumed,
                    -- A day's row carries rc_exact only when all its ops had a recorded cost.
-                   COALESCE(SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL), 0)::BIGINT AS exact_ops
+                   SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL) AS exact_ops
             FROM haf_stats_backend.account_custom_json_daily acj
             CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
             WHERE acj.account_id = _account_id
               AND acj.day BETWEEN _from AND _to
+            GROUP BY acj.custom_json_type_id
+        ),
+        cj AS (
+            SELECT CASE WHEN group_by = 'category'
+                        THEN haf_stats_app.resolve_dapp_category(cjt.custom_json_id)
+                        ELSE haf_stats_app.resolve_dapp_name(cjt.custom_json_id) END AS label,
+                   SUM(b.op_count)::BIGINT       AS op_count,
+                   SUM(b.rc_consumed)::BIGINT    AS rc_consumed,
+                   COALESCE(SUM(b.exact_ops), 0)::BIGINT AS exact_ops
+            FROM cj_by_id b
+            JOIN hafd.custom_json_types cjt ON cjt.id = b.custom_json_type_id
             GROUP BY CASE WHEN group_by = 'category'
-                          THEN haf_stats_app.resolve_dapp_category(acj.json_id)
-                          ELSE haf_stats_app.resolve_dapp_name(acj.json_id) END
+                          THEN haf_stats_app.resolve_dapp_category(cjt.custom_json_id)
+                          ELSE haf_stats_app.resolve_dapp_name(cjt.custom_json_id) END
         ),
         noncj_signed AS MATERIALIZED (
             SELECT ao.operation_id, ao.op_type_id, bv.created_at::DATE AS day
@@ -5003,14 +5016,19 @@ BEGIN
         -- filters intersects them (an app must also be in the category). NOTE: this ties the
         -- filters to the rollup's freshness the same way group_by=app already is; each event is
         -- priced per op, exact or the op-count estimate, as in the branch above.
+        -- The rollup keys on custom_json_type_id; the raw ops are matched on their body id, so the
+        -- set is of the ids' text (hafd.custom_json_types).
         SELECT ARRAY(
-            SELECT acj.json_id
-            FROM haf_stats_backend.account_custom_json_daily acj
-            WHERE acj.account_id = _account_id
-              AND acj.day BETWEEN _from AND _to
-            GROUP BY acj.json_id
-            HAVING (_app_filter IS NULL OR haf_stats_app.resolve_dapp_name(acj.json_id) = _app_filter)
-               AND (_category_filter IS NULL OR haf_stats_app.resolve_dapp_category(acj.json_id) = _category_filter)
+            SELECT cjt.custom_json_id::TEXT
+            FROM (
+                SELECT DISTINCT acj.custom_json_type_id
+                FROM haf_stats_backend.account_custom_json_daily acj
+                WHERE acj.account_id = _account_id
+                  AND acj.day BETWEEN _from AND _to
+            ) used
+            JOIN hafd.custom_json_types cjt ON cjt.id = used.custom_json_type_id
+            WHERE (_app_filter IS NULL OR haf_stats_app.resolve_dapp_name(cjt.custom_json_id) = _app_filter)
+              AND (_category_filter IS NULL OR haf_stats_app.resolve_dapp_category(cjt.custom_json_id) = _category_filter)
         ) INTO _matching_ids;
         IF _matching_ids IS NULL OR cardinality(_matching_ids) = 0 THEN
             RETURN;
@@ -5236,11 +5254,11 @@ BEGIN
     -- rate as the rc_op_stats_daily series grows. Activity predating every sampled rate falls
     -- back to the earliest sample, and an empty rate table to the seeded constants, so the
     -- estimate is never zeroed. The rate is resolved ONCE per distinct activity day (not per
-    -- (json_id, day) row) so cost stays bounded as the rate history grows.
+    -- (id, day) row) so cost stays bounded as the rate history grows.
     --
     -- AS MATERIALIZED is what makes that last sentence true rather than merely likely: a
     -- single-reference CTE is inlined, and the planner may then pull the lateral back above the
-    -- day join and resolve per (json_id, day) row after all. It collapsed anyway on the data
+    -- day join and resolve per (id, day) row after all. It collapsed anyway on the data
     -- tested here, but only by the planner's choice (issue #49).
     WITH day_rate AS MATERIALIZED (
         SELECT
@@ -5259,13 +5277,14 @@ BEGIN
         -- defaults the copy did, hence none here.
         CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, d.day) dr
     ),
-    -- Price each (json_id, day) row at its day's rate and roll up to json_id, then resolve
-    -- each to its registered app + category via a longest-prefix starts_with match against
-    -- custom_json_app_registry (an unmatched id falls to 'Uncategorized' with the raw id as
-    -- the app name). Rolled up to apps (drill-down bars) and categories (donut); all in one object.
+    -- Price each (id, day) row at its day's rate and roll up to the id, then take the id's text
+    -- (hafd.custom_json_types) and resolve it to its registered app + category via a
+    -- longest-prefix starts_with match against custom_json_app_registry (an unmatched id falls to
+    -- 'Uncategorized' with the raw id as the app name). Rolled up to apps (drill-down bars) and
+    -- categories (donut); all in one object.
     per_json AS (
         SELECT
-            acj.json_id,
+            acj.custom_json_type_id,
             SUM(acj.op_count)::BIGINT AS op_count,
             SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed,
             -- A day's row carries rc_exact only when all its ops had a recorded cost (#101).
@@ -5274,20 +5293,21 @@ BEGIN
         JOIN day_rate dr ON dr.day = acj.day
         WHERE acj.account_id = _account_id
           AND acj.day BETWEEN _from AND _to
-        GROUP BY acj.json_id
+        GROUP BY acj.custom_json_type_id
     ),
     resolved AS (
         SELECT
-            COALESCE(r.category, 'Uncategorized') AS category,
-            COALESCE(r.app_name, pj.json_id)      AS app_name,
+            COALESCE(r.category, 'Uncategorized')   AS category,
+            COALESCE(r.app_name, cjt.custom_json_id) AS app_name,
             pj.op_count,
             pj.rc_consumed,
             pj.exact_ops
         FROM per_json pj
+        JOIN hafd.custom_json_types cjt ON cjt.id = pj.custom_json_type_id
         LEFT JOIN LATERAL (
             SELECT reg.category, reg.app_name
             FROM haf_stats_backend.custom_json_app_registry reg
-            WHERE starts_with(pj.json_id, reg.app_id_pattern)
+            WHERE starts_with(cjt.custom_json_id, reg.app_id_pattern)
             -- Secondary sort by pattern makes equal-length-prefix ties deterministic.
             ORDER BY LENGTH(reg.app_id_pattern) DESC, reg.app_id_pattern
             LIMIT 1
@@ -5698,6 +5718,7 @@ DECLARE
     _from DATE;
     _to DATE;
     _json_id TEXT;
+    _custom_json_type_id SMALLINT;
 BEGIN
     -- Tolerate Wax's JSON-encoded string params (e.g. "follow"); see issue #22. json_id is
     -- required, but declared with a NULL default so an omitted param yields a clean 400 here
@@ -5722,6 +5743,14 @@ BEGIN
             HINT = 'Must be one of: day, week, month';
     END IF;
 
+    -- The rollup keys on HAF's id for the text; an id HAF never recorded has no rows.
+    SELECT cjt.id INTO _custom_json_type_id
+    FROM hafd.custom_json_types cjt
+    WHERE cjt.custom_json_id = _json_id;
+    IF _custom_json_type_id IS NULL THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
     -- Price each activity day at the op-18 rate effective on/before it (rc_rate always returns
     -- one row via seeded defaults), then roll up to the requested granularity. byte_rc is NUMERIC,
@@ -5737,7 +5766,7 @@ BEGIN
         haf_stats_app.rc_source_label(COUNT(*) FILTER (WHERE ncj.rc_exact IS NOT NULL), COUNT(*)) AS rc_source
     FROM haf_stats_backend.network_custom_json_daily ncj
     CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, ncj.day) dr
-    WHERE ncj.json_id = _json_id
+    WHERE ncj.custom_json_type_id = _custom_json_type_id
       AND ncj.day BETWEEN _from AND _to
     GROUP BY DATE_TRUNC(granularity, ncj.day)
     ORDER BY 1;
@@ -5902,11 +5931,11 @@ BEGIN
 
     -- rc_estimate is returned as NUMERIC (not cast to BIGINT): a no-date, network-wide sum can
     -- approach the BIGINT ceiling (~9.2e18) as custom_json volume grows, and this is a coarse
-    -- estimate, so precision beyond that is irrelevant. per_id prices each (json_id, day) at the
+    -- estimate, so precision beyond that is irrelevant. per_id prices each (id, day) at the
     -- op-18 rate effective on/before it (byte_rc is NUMERIC, so the sum is already NUMERIC).
     --
     -- Both branches resolve that rate ONCE PER DISTINCT DAY in day_rate rather than once per
-    -- (json_id, day) row. A wide window holds ~120 ids/day, so the old per-row LATERAL called
+    -- (id, day) row. A wide window holds ~120 ids/day, so the old per-row LATERAL called
     -- rc_rate ~300k times over full history and WAS this endpoint's entire latency - and it grew
     -- with the length of the rate history, not with the data, so it got slower every day the
     -- sampler ran (issue #49). Same day_rate shape get_account_dapp_footprint already uses.
@@ -5922,8 +5951,9 @@ BEGIN
     IF group_by = 'id' THEN
         -- Fast path: rank the raw ids, then resolve the DApp name/category for ONLY the returned
         -- page. resolve_dapp probes the registry, so resolving every distinct id in a wide window
-        -- before the LIMIT would be wasted work. json_id is unique, so it is a complete tiebreak
-        -- on its own.
+        -- before the LIMIT would be wasted work. The id's text (hafd.custom_json_types, one
+        -- primary-key lookup per distinct id) is taken before the ranking: it is the tiebreak, and
+        -- being unique it is a complete one on its own.
         RETURN QUERY
         WITH day_rate AS MATERIALIZED (
             SELECT d.day, dr.base_rc, dr.byte_rc
@@ -5936,7 +5966,7 @@ BEGIN
         ),
         per_id AS (
             SELECT
-                ncj.json_id,
+                ncj.custom_json_type_id,
                 SUM(ncj.op_count)::BIGINT                                  AS op_count,
                 SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
                 SUM(COALESCE(ncj.rc_exact, ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc)) AS rc_estimate,
@@ -5946,16 +5976,18 @@ BEGIN
             FROM haf_stats_backend.network_custom_json_daily ncj
             JOIN day_rate dr ON dr.day = ncj.day
             WHERE ncj.day BETWEEN _from AND _to
-            GROUP BY ncj.json_id
+            GROUP BY ncj.custom_json_type_id
         ),
         top AS (
-            SELECT p.json_id, p.op_count, p.op_bytes, p.rc_estimate, p.exact_rows, p.all_rows
+            SELECT cjt.custom_json_id::TEXT AS json_id,
+                   p.op_count, p.op_bytes, p.rc_estimate, p.exact_rows, p.all_rows
             FROM per_id p
+            JOIN hafd.custom_json_types cjt ON cjt.id = p.custom_json_type_id
             ORDER BY
                 CASE WHEN order_by = 'op_bytes'    THEN p.op_bytes
                      WHEN order_by = 'rc_estimate' THEN p.rc_estimate
                      ELSE p.op_count END DESC,
-                p.json_id
+                cjt.custom_json_id::TEXT
             LIMIT "limit_count"
         )
         SELECT
@@ -5992,7 +6024,7 @@ BEGIN
         ),
         per_id AS (
             SELECT
-                ncj.json_id,
+                ncj.custom_json_type_id,
                 SUM(ncj.op_count)::BIGINT                                  AS op_count,
                 SUM(ncj.op_bytes)::BIGINT                                  AS op_bytes,
                 SUM(COALESCE(ncj.rc_exact, ncj.op_count * dr.base_rc + ncj.op_bytes * dr.byte_rc)) AS rc_estimate,
@@ -6001,7 +6033,7 @@ BEGIN
             FROM haf_stats_backend.network_custom_json_daily ncj
             JOIN day_rate dr ON dr.day = ncj.day
             WHERE ncj.day BETWEEN _from AND _to
-            GROUP BY ncj.json_id
+            GROUP BY ncj.custom_json_type_id
         ),
         keyed AS (
             SELECT
@@ -6013,7 +6045,8 @@ BEGIN
                 pid.exact_rows,
                 pid.all_rows
             FROM per_id pid
-            CROSS JOIN LATERAL haf_stats_app.resolve_dapp(pid.json_id) res
+            JOIN hafd.custom_json_types cjt ON cjt.id = pid.custom_json_type_id
+            CROSS JOIN LATERAL haf_stats_app.resolve_dapp(cjt.custom_json_id) res
         ),
         grouped AS (
             SELECT

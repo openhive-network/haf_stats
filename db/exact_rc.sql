@@ -435,14 +435,14 @@ BEGIN
     UPDATE haf_stats_backend.network_custom_json_daily AS t
     SET rc_exact = r.rc_exact
     FROM haf_stats_backfill_ncj AS r
-    WHERE t.day = r.day AND t.json_id = r.json_id
+    WHERE t.day = r.day AND t.custom_json_type_id = r.custom_json_type_id
       AND t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
       AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes;
     GET DIAGNOSTICS _n = ROW_COUNT;
     rollup := 'network_custom_json_daily'; rows_set := _n;
     SELECT count(*) INTO rows_mismatched
     FROM haf_stats_backend.network_custom_json_daily AS t
-    JOIN haf_stats_backfill_ncj AS r ON t.day = r.day AND t.json_id = r.json_id
+    JOIN haf_stats_backfill_ncj AS r ON t.day = r.day AND t.custom_json_type_id = r.custom_json_type_id
     WHERE t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
       AND (t.op_count <> r.op_count OR t.op_bytes <> r.op_bytes);
     RETURN NEXT;
@@ -455,14 +455,14 @@ BEGIN
     UPDATE haf_stats_backend.account_custom_json_daily AS t
     SET rc_exact = r.rc_exact
     FROM haf_stats_backfill_acj AS r
-    WHERE t.account_id = r.account_id AND t.day = r.day AND t.json_id = r.json_id
+    WHERE t.account_id = r.account_id AND t.day = r.day AND t.custom_json_type_id = r.custom_json_type_id
       AND t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
       AND t.op_count = r.op_count AND t.op_bytes = r.op_bytes;
     GET DIAGNOSTICS _n = ROW_COUNT;
     rollup := 'account_custom_json_daily'; rows_set := _n;
     SELECT count(*) INTO rows_mismatched
     FROM haf_stats_backend.account_custom_json_daily AS t
-    JOIN haf_stats_backfill_acj AS r ON t.account_id = r.account_id AND t.day = r.day AND t.json_id = r.json_id
+    JOIN haf_stats_backfill_acj AS r ON t.account_id = r.account_id AND t.day = r.day AND t.custom_json_type_id = r.custom_json_type_id
     WHERE t.rc_exact IS NULL AND r.rc_exact IS NOT NULL
       AND (t.op_count <> r.op_count OR t.op_bytes <> r.op_bytes);
     RETURN NEXT;

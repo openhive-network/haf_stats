@@ -387,6 +387,7 @@ def test_break_schema_and_verify_exercise_every_guarded_upgrade() -> None:
         add = re.search(r"\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)", ddl, re.IGNORECASE)
         drop = re.search(r"\bDROP\s+COLUMN\s+IF\s+EXISTS\s+(\w+)", ddl, re.IGNORECASE)
         con = re.search(r"\b(?:ADD|DROP|VALIDATE)\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)", ddl, re.IGNORECASE)
+        rename = re.search(r"\bRENAME\s+COLUMN\s+(\w+)\s+TO\s+(\w+)", ddl, re.IGNORECASE)
         if add or drop:
             col = (add or drop).group(1)
             undo = "DROP" if add else "ADD"
@@ -412,6 +413,21 @@ def test_break_schema_and_verify_exercise_every_guarded_upgrade() -> None:
                             % (where, table))
             if table not in verify_raw:
                 gaps.append("%s: ci_install_verify.sql does not check %s" % (where, table))
+        elif rename:
+            # A column rewritten in place under a new name (ALTER COLUMN ... TYPE ... USING, then
+            # RENAME): break-schema must put the table back in the old shape, and both files must
+            # check that the old column is there before and the new one after.
+            old, new = rename.groups()
+            if not re.search(r"\bCREATE TABLE %s\b[^;]*\b%s\b" % (re.escape(table), old), broken, re.I):
+                gaps.append("%s: ci_break_schema.sql does not re-create %s with its old column %s"
+                            % (where, table, old))
+            for name, text, col, present in (("ci_break_schema.sql", break_raw, old, True),
+                                             ("ci_break_schema.sql", break_raw, new, False),
+                                             ("ci_install_verify.sql", verify_raw, new, True),
+                                             ("ci_install_verify.sql", verify_raw, old, False)):
+                row = "('%s', '%s', %s)" % (table, col, "TRUE" if present else "FALSE")
+                if row not in text:
+                    gaps.append("%s: %s does not check %s" % (where, name, row))
         elif ddl.lstrip().upper().startswith("DELETE"):
             if not re.search(r"\bINSERT INTO %s\b" % re.escape(table), broken, re.I):
                 gaps.append("%s: ci_break_schema.sql writes no row for the DELETE on %s to remove" % (where, table))

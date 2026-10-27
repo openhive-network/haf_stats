@@ -116,4 +116,29 @@ $$;
 -- superusers run installs; haf_stats_user must not reach it.
 REVOKE EXECUTE ON FUNCTION haf_stats_app.apply_schema_migration(BOOLEAN, TEXT, TEXT, TEXT, INT) FROM public;
 
+-- ---------------------------------------------------------------------------
+-- The custom_json_type_id HAF gave a custom_json id, for the upgrades that rewrite a json_id TEXT
+-- column into custom_json_type_id SMALLINT (account_custom_json_daily, network_custom_json_daily).
+-- Called per row from ALTER COLUMN ... TYPE ... USING, which cannot take a subquery. An id HAF
+-- has no entry for raises, which fails that ALTER TABLE as a whole: the table is left as it was.
+-- ---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS haf_stats_app.custom_json_type_id_of;
+CREATE OR REPLACE FUNCTION haf_stats_app.custom_json_type_id_of(_json_id TEXT)
+RETURNS SMALLINT
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _id SMALLINT;
+BEGIN
+    SELECT t.id INTO _id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = _json_id;
+    IF _id IS NULL THEN
+        RAISE EXCEPTION 'haf_stats: custom_json id % has no entry in hafd.custom_json_types', quote_literal(_json_id)
+            USING HINT = 'The rollup holds an id this HAF never recorded, so it cannot be converted. Nothing was changed.';
+    END IF;
+    RETURN _id;
+END;
+$$;
+
 RESET ROLE;
