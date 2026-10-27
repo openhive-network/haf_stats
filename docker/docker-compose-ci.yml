@@ -41,10 +41,12 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_authored_ops_fallback.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_community_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_content_stats.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_content_cohorts.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /community_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /hivemind_oracle_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /mainnet_community_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /community_vs_hivemind.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_hivemind_source.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_witness_blocks.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /witness_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /seed_data.sql &&
@@ -107,6 +109,11 @@ services:
       # Real mainnet threads replayed as raw ops, checked against hivemind's own verdict.
       - ../tests/mainnet_community_fixture.sql:/mainnet_community_fixture.sql:ro
       - ../tests/parity/community_vs_hivemind.sql:/community_vs_hivemind.sql:ro
+      # The hivemind content source over the same synthetic content, against the internal
+      # source, plus its batch-end clamp to hivemind's head. Needs the cohort processor, which
+      # nothing else in this lane loads.
+      - ../db/process_content_cohorts.sql:/process_content_cohorts.sql:ro
+      - ../tests/ci_hivemind_source.sql:/ci_hivemind_source.sql:ro
       # Executes the op-ceiling guard, which no tavern test can reach (the corpus is far
       # below any sane ceiling), so the truncation path does not ship unexecuted.
       - ../tests/parity/interactions_cap.sql:/interactions_cap.sql:ro

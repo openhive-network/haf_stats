@@ -461,6 +461,15 @@ BEGIN
         IF _timed THEN _t := haf_stats_app.report_deferred_refresh_timing('refresh_network_content_periods', _from, _as_of, _t); END IF;
         PERFORM haf_stats_app.refresh_engagement_touched();
         IF _timed THEN _t := haf_stats_app.report_deferred_refresh_timing('refresh_engagement_touched', _from, _as_of, _t); END IF;
+        -- The presence-set rows only these refreshes still needed (prune_content_presence,
+        -- db/process_content_stats.sql), bounded by the next batch: its refresh starts at
+        -- the 1200-block bucket holding the last processed block, and it starts after _as_of.
+        PERFORM haf_stats_app.prune_content_presence(
+            COALESCE(
+                (SELECT b.created_at::DATE FROM hafd.blocks AS b WHERE b.num = GREATEST((_last_block / 1200) * 1200, 1)),
+                -- A bucket is far shorter than a day.
+                _as_of::DATE - 1),
+            _as_of::DATE);
     END IF;
 
     DELETE FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'process_content_cohorts'

@@ -158,8 +158,12 @@ BEGIN
          SELECT day, posts, comments, edits FROM haf_stats_backend.network_content_daily)
     ) d;
 
+    -- The live processor keeps only the recent end of the author set (prune_content_presence,
+    -- db/process_content_stats.sql) while the rebuild restores all of it, so the two are
+    -- compared from the live set's oldest day on. Everything from there must match exactly.
     SELECT COUNT(*) INTO _author_diff FROM (
         (SELECT day, author_id FROM haf_stats_backend.network_author_daily
+         WHERE day >= COALESCE((SELECT MIN(day) FROM _live_author), DATE '-infinity')
          EXCEPT
          SELECT day, author_id FROM _live_author)
         UNION ALL

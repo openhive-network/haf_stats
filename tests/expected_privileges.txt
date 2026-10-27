@@ -10,6 +10,7 @@ function haf_stats_app.backfill_rollup_if_column_null(_rollup regclass, _sentine
 function haf_stats_app.backfill_rollup_if_empty(_rollup regclass, _source regclass, _refresh_call text) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.block_range_for_dates(_from date, _to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.content_source() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.continue_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.create_context_if_not_exists() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -24,6 +25,7 @@ function haf_stats_app.max_interaction_ops() | owner=haf_stats_owner | secdef=fa
 function haf_stats_app.network_custom_json_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.network_op_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_authored_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prepare_batch_creations(_first_block integer, _last_block integer, _hivemind boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_exact_rc(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_ops(_first_block integer, _last_block integer, _op_types integer[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_community_batch_stage() | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -35,12 +37,14 @@ function haf_stats_app.process_blocks(IN _block_range hive.blocks_range) | owner
 function haf_stats_app.process_community_registry(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_content_cohorts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_content_stats(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.process_content_stats_range(_first_block integer, _last_block integer, _hivemind boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_content_volume(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_financial(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_network_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_network_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_witness_blocks(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prune_content_presence(_refresh_lo date, _batch_first date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.rc_avg_cost(_op_type_id smallint, _day date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.rc_cost_available() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.rc_rate(_op_type_id smallint, _day date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -69,11 +73,13 @@ function haf_stats_app.run_deferred_rollup_refreshes() | owner=haf_stats_owner |
 function haf_stats_app.run_deferred_rollup_refreshes_past_massive() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.select_content_source(_requested text, _allow_switch boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.sync_status() | owner=haf_stats_owner | secdef=true | acl=haf_stats_user:EXECUTE
 function haf_stats_app.to_filter_date(_input text, _default date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.top_accounts_window(_from date, _to date, _now date, OUT lead_from date, OUT lead_to date, OUT trail_from date, OUT trail_to date, OUT mm_from date, OUT mm_to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.try_jsonb(_txt text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.wait_for_hivemind(_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_endpoints.get_account_community_activity(account text, from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_endpoints.get_account_content_stats(account text, from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_endpoints.get_account_dapp_footprint(account text, from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -109,6 +115,7 @@ sequence haf_stats_app.haf_stats_hive_rowid_seq | owner=haf_stats_owner | acl=<d
 table haf_stats_app.app_config | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.app_status | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.app_version | owner=haf_stats_owner | acl=haf_stats_user:SELECT
+table haf_stats_app.content_source_config | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.deferred_rollup_refreshes | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.haf_stats | owner=haf_stats_owner | acl=<default>
 table haf_stats_backend.account_cohort_members | owner=haf_stats_owner | acl=haf_stats_user:SELECT

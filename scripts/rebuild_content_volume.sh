@@ -26,6 +26,15 @@
 # content tables — NOT process_content_stats, whose shared scan also feeds votes/engagement
 # and would re-double those if re-run.
 #
+# It replays from the deployment's recorded content source (README, "Content source"): the
+# comment_registry replay, or hivemind's creations. HAF_STATS_CONTENT_SOURCE=internal|hivemind
+# switches the recorded source first -- the one supported way to change the source of a
+# deployment that has processed blocks, short of a replay. On the hivemind source hivemind must
+# already have reached the app's last processed block; the script refuses otherwise. It also
+# restores network_author_daily's full history, which the processor otherwise keeps only for
+# the cohort window: run scripts/rebuild_content_cohorts.sh right after this, before the
+# processor starts, if the cohorts need rebuilding too.
+#
 # The rebuild covers exactly [1, last_processed_block]. Both ends are mandatory:
 #   * It MUST start at block 1: create-vs-edit classification replays comment_registry
 #     from genesis, so a partial-range rebuild misclassifies.
@@ -136,11 +145,31 @@ fi
 
 refuse_if_processor_live
 
-log "Rebuilding content-volume + per-account content aggregates through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
+# Before anything is truncated: a refused switch, or a hivemind that is behind, must leave the
+# tables as they are. -v and stdin keep the value out of the SQL text, as install_app.sh does.
+if [[ -n "${HAF_STATS_CONTENT_SOURCE:-}" ]]; then
+    psql_cmd -v content_source="${HAF_STATS_CONTENT_SOURCE}" <<'SQL'
+        SET ROLE haf_stats_owner;
+        SELECT haf_stats_app.select_content_source(:'content_source', TRUE);
+        RESET ROLE;
+SQL
+fi
+content_source="$(psql_cmd -Atc "SELECT haf_stats_app.content_source()")"
+if [[ "${content_source}" == "hivemind" ]]; then
+    # A zero timeout: report at once rather than wait for hivemind inside the rebuild.
+    psql_cmd -c "
+        SET ROLE haf_stats_owner;
+        SET haf_stats.hivemind_wait_timeout = 0;
+        SELECT haf_stats_app.wait_for_hivemind(${TO_BLOCK});
+    "
+fi
+
+log "Rebuilding content-volume + per-account content aggregates through app block ${TO_BLOCK} in batches of ${BATCH_SIZE} (content source: ${content_source})."
 log "The haf_stats processor must remain stopped until this command finishes."
 
 # comment_registry is scratch state: a full genesis->TO_BLOCK replay leaves it in the
-# exact live-comment set the stopped processor had, so live processing resumes cleanly.
+# exact live-comment set the stopped processor had, so live processing resumes cleanly. On
+# the hivemind source the replay leaves it empty, as the processor does.
 #
 # account_content_daily is NOT truncated: votes_cast/votes_received come from a SEPARATE
 # vote scan that process_content_volume does not reproduce, and they are already correct.

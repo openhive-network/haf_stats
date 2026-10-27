@@ -56,6 +56,10 @@ GRANT SELECT ON haf_stats_backend.account_content_daily TO haf_stats_user;
 -- edits). comment_registry mirrors the chain's live-comment set — the minimal
 -- state needed to classify each op the way the chain itself does (find_comment
 -- hit = edit), including re-creation after delete.
+--
+-- That is the INTERNAL content source. Where hivemind is co-located, its hive_posts already
+-- holds the same creation set and the hivemind source reads it instead (see "Content source"
+-- below); comment_registry then stays empty.
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.comment_registry (
     author_id INT NOT NULL,
@@ -308,6 +312,327 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.network_vote_period_counts (
 );
 
 GRANT SELECT ON haf_stats_backend.network_vote_period_counts TO haf_stats_user;
+
+-- ---------------------------------------------------------------------------
+-- Content source: where the comment create-vs-edit classification comes from
+--
+--   'internal'  replays the chain's own decision through comment_registry (above).
+--   'hivemind'  reads the creations hivemind already stores. hivemind_app.hive_posts holds one
+--               row per creation -- a re-creation after delete gets a new row (unique key
+--               (author_id, permlink_id, counter_deleted)) -- with block_num_created, depth,
+--               parent_id and the thread's community_id. tests/parity/content_vs_hivemind.sql
+--               shows its posts match ours exactly per day and per author over all of history.
+--
+-- Decided ONCE per deployment, by install_app.sh (select_content_source), and recorded here;
+-- never per batch. The two cannot be mixed: blocks processed from hivemind leave
+-- comment_registry without their state, so the internal path would misclassify every later
+-- edit of them. Switching an existing deployment therefore takes scripts/rebuild_content_volume.sh
+-- (which passes _allow_switch) or a replay.
+--
+-- Known difference on the hivemind source: hivemind's massive sync drops a re-created reply
+-- whose parent is also deleted and re-created in the same batch (hive/hivemind#394; on 52 days
+-- of 2016-2021, at most 1.33% of a day's comments). That creation is missing here too, and its
+-- comment op is counted as an edit.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS haf_stats_app.content_source_config (
+    source TEXT NOT NULL CHECK (source IN ('internal', 'hivemind'))
+);
+
+-- Singleton, by the same constant-expression index as app_status (db/haf_stats_app.sql).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_content_source_config_singleton
+ON haf_stats_app.content_source_config ((TRUE));
+
+-- No row reads as 'internal': the stub lane, and a database no install has decided for.
+DROP FUNCTION IF EXISTS haf_stats_app.content_source;
+CREATE OR REPLACE FUNCTION haf_stats_app.content_source()
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE((SELECT c.source FROM haf_stats_app.content_source_config AS c), 'internal');
+$$;
+
+-- Records the deployment's source and returns it. _requested is 'auto', 'internal' or
+-- 'hivemind' (install_app.sh's HAF_STATS_CONTENT_SOURCE). auto keeps a recorded source; with
+-- none recorded it takes hivemind when haf_stats_owner -- the processor -- can read every
+-- hivemind_app column the hivemind path uses, and internal otherwise. A deployment that has
+-- processed blocks without a record was installed before the choice existed, so its tables came
+-- from the internal path and it counts as recorded 'internal'.
+--
+-- A change of source on a deployment that has processed blocks is refused unless _allow_switch
+-- (scripts/rebuild_content_volume.sh, which rebuilds the content tables from the new source).
+DROP FUNCTION IF EXISTS haf_stats_app.select_content_source;
+CREATE OR REPLACE FUNCTION haf_stats_app.select_content_source(
+    _requested TEXT,
+    _allow_switch BOOLEAN DEFAULT FALSE
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    _processed CONSTANT BOOLEAN := (
+        SELECT COALESCE(MAX(s.last_processed_block), 0) > 0 FROM haf_stats_app.app_status AS s
+    );
+    _recorded TEXT := (SELECT c.source FROM haf_stats_app.content_source_config AS c);
+    _unreadable TEXT;
+    _chosen TEXT;
+BEGIN
+    IF _requested IS NULL OR _requested NOT IN ('auto', 'internal', 'hivemind') THEN
+        RAISE EXCEPTION 'haf_stats: the content source must be auto, internal or hivemind, got %', COALESCE(_requested, '(null)');
+    END IF;
+    IF _recorded IS NULL AND _processed THEN
+        _recorded := 'internal';
+    END IF;
+
+    -- Each probe is a CASE arm rather than an AND: has_schema_privilege and has_column_privilege
+    -- raise on an object that does not exist, and SQL does not promise to short-circuit.
+    SELECT string_agg(format('%s.%s', r.rel, r.col), ', ' ORDER BY r.rel, r.col) INTO _unreadable
+    FROM (
+        VALUES
+        ('hive_posts', 'id'), ('hive_posts', 'author_id'), ('hive_posts', 'permlink_id'),
+        ('hive_posts', 'parent_id'), ('hive_posts', 'depth'), ('hive_posts', 'community_id'),
+        ('hive_posts', 'block_num_created'),
+        ('hive_accounts', 'id'), ('hive_accounts', 'name'),
+        ('hive_permlink_data', 'id'), ('hive_permlink_data', 'permlink'),
+        ('hive_communities', 'id'), ('hive_communities', 'name')
+    ) AS r (rel, col)
+    WHERE NOT CASE
+        WHEN to_regnamespace('hivemind_app') IS NULL THEN FALSE
+        WHEN NOT has_schema_privilege('haf_stats_owner', 'hivemind_app', 'USAGE') THEN FALSE
+        WHEN NOT EXISTS (
+            SELECT 1 FROM pg_attribute AS a
+            WHERE a.attrelid = to_regclass('hivemind_app.' || r.rel)
+              AND a.attname = r.col
+              AND NOT a.attisdropped
+        ) THEN FALSE
+        ELSE has_column_privilege('haf_stats_owner', to_regclass('hivemind_app.' || r.rel), r.col, 'SELECT')
+    END;
+
+    _chosen := CASE
+        WHEN _requested <> 'auto' THEN _requested
+        WHEN _recorded IS NOT NULL THEN _recorded
+        WHEN _unreadable IS NULL THEN 'hivemind'
+        ELSE 'internal'
+    END;
+
+    IF _chosen = 'hivemind' AND _unreadable IS NOT NULL THEN
+        RAISE EXCEPTION 'haf_stats: the hivemind content source needs haf_stats_owner to read hivemind_app, and it cannot read: %', _unreadable
+            USING HINT = 'Install hivemind, then re-run scripts/install_app.sh as the schema owner or a superuser so db/builtin_roles.sql grants the reads; or install with HAF_STATS_CONTENT_SOURCE=internal.';
+    END IF;
+
+    IF _chosen IS DISTINCT FROM _recorded AND _recorded IS NOT NULL AND _processed AND NOT _allow_switch THEN
+        RAISE EXCEPTION 'haf_stats: this deployment''s content tables were built from the % content source; switching to % needs a content rebuild', _recorded, _chosen
+            USING HINT = format('Stop the processor and run HAF_STATS_CONTENT_SOURCE=%s scripts/rebuild_content_volume.sh (or replay from genesis); or install with HAF_STATS_CONTENT_SOURCE=%s.', _chosen, _recorded);
+    END IF;
+
+    UPDATE haf_stats_app.content_source_config SET source = _chosen WHERE source IS DISTINCT FROM _chosen;
+    INSERT INTO haf_stats_app.content_source_config (source)
+    SELECT _chosen
+    WHERE NOT EXISTS (SELECT 1 FROM haf_stats_app.content_source_config);
+
+    IF _chosen = 'internal' AND _requested = 'auto' AND _unreadable IS NULL THEN
+        RAISE NOTICE 'haf_stats: content source internal (recorded); hivemind_app is readable, but switching to it needs HAF_STATS_CONTENT_SOURCE=hivemind scripts/rebuild_content_volume.sh or a replay';
+    ELSE
+        RAISE NOTICE 'haf_stats: content source %', _chosen;
+    END IF;
+    RETURN _chosen;
+END;
+$$;
+
+-- The highest block the hivemind source may read, once it is at least _block. Every
+-- content-stats batch on that source ends at or below it (process_content_stats).
+--
+-- hivemind's context head (hafd.contexts.current_block_num), capped by its own completion marker
+-- (hive_state.last_completed_block_num) where it has one: in massive sync hivemind advances its
+-- head before that batch's rows are written. While hive_posts has no valid index leading with
+-- block_num_created -- hivemind drops it for its own massive sync -- the read would be a full
+-- scan of hive_posts per batch, so that reads as "not there yet" as well.
+--
+-- Waits, never falls back: a batch processed from the other source would mix the two (see the
+-- section header). haf_stats.hivemind_wait_timeout (seconds) turns a wait longer than that into
+-- an error; unset, it waits as long as hivemind takes. Each pass is a fresh statement, so it
+-- sees what hivemind has committed since (READ COMMITTED, as both block drivers run).
+DROP FUNCTION IF EXISTS haf_stats_app.wait_for_hivemind;
+CREATE OR REPLACE FUNCTION haf_stats_app.wait_for_hivemind(_block INT)
+RETURNS INT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    _timeout CONSTANT NUMERIC := NULLIF(current_setting('haf_stats.hivemind_wait_timeout', TRUE), '')::NUMERIC;
+    _started CONSTANT TIMESTAMPTZ := clock_timestamp();
+    _head INT;
+    _completed INT;
+    _waiting BOOLEAN := FALSE;
+BEGIN
+    LOOP
+        SELECT c.current_block_num INTO _head FROM hafd.contexts AS c WHERE c.name = 'hivemind_app';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'haf_stats: the content source is hivemind, but hafd.contexts shows haf_stats_owner no hivemind_app context'
+                USING HINT = 'hivemind is not installed as a HAF app here, or haf_stats_owner lost hive_applications_group (row-level security hides the row). See README, "Content source".';
+        END IF;
+
+        IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
+            SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+            _head := LEAST(_head, COALESCE(_completed, _head));
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_index AS i
+            JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+            WHERE i.indrelid = to_regclass('hivemind_app.hive_posts')
+              AND a.attname = 'block_num_created'
+              AND i.indisvalid
+              AND i.indisready
+        ) THEN
+            _head := 0;
+        END IF;
+
+        EXIT WHEN _head >= _block;
+
+        IF _timeout IS NOT NULL AND clock_timestamp() - _started >= make_interval(secs => _timeout) THEN
+            RAISE EXCEPTION 'haf_stats: hivemind has not reached block % (usable through %) within haf_stats.hivemind_wait_timeout = % s', _block, _head, _timeout;
+        END IF;
+        IF NOT _waiting THEN
+            RAISE NOTICE 'haf_stats: waiting for hivemind to reach block % (usable through %)', _block, _head;
+            _waiting := TRUE;
+        END IF;
+        PERFORM pg_sleep(1);
+    END LOOP;
+    RETURN _head;
+END;
+$$;
+
+-- The batch's creations from hivemind, one row per hive_posts row created in the range, in the
+-- shape the processors' `classified` rows take: author and parent resolved to hafd account ids
+-- and names ('' as the parent author of a root post, as in comment_operation), the day by block
+-- time (hivemind's own created_at is 3 s before it), and the community the creation belongs to
+-- (hivemind stores the root's community on every reply in the thread).
+--
+-- Created on both sources -- left empty on the internal one -- because the processors' single
+-- statement names it either way. ON COMMIT DROP, like the other per-batch stages.
+DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_creations;
+CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_creations(
+    _first_block INT,
+    _last_block INT,
+    _hivemind BOOLEAN
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+    IF TO_REGCLASS('pg_temp.haf_stats_batch_creations') IS NULL THEN
+        CREATE TEMP TABLE haf_stats_batch_creations (
+            -- hive_posts.id, which hivemind assigns in creation order.
+            id BIGINT PRIMARY KEY,
+            author_id INT NOT NULL,
+            permlink TEXT NOT NULL,
+            parent_author TEXT NOT NULL,
+            parent_permlink TEXT,
+            day DATE NOT NULL,
+            block_num INT NOT NULL,
+            community TEXT
+        ) ON COMMIT DROP;
+    ELSE
+        TRUNCATE haf_stats_batch_creations;
+    END IF;
+
+    IF NOT _hivemind THEN
+        RETURN;
+    END IF;
+
+    INSERT INTO haf_stats_batch_creations
+        (id, author_id, permlink, parent_author, parent_permlink, day, block_num, community)
+    SELECT
+        hp.id,
+        a.id,
+        pd.permlink,
+        CASE WHEN hp.depth = 0 THEN '' ELSE ppa.name END,
+        CASE WHEN hp.depth = 0 THEN NULL ELSE ppd.permlink END,
+        b.created_at::DATE,
+        hp.block_num_created,
+        hc.name
+    FROM hivemind_app.hive_posts AS hp
+    JOIN hafd.blocks AS b ON b.num = hp.block_num_created
+    JOIN hivemind_app.hive_accounts AS ha ON ha.id = hp.author_id
+    JOIN hafd.accounts AS a ON a.name = ha.name
+    JOIN hivemind_app.hive_permlink_data AS pd ON pd.id = hp.permlink_id
+    LEFT JOIN hivemind_app.hive_posts AS pp ON pp.id = hp.parent_id AND hp.depth > 0
+    LEFT JOIN hivemind_app.hive_accounts AS ppa ON ppa.id = pp.author_id
+    LEFT JOIN hivemind_app.hive_permlink_data AS ppd ON ppd.id = pp.permlink_id
+    LEFT JOIN hivemind_app.hive_communities AS hc ON hc.id = hp.community_id
+    WHERE hp.block_num_created BETWEEN _first_block AND _last_block
+      -- Row 0 is hivemind's placeholder parent of every root post, not a creation.
+      AND hp.id > 0;
+
+    ANALYZE haf_stats_batch_creations;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Presence-set retention
+--
+-- network_voter_daily and network_author_daily are read only by the processor: the period
+-- refreshes re-aggregate the day/week/month periods a batch touches, and process_content_cohorts
+-- reads the author set over its own batch's days. Called on every batch that crosses a refresh
+-- boundary, this deletes the rows no later read can reach:
+--   * voters before the start of the oldest week or month of _refresh_lo, the day the batch's
+--     refresh starts from (a later batch's refresh starts at or after it);
+--   * authors before that day, or the cohort window (181 days) before _batch_first, whichever
+--     is earlier -- bounded by the batch's FIRST block, since a massive-sync batch spans days;
+--   * neither before the oldest period a deferred refresh still has to restate.
+--
+-- That last bound would keep everything for a whole replay: during massive sync the refreshes
+-- are recorded from the first batch's day instead of run (defer_rollup_refresh). So once
+-- _refresh_lo has moved into a later month than the record, the periods before _refresh_lo --
+-- complete, since every block before this batch is processed -- are restated here, once, and
+-- the record moves up to _refresh_lo. A week or month that _refresh_lo is still in is restated
+-- again from the record later, and from its start every row is kept.
+--
+-- So a full refresh from genesis (refresh_network_*_periods(<genesis>, NULL)) can no longer
+-- restate the unique voters/authors of a pruned period: the rollups it would rewrite are the
+-- only record of them. scripts/rebuild_content_volume.sh restores the author set's history.
+-- ---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS haf_stats_app.prune_content_presence;
+CREATE OR REPLACE FUNCTION haf_stats_app.prune_content_presence(
+    _refresh_lo DATE,
+    _batch_first DATE
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _deferred DATE := (
+        SELECT d.dirty_from FROM haf_stats_app.deferred_rollup_refreshes AS d
+        WHERE d.processor = 'process_content_stats'
+    );
+    _lo DATE;
+    _keep DATE;
+BEGIN
+    IF _refresh_lo IS NULL OR _batch_first IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF DATE_TRUNC('month', _deferred) < DATE_TRUNC('month', _refresh_lo) THEN
+        PERFORM haf_stats_app.refresh_network_vote_periods(_deferred, _refresh_lo - 1);
+        PERFORM haf_stats_app.refresh_network_content_periods(_deferred, _refresh_lo - 1);
+        UPDATE haf_stats_app.deferred_rollup_refreshes SET dirty_from = _refresh_lo
+        WHERE processor = 'process_content_stats';
+        _deferred := _refresh_lo;
+    END IF;
+
+    -- LEAST ignores the NULL of "nothing deferred".
+    _lo := LEAST(_refresh_lo, _deferred);
+    _keep := LEAST(DATE_TRUNC('week', _lo), DATE_TRUNC('month', _lo))::DATE;
+    DELETE FROM haf_stats_backend.network_voter_daily WHERE day < _keep;
+    DELETE FROM haf_stats_backend.network_author_daily WHERE day < LEAST(_keep, _batch_first - 181);
+END;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Community resolution (issue #47) — shared by BOTH comment-scan paths
@@ -888,13 +1213,11 @@ LANGUAGE plpgsql
 SET jit = OFF
 AS $$
 DECLARE
-    _first_day DATE;
-    _last_day DATE;
-    _refresh_lo_block INT;
     _high_water INT;
-    _timed BOOLEAN;
-    _t TIMESTAMPTZ;
+    _done INT;
+    _end INT;
 BEGIN
+
 
 -- Recurrence guard for issue #42. Every counter below accumulates additively
 -- (network_content_daily, account_content_daily, network_vote_daily), so replaying
@@ -914,8 +1237,45 @@ IF _first_block <= _high_water THEN
         USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
 END IF;
 
+-- On the hivemind source no batch may read hive_posts past what hivemind has written, so a
+-- range it has only partly reached is processed in the pieces it has, waiting in between
+-- (wait_for_hivemind); never past it, and never from the other source.
+IF haf_stats_app.content_source() = 'hivemind' THEN
+    _done := _first_block - 1;
+    WHILE _done < _last_block LOOP
+        _end := LEAST(_last_block, haf_stats_app.wait_for_hivemind(_done + 1));
+        PERFORM haf_stats_app.process_content_stats_range(_done + 1, _end, TRUE);
+        _done := _end;
+    END LOOP;
+ELSE
+    PERFORM haf_stats_app.process_content_stats_range(_first_block, _last_block, FALSE);
+END IF;
+
+END;
+$$;
+
+-- One range of process_content_stats, from the given source (see "Content source" above).
+DROP FUNCTION IF EXISTS haf_stats_app.process_content_stats_range;
+CREATE OR REPLACE FUNCTION haf_stats_app.process_content_stats_range(
+    _first_block INT,
+    _last_block INT,
+    _hivemind BOOLEAN
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+DECLARE
+    _first_day DATE;
+    _last_day DATE;
+    _refresh_lo_block INT;
+    _timed BOOLEAN;
+    _t TIMESTAMPTZ;
+BEGIN
+
 PERFORM haf_stats_app.prepare_community_batch_stage();
 PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[0, 1, 17, 73]);
+PERFORM haf_stats_app.prepare_batch_creations(_first_block, _last_block, _hivemind);
 
 -- Comment and vote ops: ONE statement over the batch's staged ops, each table written once.
 --   comment_registry      — live-comment set, the create-vs-edit decision state
@@ -1013,9 +1373,19 @@ classified AS (
         s.is_last,
         k.author_id,
         k.permlink,
-        s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create
+        s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create,
+        NULL::TEXT AS community
     FROM seq s
     JOIN comment_keys k ON k.author = s.author AND k.permlink = s.permlink
+    WHERE NOT _hivemind
+    UNION ALL
+    -- The hivemind source: its creations, already classified, with their community. Only
+    -- creations are rows here (edits are counted by network_counts from the comment ops), and
+    -- is_last is FALSE so no comment_registry state is written.
+    SELECT c.id, c.parent_author, c.parent_permlink, c.day, c.block_num, TRUE, FALSE,
+           c.author_id, c.permlink, TRUE, c.community
+    FROM haf_stats_batch_creations c
+    WHERE _hivemind
 ),
 -- Stage this batch's comment CREATIONS for resolve_community_batch() (issue #47) — one
 -- row per creation event, keyed by op id. Any coarser grain merges creations that belong
@@ -1053,6 +1423,25 @@ community_stage AS (
     LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
     WHERE c.is_create
       AND c.block_num >= haf_stats_app.community_start_block()
+      AND NOT _hivemind
+),
+-- The hivemind source already carries each creation's community, so it is bucketed directly
+-- instead of through the stage and resolve_community_batch().
+hivemind_communities AS (
+    INSERT INTO haf_stats_backend.account_community_daily AS acd
+        (account_id, day, community, posts, comments)
+    SELECT
+        author_id,
+        day,
+        community,
+        COUNT(*) FILTER (WHERE parent_author = '')::INT,
+        COUNT(*) FILTER (WHERE parent_author <> '')::INT
+    FROM classified
+    WHERE _hivemind AND community IS NOT NULL
+    GROUP BY author_id, day, community
+    ON CONFLICT (account_id, day, community) DO UPDATE SET
+        posts    = acd.posts    + EXCLUDED.posts,
+        comments = acd.comments + EXCLUDED.comments
 ),
 -- End-of-batch registry state: a comment is present iff its last event is a
 -- comment op. The add/remove key sets are disjoint (is_last is unique per key),
@@ -1082,13 +1471,29 @@ stage_removed_communities AS (
 ),
 network_counts AS (
     INSERT INTO haf_stats_backend.network_content_daily AS ncd (day, posts, comments, edits)
-    SELECT
-        day,
-        COUNT(*) FILTER (WHERE is_create AND parent_author = ''),
-        COUNT(*) FILTER (WHERE is_create AND parent_author <> ''),
-        COUNT(*) FILTER (WHERE NOT is_create)
-    FROM classified
-    WHERE is_comment
+    SELECT day, SUM(posts), SUM(comments), SUM(edits)
+    FROM (
+        SELECT
+            day,
+            COUNT(*) FILTER (WHERE is_create AND parent_author = '')  AS posts,
+            COUNT(*) FILTER (WHERE is_create AND parent_author <> '') AS comments,
+            COUNT(*) FILTER (WHERE NOT is_create)                     AS edits
+        FROM classified
+        WHERE is_comment
+        GROUP BY day
+        UNION ALL
+        -- The hivemind source's classified rows are creations only: every other comment op
+        -- of the day is an edit.
+        SELECT day, 0, 0, COUNT(*)
+        FROM comment_ops
+        WHERE _hivemind
+        GROUP BY day
+        UNION ALL
+        SELECT day, 0, 0, -COUNT(*)
+        FROM classified
+        WHERE _hivemind
+        GROUP BY day
+    ) per_day
     GROUP BY day
     ON CONFLICT (day) DO UPDATE SET
         posts    = ncd.posts    + EXCLUDED.posts,
@@ -1303,8 +1708,11 @@ ON CONFLICT (account_id, day) DO UPDATE SET
 
 -- Resolve the staged batch's communities and write comment_registry.community +
 -- account_community_daily. Must be a SEPARATE statement: the community of a reply whose
--- parent was created just above is only knowable once that INSERT is visible.
-PERFORM haf_stats_app.resolve_community_batch();
+-- parent was created just above is only knowable once that INSERT is visible. The hivemind
+-- source wrote account_community_daily above (hivemind_communities).
+IF NOT _hivemind THEN
+    PERFORM haf_stats_app.resolve_community_batch();
+END IF;
 
 -- Refresh the get_network_vote_stats and get_network_content_volume rollups on a ~1200-block
 -- (~1h) boundary. Recompute every day/week/month period that received data since the previous
@@ -1337,7 +1745,12 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
 
     -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql);
     -- engagement_touched_days keeps every creation-day staged meanwhile for the deferred drain.
-    IF NOT haf_stats_app.defer_rollup_refresh('process_content_stats', _first_day) THEN
+    IF haf_stats_app.defer_rollup_refresh('process_content_stats', _first_day) THEN
+        -- Restates the periods that can no longer change, once a month of chain time, so the
+        -- presence sets do not keep a whole replay's rows until the deferred refresh.
+        PERFORM haf_stats_app.prune_content_presence(
+            _first_day, (SELECT created_at::DATE FROM hafd.blocks WHERE num = _first_block));
+    ELSE
         -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
         _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';
         IF _timed THEN _t := clock_timestamp(); END IF;
@@ -1359,6 +1772,10 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         IF _timed THEN _t := clock_timestamp(); END IF;
         PERFORM haf_stats_app.refresh_engagement_touched();
         IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
+
+        -- The presence sets' rows the refreshes above were the last to need.
+        PERFORM haf_stats_app.prune_content_presence(
+            _first_day, (SELECT created_at::DATE FROM hafd.blocks WHERE num = _first_block));
     END IF;
 END IF;
 
@@ -1423,10 +1840,13 @@ RETURNS VOID
 LANGUAGE plpgsql
 SET jit = OFF
 AS $$
+DECLARE
+    _hivemind CONSTANT BOOLEAN := haf_stats_app.content_source() = 'hivemind';
 BEGIN
 
 PERFORM haf_stats_app.prepare_community_batch_stage();
 PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[1, 17, 73]);
+PERFORM haf_stats_app.prepare_batch_creations(_first_block, _last_block, _hivemind);
 
 WITH comment_ops AS MATERIALIZED (
     SELECT
@@ -1513,9 +1933,19 @@ classified AS (
         s.is_last,
         k.author_id,
         k.permlink,
-        s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create
+        s.is_comment AND COALESCE(NOT s.prev_is_comment, NOT k.pre_exists) AS is_create,
+        NULL::TEXT AS community
     FROM seq s
     JOIN comment_keys k ON k.author = s.author AND k.permlink = s.permlink
+    WHERE NOT _hivemind
+    UNION ALL
+    -- The hivemind source: its creations, already classified, with their community. Only
+    -- creations are rows here (edits are counted by network_counts from the comment ops), and
+    -- is_last is FALSE so no comment_registry state is written.
+    SELECT c.id, c.parent_author, c.parent_permlink, c.day, c.block_num, TRUE, FALSE,
+           c.author_id, c.permlink, TRUE, c.community
+    FROM haf_stats_batch_creations c
+    WHERE _hivemind
 ),
 -- Stage this batch's comment CREATIONS for resolve_community_batch() (issue #47) — one
 -- row per creation event, keyed by op id. Any coarser grain merges creations that belong
@@ -1553,6 +1983,25 @@ community_stage AS (
     LEFT JOIN hafd.accounts pa ON pa.name = c.parent_author
     WHERE c.is_create
       AND c.block_num >= haf_stats_app.community_start_block()
+      AND NOT _hivemind
+),
+-- The hivemind source already carries each creation's community, so it is bucketed directly
+-- instead of through the stage and resolve_community_batch().
+hivemind_communities AS (
+    INSERT INTO haf_stats_backend.account_community_daily AS acd
+        (account_id, day, community, posts, comments)
+    SELECT
+        author_id,
+        day,
+        community,
+        COUNT(*) FILTER (WHERE parent_author = '')::INT,
+        COUNT(*) FILTER (WHERE parent_author <> '')::INT
+    FROM classified
+    WHERE _hivemind AND community IS NOT NULL
+    GROUP BY author_id, day, community
+    ON CONFLICT (account_id, day, community) DO UPDATE SET
+        posts    = acd.posts    + EXCLUDED.posts,
+        comments = acd.comments + EXCLUDED.comments
 ),
 -- End-of-batch registry state: a comment is present iff its last event is a
 -- comment op. The add/remove key sets are disjoint (is_last is unique per key),
@@ -1582,13 +2031,29 @@ stage_removed_communities AS (
 ),
 network_counts AS (
     INSERT INTO haf_stats_backend.network_content_daily AS ncd (day, posts, comments, edits)
-    SELECT
-        day,
-        COUNT(*) FILTER (WHERE is_create AND parent_author = ''),
-        COUNT(*) FILTER (WHERE is_create AND parent_author <> ''),
-        COUNT(*) FILTER (WHERE NOT is_create)
-    FROM classified
-    WHERE is_comment
+    SELECT day, SUM(posts), SUM(comments), SUM(edits)
+    FROM (
+        SELECT
+            day,
+            COUNT(*) FILTER (WHERE is_create AND parent_author = '')  AS posts,
+            COUNT(*) FILTER (WHERE is_create AND parent_author <> '') AS comments,
+            COUNT(*) FILTER (WHERE NOT is_create)                     AS edits
+        FROM classified
+        WHERE is_comment
+        GROUP BY day
+        UNION ALL
+        -- The hivemind source's classified rows are creations only: every other comment op
+        -- of the day is an edit.
+        SELECT day, 0, 0, COUNT(*)
+        FROM comment_ops
+        WHERE _hivemind
+        GROUP BY day
+        UNION ALL
+        SELECT day, 0, 0, -COUNT(*)
+        FROM classified
+        WHERE _hivemind
+        GROUP BY day
+    ) per_day
     GROUP BY day
     ON CONFLICT (day) DO UPDATE SET
         posts    = ncd.posts    + EXCLUDED.posts,
@@ -1661,7 +2126,9 @@ ON CONFLICT (day, author_id) DO NOTHING;
 -- community is only knowable once the statement above has landed. Keeping this in a
 -- shared function (rather than a copy) is what stops the two paths drifting on the one
 -- piece of logic the rebuild consistency test cannot express as a column comparison.
-PERFORM haf_stats_app.resolve_community_batch();
+IF NOT _hivemind THEN
+    PERFORM haf_stats_app.resolve_community_batch();
+END IF;
 
 END;
 $$;

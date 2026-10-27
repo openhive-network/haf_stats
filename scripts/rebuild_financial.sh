@@ -1,13 +1,12 @@
 #!/bin/bash
 # Rebuild per-account financial daily aggregates from raw HAF data.
 #
-# Required after the issue #26 rename: the category VALUES changed (human-readable
-# 'Transfer'/'Author Reward' + income/expense -> canonical op-type names +
-# incoming/outgoing), so the old rows are keyed differently and the new
-# canonical-keyed upserts never overwrite them. A TRUNCATE + reprocess is the
-# only way to restore historical coverage on an already-populated deployment.
-# Stop the processor first, run install_app.sh (it migrates the direction CHECK,
-# deletes legacy rows, and drops op_financial_categories), then run this script.
+# REQUIRED after an install that recreated account_financial_daily: since issue #110 it
+# stores the category as the op type id and the direction as a boolean, and an install
+# that finds the earlier TEXT category/direction shape (either vocabulary -- the issue #26
+# rename or the one before it) drops the table and creates it again EMPTY, with a warning.
+# No row is converted; this TRUNCATE + reprocess (or a replay) is what restores history.
+# Stop the processor first, run install_app.sh, then run this script.
 #
 # Stop the haf_stats processor before running this script -- stop the haf-stats-process
 # container, which is the only thing that works under both the legacy loop and the HAF

@@ -65,6 +65,9 @@ services:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_admin   # install runs as haf_admin to create roles/context
       POSTGRES_DB:   haf_block_log
+      # auto | internal | hivemind: where post/comment creations come from (README,
+      # "Content source"). auto picks hivemind when this database has a readable one.
+      HAF_STATS_CONTENT_SOURCE: ${HAF_STATS_CONTENT_SOURCE:-auto}
     networks:
       haf-network:
     depends_on:

@@ -1,9 +1,9 @@
 -- Put the schema back to a PRE-UPGRADE state, so install-again runs every guarded upgrade. (#96)
 --
--- Without this, CI ran one guarded statement out of 17: comment_registry.community's
+-- Without this, CI ran one guarded statement out of 14: comment_registry.community's
 -- ADD COLUMN, which every fresh install needs because its CREATE TABLE lacks the column. The other
--- 16 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
--- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 17 (#44 added three); install-again
+-- 13 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
+-- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 14 (#44 added three); install-again
 -- has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
 --
 --  12 dropped columns   active_users_daily.ops, comment_registry.community,
@@ -13,12 +13,10 @@
 --                       account_cohort_retention.eligible_at_7d/_30d/_90d,
 --                       author_cohort_retention.eligible_at_30d/_90d/_180d
 --   1 re-added column   account_custom_json_daily.rc_estimated, the pre-#32 column the upgrade drops
---   the direction CHECK account_financial_daily: the income/expense vocabulary 4a915dd shipped
---                       (inline and validated there, NOT VALID here so the rows below can exist).
---                       That drives the DROP, ADD and VALIDATE guards.
---   2 rows              one pre-canonical ('income') the upgrade's DELETE must remove, and one
---                       canonical ('incoming') it must keep. Nothing else writes this table in this
---                       lane, so without them the DELETE would run and prove nothing.
+--   1 re-created table  account_financial_daily in its TEXT category/direction shape, as every
+--                       release before the compact codes shipped it, holding one row: the upgrade
+--                       must drop it and create the compact shape, empty. Created as
+--                       haf_stats_owner, which owns it on a real node and runs the DROP.
 --
 -- Plus two ROLE edges (#88): haf_stats_user is put into hive_applications_group, which is how
 -- testapi's role looked -- an unmerged revision of db/builtin_roles.sql (9a77508) created it
@@ -56,17 +54,22 @@ DROP COLUMN eligible_at_30d,
 DROP COLUMN eligible_at_90d,
 DROP COLUMN eligible_at_180d;
 
-ALTER TABLE haf_stats_backend.account_financial_daily
-DROP CONSTRAINT account_financial_daily_direction_check;
-
+SET ROLE haf_stats_owner;
+DROP TABLE haf_stats_backend.account_financial_daily;
+CREATE TABLE haf_stats_backend.account_financial_daily (
+    account_id INT NOT NULL,
+    day DATE NOT NULL,
+    category TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+    hive_nai BIGINT NOT NULL DEFAULT 0,
+    hbd_nai BIGINT NOT NULL DEFAULT 0,
+    vests_nai BIGINT NOT NULL DEFAULT 0,
+    op_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, day, category, direction)
+);
 INSERT INTO haf_stats_backend.account_financial_daily (account_id, day, category, direction)
-VALUES
-(900901, '2016-03-24', 'ci_break_schema', 'income'),
-(900901, '2016-03-24', 'ci_break_schema', 'incoming');
-
-ALTER TABLE haf_stats_backend.account_financial_daily
-ADD CONSTRAINT account_financial_daily_direction_check
-CHECK (direction IN ('income', 'expense')) NOT VALID;
+VALUES (900901, '2016-03-24', 'author_reward_operation', 'incoming');
+RESET ROLE;
 
 DO $check$
 DECLARE
@@ -98,20 +101,11 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint AS c
-        WHERE c.conrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
-          AND c.conname = 'account_financial_daily_direction_check'
-          AND NOT c.convalidated
-          AND pg_get_constraintdef(c.oid) LIKE '%''income''%''expense''%'
-    ) THEN
-        RAISE EXCEPTION 'break-schema: account_financial_daily does not carry the pre-canonical income/expense CHECK';
-    END IF;
-
-    IF (
-        SELECT count(*) FROM haf_stats_backend.account_financial_daily
-        WHERE account_id = 900901 AND direction IN ('income', 'incoming')
-    ) <> 2 THEN
-        RAISE EXCEPTION 'break-schema: the two account_financial_daily rows the DELETE is judged by are not there';
+        SELECT 1 FROM pg_attribute AS a
+        WHERE a.attrelid = 'haf_stats_backend.account_financial_daily'::REGCLASS
+          AND a.attname = 'category' AND NOT a.attisdropped
+    ) OR NOT EXISTS (SELECT 1 FROM haf_stats_backend.account_financial_daily WHERE account_id = 900901) THEN
+        RAISE EXCEPTION 'break-schema: account_financial_daily is not back in its TEXT shape with the row install-again must drop';
     END IF;
 
     IF NOT pg_has_role('haf_stats_user', 'hive_applications_group', 'MEMBER') THEN
@@ -125,6 +119,6 @@ BEGIN
         RAISE EXCEPTION 'break-schema: haf_stats_user has no direct hive_applications_owner_group edge, so that arm of the revoke goes untested';
     END IF;
 
-    RAISE NOTICE 'break-schema: all 17 guarded upgrades have work to do again (12 columns dropped, rc_estimated back, income/expense CHECK NOT VALID, one income and one incoming row)';
+    RAISE NOTICE 'break-schema: all 14 guarded upgrades have work to do again (12 columns dropped, rc_estimated back, account_financial_daily in its TEXT shape with one row)';
 END;
 $check$;
