@@ -70,9 +70,9 @@ GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
 -- ---------------------------------------------------------------------------
 -- Processor
 --
--- One pass over the batch's staged custom_json ops (prepare_batch_ops, db/process_block_range.sql),
--- aggregated to (day, json_id): the same staged rows process_custom_json and
--- process_community_registry read. op_count/op_bytes are additive (DO UPDATE adds), so
+-- One pass over the batch's staged custom_json ops (prepare_batch_custom_json_ops,
+-- db/process_custom_json.sql, which carries each op's json id and exact RC share), aggregated to
+-- (day, json_id): the same staged rows process_custom_json reads. op_count/op_bytes are additive (DO UPDATE adds), so
 -- each block range must be processed exactly once - the same exactly-once assumption the other
 -- additive counters rely on.
 --
@@ -80,12 +80,11 @@ GRANT SELECT ON haf_stats_backend.network_custom_json_daily TO haf_stats_user;
 -- one row PER SIGNER (required_posting_auths UNION required_auths), so its per-account table
 -- cannot be summed into correct one-row-per-op network counts. Keeping this separate gives a
 -- clean, independently-rebuildable counter symmetric with network_op_daily, and the second
--- pass over the staged op-18 rows is marginal against the per-account fan-out process_custom_json
--- already pays.
+-- pass over the staged op-18 rows reads no JSON and joins nothing, so it is marginal.
 --
 -- Invariant (over the range both tables cover): SUM(op_count) / SUM(op_bytes) here per day
 -- equals network_op_daily's op_type_id = 18 row, since both count the same op-18 ops once each.
--- The body_value ->> 'id' IS NOT NULL guard (json_id is PK-NOT NULL) is the only difference; the
+-- Leaving out ops with no id (json_id is PK-NOT NULL) is the only difference; the
 -- `id` is a required consensus field on custom_json_operation, so no op-18 op is dropped on
 -- mainnet.
 -- ---------------------------------------------------------------------------
@@ -104,26 +103,19 @@ VOLATILE
 SET jit = OFF
 AS $$
 BEGIN
-PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block, ARRAY[18]);
+-- The batch's custom_json ops with their id and exact RC share, staged once for both custom_json
+-- rollups (prepare_batch_custom_json_ops, db/process_custom_json.sql).
+PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
 RETURN QUERY
-WITH ex AS (
-    -- The batch's shares, computed once for the three rollups (prepare_batch_exact_rc, above).
-    SELECT c.op_id AS operation_id, c.rc_exact
-    FROM haf_stats_batch_exact_rc AS c
-)
 SELECT
-    ov.day,
-    ov.body_value ->> 'id' AS json_id,
+    cj.day,
+    cj.json_id,
     COUNT(*)::BIGINT,
-    SUM(ov.op_bytes)::BIGINT,
+    SUM(cj.op_bytes)::BIGINT,
     -- Exact only when every op of the group has its share (#44); otherwise NULL.
-    CASE WHEN COUNT(ex.rc_exact) = COUNT(*) THEN SUM(ex.rc_exact) END::BIGINT
-FROM haf_stats_batch_ops ov
-LEFT JOIN ex ON ex.operation_id = ov.op_id
-WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-  AND ov.body_value ->> 'id' IS NOT NULL
-GROUP BY ov.day, ov.body_value ->> 'id';
+    CASE WHEN COUNT(cj.rc_exact) = COUNT(*) THEN SUM(cj.rc_exact) END::BIGINT
+FROM haf_stats_batch_custom_json_ops cj
+GROUP BY cj.day, cj.json_id;
 END;
 $$;
 

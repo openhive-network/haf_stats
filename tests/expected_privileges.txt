@@ -26,6 +26,7 @@ function haf_stats_app.network_custom_json_rows(_first_block integer, _last_bloc
 function haf_stats_app.network_op_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_authored_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_creations(_first_block integer, _last_block integer, _hivemind boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prepare_batch_custom_json_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_exact_rc(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_ops(_first_block integer, _last_block integer, _op_types integer[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_community_batch_stage() | owner=haf_stats_owner | secdef=false | acl=<default>

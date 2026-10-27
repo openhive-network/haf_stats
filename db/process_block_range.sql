@@ -170,28 +170,60 @@ BEGIN
     -- second staging in the same transaction loads without it too.
     DROP INDEX IF EXISTS pg_temp.haf_stats_batch_ops_type_idx;
 
-    INSERT INTO haf_stats_batch_ops
-        (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
-    SELECT
-        o.id,
-        b.num,
-        o.trx_in_block,
-        o.op_type_id,
-        b.created_at,
-        b.created_at::DATE,
-        o.body_value,
-        CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
-    FROM hafd.operations AS o
-    JOIN hafd.blocks AS b ON b.num = hafd.operation_id_to_block_num(o.id)
-    LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id
-    -- Both forms of the range: the id range is the operations primary key's, which suits the
-    -- batch's full set; the derived block number is the Index Cond of
-    -- hive_operations_op_type_id_block_num, which suits a direct call that stages one or two
-    -- types over a long range (the install self-heals, the rebuild scripts).
-    WHERE o.id >= hafd.operation_id(_first_block, 0)
-      AND o.id < hafd.operation_id(_last_block + 1, 0)
-      AND hafd.operation_id_to_block_num(o.id) BETWEEN _first_block AND _last_block
-      AND o.op_type_id = ANY(_types);
+    IF _op_types IS NULL THEN
+        -- The full set is most of the range's operations, and the planner estimates the range
+        -- at a few hundred of them whatever its size, so a join to hafd.blocks would be one
+        -- index probe per operation. Driven from the range's blocks instead: one primary-key
+        -- range scan of hafd.operations per block, a plan the estimate cannot change. OFFSET 0
+        -- keeps the LATERAL subquery from being flattened back into an ordinary join.
+        INSERT INTO haf_stats_batch_ops
+            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
+        SELECT
+            o.id,
+            b.num,
+            o.trx_in_block,
+            o.op_type_id,
+            b.created_at,
+            b.created_at::DATE,
+            o.body_value,
+            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
+        FROM hafd.blocks AS b
+        CROSS JOIN LATERAL (
+            SELECT op.id, op.trx_in_block, op.op_type_id, op.body_value
+            FROM hafd.operations AS op
+            WHERE op.id >= hafd.operation_id(b.num, 0)
+              AND op.id < hafd.operation_id(b.num + 1, 0)
+              AND op.op_type_id = ANY(_types)
+            OFFSET 0
+        ) AS o
+        LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id
+        WHERE b.num BETWEEN _first_block AND _last_block;
+    ELSE
+        -- A few op types: few operations, however long the range (the install self-heals and
+        -- the rebuild scripts stage one or two types over up to the whole chain), so each is
+        -- joined to its block by an index probe.
+        INSERT INTO haf_stats_batch_ops
+            (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
+        SELECT
+            o.id,
+            b.num,
+            o.trx_in_block,
+            o.op_type_id,
+            b.created_at,
+            b.created_at::DATE,
+            o.body_value,
+            CASE WHEN ot.is_virtual IS NOT TRUE THEN octet_length(o.body_value::TEXT) END
+        FROM hafd.operations AS o
+        JOIN hafd.blocks AS b ON b.num = hafd.operation_id_to_block_num(o.id)
+        LEFT JOIN hafd.operation_types AS ot ON ot.id = o.op_type_id
+        -- Both forms of the range: the id range is the operations primary key's; the derived
+        -- block number is the Index Cond of hive_operations_op_type_id_block_num, which suits
+        -- one or two types over a long range.
+        WHERE o.id >= hafd.operation_id(_first_block, 0)
+          AND o.id < hafd.operation_id(_last_block + 1, 0)
+          AND hafd.operation_id_to_block_num(o.id) BETWEEN _first_block AND _last_block
+          AND o.op_type_id = ANY(_types);
+    END IF;
 
     CREATE INDEX haf_stats_batch_ops_type_idx ON haf_stats_batch_ops (op_type_id, op_id);
     -- Not body_value: no plan filters or joins on the JSONB, and sampling it is most of the cost.
@@ -235,9 +267,12 @@ BEGIN
         account_id INT NOT NULL,
         op_time TIMESTAMP NOT NULL,
         day DATE NOT NULL,
-        op_class SMALLINT,
-        PRIMARY KEY (op_id, account_id)
+        op_class SMALLINT
     ) ON COMMIT DROP;
+    -- The primary key is added after the load: the rows arrive in name order, which is random
+    -- op order, and building the key once is cheaper than inserting each row into it. Dropped
+    -- first so a second staging in the same transaction loads without it too.
+    ALTER TABLE haf_stats_batch_authored_ops DROP CONSTRAINT IF EXISTS haf_stats_batch_authored_ops_pkey;
 
     -- Plain hive.get_required_authorities first, for the types whose signers are not read from
     -- the body, in one subtransaction for the whole statement. Only if it fails is the
@@ -341,6 +376,11 @@ BEGIN
         END;
     END LOOP;
 
+    -- The consumers count rows as operations (process_active_users) and join on op_id
+    -- (account_custom_json_rows), so an (op, account) pair staged twice stops the batch.
+    ALTER TABLE haf_stats_batch_authored_ops
+        ADD CONSTRAINT haf_stats_batch_authored_ops_pkey PRIMARY KEY (op_id, account_id);
+    ANALYZE haf_stats_batch_authored_ops;
     PERFORM set_config('haf_stats.batch_authored_ops_range', _range_key, FALSE);
 END;
 $$;
@@ -379,10 +419,13 @@ BEGIN
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_stats', _first_block, _last_block, _t, '{vote_operation,comment_operation,delete_comment_operation,ineffective_delete_comment_operation}', NULL); END IF;
     PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_cohorts', _first_block, _last_block, _t, '{comment_operation}', NULL); END IF;
-    -- The three rollups below each call this first and find it done; called here so its
-    -- work is one step of its own rather than part of whichever rollup runs first.
+    -- The three rollups below each call the first of these, the two custom_json ones the second,
+    -- and find them done; called here so their work is a step of its own rather than part of
+    -- whichever rollup runs first.
     PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+    PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
     PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
     IF _timed THEN _t := haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
     PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
