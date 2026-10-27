@@ -8,6 +8,12 @@
 -- rows are checked against both their literal values and what the per-row wrapper gives for
 -- the same ops: with the poisoned op in the batch, and without it.
 --
+-- Vote, comment, transfer and custom_json ops sign with fields of their bodies, which the
+-- batch reads directly, so only ops of other types reach the lookup: the poisoned op and the
+-- ops the stub resolves are transfer_to_vesting ops (3). The transfer and custom_json ops
+-- carry the stub's '_signer' as well as their real signer field, so the per-row wrapper
+-- (the stub standing in for HAF) gives the same accounts for them that the body does.
+--
 -- Everything is inside a transaction that is rolled back, the replaced stub included.
 
 BEGIN;
@@ -20,13 +26,19 @@ INSERT INTO hafd.accounts (id, name) VALUES
 (93001, 'fballice'),
 (93002, 'fbbob');
 
--- Stub op types: 2 is transfer_operation, 18 custom_json_operation, both non-virtual.
+-- Stub op types: 2 is transfer_operation, 18 custom_json_operation, 3 transfer_to_vesting_operation,
+-- all non-virtual.
+INSERT INTO hafd.operation_types (id, name, is_virtual) VALUES
+(3, 'hive::protocol::transfer_to_vesting_operation', FALSE)
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
-(hafd.operation_id(9300, 1), 2, '{"_signer": "fballice"}'),
-(hafd.operation_id(9300, 2), 18, '{"_signer": "fbbob"}'),
-(hafd.operation_id(9301, 1), 2, '{"_signer": "fbbob", "_poison": true}'),
-(hafd.operation_id(9301, 2), 18, '{"_signer": "fballice"}'),
-(hafd.operation_id(9301, 3), 2, '{"_signer": "fbnobody"}');
+(hafd.operation_id(9300, 1), 2, '{"from": "fballice", "to": "fbbob", "_signer": "fballice"}'),
+(hafd.operation_id(9300, 2), 18, '{"required_auths": [], "required_posting_auths": ["fbbob"], "_signer": "fbbob"}'),
+(hafd.operation_id(9300, 3), 3, '{"_signer": "fbbob"}'),
+(hafd.operation_id(9301, 1), 3, '{"_signer": "fbbob", "_poison": true}'),
+(hafd.operation_id(9301, 2), 18, '{"required_auths": ["fballice"], "required_posting_auths": [], "_signer": "fballice"}'),
+(hafd.operation_id(9301, 3), 3, '{"_signer": "fbnobody"}');
 
 CREATE OR REPLACE FUNCTION hive.get_required_authorities(_body JSONB)
 RETURNS TABLE (account_name TEXT)
@@ -53,7 +65,7 @@ BEGIN
     -- The poisoned op really makes the plain lookup raise, so a batch holding it cannot be
     -- answered by the plain statement.
     BEGIN
-        PERFORM hive.get_required_authorities('{"type": "transfer_operation", "value": {"_signer": "fbbob", "_poison": true}}');
+        PERFORM hive.get_required_authorities('{"type": "transfer_to_vesting_operation", "value": {"_signer": "fbbob", "_poison": true}}');
         RAISE EXCEPTION 'FAIL: the poisoned op did not make hive.get_required_authorities raise';
     EXCEPTION WHEN invalid_text_representation THEN
         NULL;
@@ -70,11 +82,13 @@ BEGIN
         FROM haf_stats_batch_authored_ops AS a;
 
         -- The poisoned op contributes nothing, as the per-row wrapper makes it; fbnobody is
-        -- no account, so its op is dropped by the name join either way.
+        -- no account, so its op is dropped by the name join either way. A transfer_to_vesting
+        -- op has no op class.
         _want := CASE _last
             WHEN 9301 THEN '9300000001:93001:2021-07-01 00:00:00:4,9300000002:93002:2021-07-01 00:00:00:5,'
-                           '9301000002:93001:2021-07-01 00:00:03:5'
-            ELSE '9300000001:93001:2021-07-01 00:00:00:4,9300000002:93002:2021-07-01 00:00:00:5'
+                           '9300000003:93002:2021-07-01 00:00:00:,9301000002:93001:2021-07-01 00:00:03:5'
+            ELSE '9300000001:93001:2021-07-01 00:00:00:4,9300000002:93002:2021-07-01 00:00:00:5,'
+                 '9300000003:93002:2021-07-01 00:00:00:'
         END;
         IF _got IS DISTINCT FROM _want THEN
             RAISE EXCEPTION 'FAIL: blocks %..% gave authored rows %, expected %', _first, _last, _got, _want;

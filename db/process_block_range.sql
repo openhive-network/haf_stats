@@ -161,11 +161,14 @@ BEGIN
         op_time TIMESTAMP NOT NULL,
         day DATE NOT NULL,
         body_value JSONB,
-        op_bytes INT,
-        PRIMARY KEY (op_type_id, op_id)
+        op_bytes INT
     ) ON COMMIT DROP;
 
     TRUNCATE haf_stats_batch_ops;
+    -- The processors' op_type_id filters are what the index is for; it is built after the
+    -- load, which is cheaper than maintaining it through the INSERT. Dropped first so a
+    -- second staging in the same transaction loads without it too.
+    DROP INDEX IF EXISTS pg_temp.haf_stats_batch_ops_type_idx;
 
     INSERT INTO haf_stats_batch_ops
         (op_id, block_num, trx_in_block, op_type_id, op_time, day, body_value, op_bytes)
@@ -190,7 +193,9 @@ BEGIN
       AND hafd.operation_id_to_block_num(o.id) BETWEEN _first_block AND _last_block
       AND o.op_type_id = ANY(_types);
 
-    ANALYZE haf_stats_batch_ops;
+    CREATE INDEX haf_stats_batch_ops_type_idx ON haf_stats_batch_ops (op_type_id, op_id);
+    -- Not body_value: no plan filters or joins on the JSONB, and sampling it is most of the cost.
+    ANALYZE haf_stats_batch_ops (op_id, block_num, trx_in_block, op_type_id, op_time, day, op_bytes);
     PERFORM set_config('haf_stats.batch_ops_range', _range_key, TRUE);
     PERFORM set_config('haf_stats.batch_ops_types', _types::TEXT, TRUE);
 END;
@@ -234,13 +239,14 @@ BEGIN
         PRIMARY KEY (op_id, account_id)
     ) ON COMMIT DROP;
 
-    -- Plain hive.get_required_authorities first, in one subtransaction for the whole
-    -- statement. Only if it fails is the statement run again through the per-row
-    -- get_required_authorities_safe, whose subtransaction per op is what makes an op whose
-    -- authorities cannot be computed contribute no rows. A batch with no such op therefore
-    -- gets exactly the rows the safe wrapper would have given it, without its cost. WHEN
-    -- OTHERS because the safe wrapper treats any failure as authorless; a failure that is not
-    -- the authority lookup's raises again from the second run.
+    -- Plain hive.get_required_authorities first, for the types whose signers are not read from
+    -- the body, in one subtransaction for the whole statement. Only if it fails is the
+    -- statement run again through the per-row get_required_authorities_safe, whose
+    -- subtransaction per op is what makes an op whose authorities cannot be computed
+    -- contribute no rows. A batch with no such op therefore gets exactly the rows the safe
+    -- wrapper would have given it, without its cost. WHEN OTHERS because the safe wrapper
+    -- treats any failure as authorless; a failure that is not the authority lookup's raises
+    -- again from the second run.
     <<attempt>>
     LOOP
         BEGIN
@@ -264,19 +270,53 @@ BEGIN
                      END) AS op_class
                 FROM haf_stats_batch_ops s
                 JOIN hafd.operation_types ot ON ot.id = s.op_type_id AND NOT ot.is_virtual
-                -- The {type, value} form hive.get_required_authorities takes, as operations_view
-                -- builds it, decoded here for the only consumer that needs it.
-                CROSS JOIN LATERAL jsonb_build_object(
-                    'type', replace(ot.name, 'hive::protocol::', ''),
-                    'value', s.body_value
-                ) AS ob (body)
-                -- _safe is a constant of the statement, so each arm is a one-time filter and
-                -- only one of the two functions is ever called.
+                -- Every arm's filter reads only the op's type and _safe, so it is a one-time
+                -- filter of the arm and only the arm for the op's type runs.
+                --
+                -- The four types that are most of the non-virtual stream sign with fields of
+                -- their body, read here directly: the same accounts hive.get_required_authorities
+                -- returns for them, without building the operation for it. A body that lacks the
+                -- field gives NULL, or no array element, so no row; HAF gives '' or raises,
+                -- which also leaves the op no account. A non-array auths field is skipped
+                -- rather than raising.
                 CROSS JOIN LATERAL (
-                    SELECT r.account_name FROM hive.get_required_authorities(body) r WHERE NOT _safe
+                    SELECT s.body_value ->> 'voter' WHERE s.op_type_id = 0          -- vote_operation
                     UNION ALL
-                    SELECT r.account_name FROM haf_stats_app.get_required_authorities_safe(body) r WHERE _safe
-                ) ra
+                    SELECT s.body_value ->> 'author' WHERE s.op_type_id = 1         -- comment_operation
+                    UNION ALL
+                    SELECT s.body_value ->> 'from' WHERE s.op_type_id = 2           -- transfer_operation
+                    UNION ALL
+                    SELECT auth.name                                                -- custom_json_operation
+                    FROM jsonb_array_elements_text(
+                        CASE WHEN jsonb_typeof(s.body_value -> 'required_auths') = 'array'
+                             THEN s.body_value -> 'required_auths' END
+                    ) AS auth (name)
+                    WHERE s.op_type_id = 18
+                    UNION ALL
+                    SELECT auth.name
+                    FROM jsonb_array_elements_text(
+                        CASE WHEN jsonb_typeof(s.body_value -> 'required_posting_auths') = 'array'
+                             THEN s.body_value -> 'required_posting_auths' END
+                    ) AS auth (name)
+                    WHERE s.op_type_id = 18
+                    UNION ALL
+                    -- Every other type through HAF, in the {type, value} form it takes, as
+                    -- operations_view builds it. _safe is a constant of the statement, so only
+                    -- one of the two functions is ever called.
+                    SELECT r.account_name
+                    FROM hive.get_required_authorities(jsonb_build_object(
+                        'type', replace(ot.name, 'hive::protocol::', ''),
+                        'value', s.body_value
+                    )) r
+                    WHERE s.op_type_id NOT IN (0, 1, 2, 18) AND NOT _safe
+                    UNION ALL
+                    SELECT r.account_name
+                    FROM haf_stats_app.get_required_authorities_safe(jsonb_build_object(
+                        'type', replace(ot.name, 'hive::protocol::', ''),
+                        'value', s.body_value
+                    )) r
+                    WHERE s.op_type_id NOT IN (0, 1, 2, 18) AND _safe
+                ) ra (account_name)
                 WHERE ra.account_name IS NOT NULL
             ),
             name_ids AS MATERIALIZED (

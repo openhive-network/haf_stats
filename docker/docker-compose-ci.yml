@@ -39,6 +39,7 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_account_cohorts.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /cohort_fixture.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_authored_ops_fallback.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_authored_ops_signers.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_community_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_content_stats.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_content_cohorts.sql &&
@@ -97,6 +98,9 @@ services:
       # prepare_batch_authored_ops' second run through the per-row authority wrapper, which only
       # a batch whose plain hive.get_required_authorities raises reaches.
       - ../tests/ci_authored_ops_fallback.sql:/ci_authored_ops_fallback.sql:ro
+      # The signers prepare_batch_authored_ops reads from vote/comment/transfer/custom_json
+      # bodies, including bodies that lack the field.
+      - ../tests/ci_authored_ops_signers.sql:/ci_authored_ops_signers.sql:ro
       # The community path (#47) is unreachable on the real 2016 replay, so the stub gate
       # loads its REAL processors and runs them over synthetic post-37.5M ops.
       - ../db/process_community_registry.sql:/process_community_registry.sql:ro

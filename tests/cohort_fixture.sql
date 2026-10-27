@@ -47,15 +47,16 @@ FROM (
 ) AS created(account_name)
 ON CONFLICT (id) DO NOTHING;
 
--- Step 2 source: retention activity is now AUTHORED ops in operations_view; the
--- get_required_authorities stub resolves the synthetic '_signer' field. Each is a
--- non-virtual vote_operation (op_type 1) the account signed in a given window.
+-- Step 2 source: retention activity is now AUTHORED ops in operations_view. Each is a
+-- non-virtual op of type 1 the account signed in a given window. The processors read type
+-- ids as the chain's, where 1 is comment_operation (whatever this stub's operation_types
+-- calls it), whose signer prepare_batch_authored_ops reads from its 'author' field.
 INSERT INTO hafd.operations (id, op_type_id, body_value)
 VALUES
-    (hafd.operation_id(1001, 1), 1, JSONB_BUILD_OBJECT('_signer', 'early-only')),  -- D2: before day 7, no rolling flag
-    (hafd.operation_id(1002, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d7')), -- D7
-    (hafd.operation_id(1003, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d30')),-- D30
-    (hafd.operation_id(1004, 1), 1, JSONB_BUILD_OBJECT('_signer', 'retained-d90')) -- D90
+    (hafd.operation_id(1001, 1), 1, JSONB_BUILD_OBJECT('author', 'early-only')),  -- D2: before day 7, no rolling flag
+    (hafd.operation_id(1002, 1), 1, JSONB_BUILD_OBJECT('author', 'retained-d7')), -- D7
+    (hafd.operation_id(1003, 1), 1, JSONB_BUILD_OBJECT('author', 'retained-d30')),-- D30
+    (hafd.operation_id(1004, 1), 1, JSONB_BUILD_OBJECT('author', 'retained-d90')) -- D90
 ON CONFLICT (id) DO NOTHING;
 
 SET ROLE haf_stats_owner;
