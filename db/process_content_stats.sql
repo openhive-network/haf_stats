@@ -1669,12 +1669,24 @@ upsert_counts AS (
 ),
 -- Distinct (day, voter) presence set, resolved to account id once per pair. The
 -- counters above never touch hafd.accounts, so an (impossible) unknown voter can
--- never drop a counted vote.
+-- never drop a counted vote. The scalar subquery is one index lookup per pair: as a
+-- join, a misestimate of vote_ops let the planner merge-join the whole accounts name
+-- index instead. MATERIALIZED, so the IS NOT NULL filter below does not repeat the
+-- lookup. A name maps to one id, so the distinct pairs are those of the ids.
+voter_ids AS MATERIALIZED (
+    SELECT
+        vd.day,
+        (SELECT a.id FROM hafd.accounts a WHERE a.name = vd.voter) AS voter_id
+    FROM (
+        SELECT DISTINCT vo.day, vo.voter
+        FROM vote_ops vo
+    ) vd
+),
 network_voters AS (
     INSERT INTO haf_stats_backend.network_voter_daily (day, voter_id)
-    SELECT DISTINCT vo.day, a.id
-    FROM vote_ops vo
-    JOIN hafd.accounts a ON a.name = vo.voter
+    SELECT vi.day, vi.voter_id
+    FROM voter_ids vi
+    WHERE vi.voter_id IS NOT NULL
     ON CONFLICT (day, voter_id) DO NOTHING
 )
 -- The content and the vote columns of a row in one upsert: GROUP BY collapses the content
