@@ -15,7 +15,8 @@
 --      tests/ci_hivemind_wait_locks.sql checks the locks themselves).
 --   4. The wait: below hivemind's head nothing is processed and nothing falls back; it waits
 --      (here bounded by haf_stats.hivemind_wait_timeout into an error). hivemind's completion
---      marker and a missing block_num_created index hold it back too.
+--      marker and a missing block_num_created index hold it back too; an error reading the
+--      marker is raised, not taken for "no marker".
 --
 -- One transaction, rolled back: the processors' output, the source record, hivemind's context
 -- row, its index and hive_state are this file's alone.
@@ -221,9 +222,19 @@ $equal$;
 
 -- ---------------------------------------------------------------------------
 -- 3. The clamp. The per-range body is replaced, for this transaction, by one that records the
---    range it was given and hivemind's head at that moment.
+--    range it was given and hivemind's head at that moment. It also counts its calls on a
+--    sequence: a call made before a wait times out is rolled back with the error, rows and
+--    all, but a sequence does not roll back.
 -- ---------------------------------------------------------------------------
 CREATE TEMP TABLE ci_ranges (first_block INT NOT NULL, last_block INT NOT NULL, hivemind_head INT NOT NULL);
+CREATE TEMP SEQUENCE ci_range_calls;
+
+CREATE FUNCTION pg_temp.ci_range_calls()
+RETURNS BIGINT
+LANGUAGE sql
+AS $fn$
+    SELECT CASE WHEN s.is_called THEN s.last_value ELSE 0 END FROM ci_range_calls AS s;
+$fn$;
 
 CREATE OR REPLACE FUNCTION haf_stats_app.process_content_stats_range(
     _first_block INT,
@@ -234,6 +245,7 @@ RETURNS VOID
 LANGUAGE plpgsql
 AS $fn$
 BEGIN
+    PERFORM nextval('ci_range_calls');
     INSERT INTO ci_ranges
     SELECT _first_block, _last_block, c.current_block_num FROM hafd.contexts AS c WHERE c.name = 'hivemind_app';
 END;
@@ -256,13 +268,14 @@ BEGIN
             RAISE;
         END IF;
     END;
-    IF EXISTS (SELECT 1 FROM ci_ranges) THEN
-        RAISE EXCEPTION 'hivemind source: processed % while hivemind was only through 37500019; nothing may be read before hivemind has the whole range',
-            (SELECT string_agg(format('%s..%s', first_block, last_block), ', ' ORDER BY first_block) FROM ci_ranges);
+    IF pg_temp.ci_range_calls() <> 0 THEN
+        RAISE EXCEPTION 'hivemind source: % range(s) processed while hivemind was only through 37500019; nothing may be read before hivemind has the whole range',
+            pg_temp.ci_range_calls();
     END IF;
 
-    -- hivemind through the whole range: one range, never past hivemind's head.
-    UPDATE hafd.contexts SET current_block_num = 37500045 WHERE name = 'hivemind_app';
+    -- hivemind past the whole range: the range as one, ending at its own last block, not at
+    -- hivemind's head.
+    UPDATE hafd.contexts SET current_block_num = 37500050 WHERE name = 'hivemind_app';
     PERFORM haf_stats_app.process_content_stats(37500001, 37500045);
     IF EXISTS (SELECT 1 FROM ci_ranges WHERE last_block > hivemind_head) THEN
         RAISE EXCEPTION 'hivemind source: a content-stats batch ended past hivemind''s head: %',
@@ -282,7 +295,7 @@ $clamp$;
 
 DO $wait$
 DECLARE
-    _ranges_before CONSTANT BIGINT := (SELECT COUNT(*) FROM ci_ranges);
+    _calls_before CONSTANT BIGINT := pg_temp.ci_range_calls();
 BEGIN
     -- hivemind below the first block: nothing to process, so it waits, and does not fall back.
     UPDATE hafd.contexts SET current_block_num = 37500000 WHERE name = 'hivemind_app';
@@ -294,7 +307,7 @@ BEGIN
             RAISE;
         END IF;
     END;
-    IF (SELECT COUNT(*) FROM ci_ranges) <> _ranges_before THEN
+    IF pg_temp.ci_range_calls() <> _calls_before THEN
         RAISE EXCEPTION 'hivemind source: a range was processed while hivemind was behind it';
     END IF;
 
@@ -306,6 +319,17 @@ BEGIN
         RAISE EXCEPTION 'hivemind source: usable head % ignores hive_state.last_completed_block_num 37500030',
             haf_stats_app.wait_for_hivemind(37500001);
     END IF;
+
+    -- An error reading hive_state is raised, not taken for "no marker": swallowed, the head
+    -- would go uncapped and the source would read rows hivemind has not finished writing.
+    ALTER TABLE hivemind_app.hive_state RENAME COLUMN last_completed_block_num TO ci_renamed;
+    BEGIN
+        PERFORM haf_stats_app.wait_for_hivemind(37500001);
+        RAISE EXCEPTION 'ci: a failed hive_state read was swallowed';
+    EXCEPTION WHEN undefined_column THEN
+        NULL;
+    END;
+    ALTER TABLE hivemind_app.hive_state RENAME COLUMN ci_renamed TO last_completed_block_num;
 
     -- Without the block_num_created index (hivemind's massive sync drops it) nothing is usable.
     DROP INDEX hivemind_app.ci_hive_posts_block_num_created;
@@ -329,7 +353,7 @@ BEGIN
         END IF;
     END;
 
-    RAISE NOTICE 'hivemind source: wait verified (behind -> waits, completion marker and missing index hold it back, no context -> error)';
+    RAISE NOTICE 'hivemind source: wait verified (behind -> waits, completion marker and missing index hold it back, a hive_state read error and no context -> errors)';
 END
 $wait$;
 

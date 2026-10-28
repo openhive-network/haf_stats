@@ -441,8 +441,9 @@ BEGIN
 END;
 $$;
 
--- The highest block the hivemind source may read, once it is at least _block. Every
--- content-stats batch on that source ends at or below it (process_content_stats).
+-- Waits until the hivemind source may read through _block, and returns the highest block it
+-- may read. process_content_stats calls it with a batch's last block before reading anything
+-- from hivemind; scripts/rebuild_content_volume.sh calls it once as a pre-check.
 --
 -- It reads hafd.contexts, the catalog and hive_state, releasing hive_state's lock before it
 -- sleeps, so a caller that has not read hivemind's tables yet holds no lock on any of them
@@ -456,7 +457,8 @@ $$;
 --
 -- Waits, never falls back: a batch processed from the other source would mix the two (see the
 -- section header). haf_stats.hivemind_wait_timeout (seconds) turns a wait longer than that into
--- an error; unset, it waits as long as hivemind takes. Each pass is a fresh statement, so it
+-- an error; unset, it waits as long as hivemind takes. One call is one wait, so the timeout
+-- bounds the wait for a whole batch. Each pass is a fresh statement, so it
 -- sees what hivemind has committed since (READ COMMITTED, as both block drivers run).
 DROP FUNCTION IF EXISTS haf_stats_app.wait_for_hivemind;
 CREATE OR REPLACE FUNCTION haf_stats_app.wait_for_hivemind(_block INT)
@@ -484,8 +486,8 @@ BEGIN
             -- _completed keeps its value; plpgsql variables are not rolled back.
             BEGIN
                 SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
-                RAISE EXCEPTION USING ERRCODE = 'HS118';
-            EXCEPTION WHEN SQLSTATE 'HS118' THEN
+                RAISE EXCEPTION USING ERRCODE = 'ZH118';
+            EXCEPTION WHEN SQLSTATE 'ZH118' THEN
                 NULL;
             END;
             _head := LEAST(_head, COALESCE(_completed, _head));
@@ -1253,8 +1255,9 @@ END IF;
 --
 -- Wait first, read after, never the other way round (#118). The wait sleeps inside the block
 -- driver's transaction, which keeps every lock it has taken until it commits. hivemind drops
--- hive_posts' foreign keys and indexes (ACCESS EXCLUSIVE) when it enters massive sync, which
--- is when this waits for it: a lock on hive_posts held through the wait would leave the two
+-- hive_posts' foreign keys (ACCESS EXCLUSIVE, no lock_timeout) whenever it enters massive
+-- sync -- 101 or more blocks behind -- and its indexes as well at 2,000,000 or more. That is
+-- when this waits for it: a lock on hive_posts held through the wait would leave the two
 -- waiting on each other for good, with every hive_posts reader queued behind hivemind.
 IF haf_stats_app.content_source() = 'hivemind' THEN
     PERFORM haf_stats_app.wait_for_hivemind(_last_block);
