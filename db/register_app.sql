@@ -24,8 +24,11 @@
 --     made look true;
 --   * communities are derived here from raw custom_json operations into
 --     haf_stats_backend.community_registry (db/process_community_registry.sql);
---   * the only hivemind_app reads in the repository are under tests/ -- the parity
---     oracle, which is dynamic SQL precisely so it degrades when hivemind is absent.
+--   * outside tests/, hivemind_app is read only by the hivemind content source
+--     (db/process_content_stats.sql), when a deployment selects it. That source waits
+--     for hivemind itself, and only for content stats (wait_for_hivemind); a declared
+--     dependency would hold back every processor instead. Under tests/, the parity
+--     oracle reads it with dynamic SQL so it degrades when hivemind is absent.
 --
 -- Declaring the dependency anyway would clamp every delivered range to hivemind's
 -- position and stall ingestion whenever hivemind stalls -- silently, because
