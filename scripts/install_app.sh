@@ -418,6 +418,14 @@ psql_cmd -c "
 #     genesis.
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.run_deferred_rollup_refreshes_past_massive(); RESET ROLE;"
 
+# 7c. On the hivemind content source the engagement rollup is computed from hivemind and
+#     post_engagement is not written (db/process_content_stats.sql, "Rollup refresh"). A deployment
+#     that still holds it -- upgraded from a release that wrote it there -- has the rollup rebuilt
+#     from hivemind and the table emptied, in one transaction of its own: a rebuild that fails
+#     keeps the table. A no-op on the internal source and once the table is empty.
+log "Retiring post_engagement if the content source is hivemind..."
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.retire_post_engagement(); RESET ROLE;"
+
 # 8. Self-heal the precomputed endpoint rollups. They ship empty and the endpoints read
 #    them directly; on an already-synced node the forward refresh hook only fills recent
 #    periods, so without this the historical rollup stays empty and the endpoint returns
@@ -468,9 +476,10 @@ psql_cmd -c "
         'haf_stats_backend.witness_blocks_daily',
         'hafd.blocks',
         'SELECT haf_stats_app.process_witness_blocks(1, (SELECT COALESCE(MAX(last_processed_block), 0) FROM haf_stats_app.app_status))');
+    -- Gated on the content counts, not post_engagement, which the hivemind source leaves empty.
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.engagement_period_counts',
-        'haf_stats_backend.post_engagement',
+        'haf_stats_backend.network_content_daily',
         'SELECT haf_stats_app.refresh_engagement_full()');
     SELECT haf_stats_app.backfill_rollup_if_empty(
         'haf_stats_backend.active_users_period_counts',
