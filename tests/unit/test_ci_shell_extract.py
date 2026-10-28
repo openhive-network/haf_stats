@@ -7,6 +7,9 @@ cases, so the extractor is pinned here instead.
 """
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import types
 
 import importlib.util
 import os
@@ -21,7 +24,7 @@ SCRIPT = ROOT / "scripts" / "ci-helpers" / "extract_ci_shell.py"
 
 
 @pytest.fixture(scope="module")
-def ex():
+def ex() -> types.ModuleType:
     # Same rule as test_compose_contract._require_yaml: FAIL under CI, never skip.
     try:
         import yaml  # noqa: F401
@@ -29,7 +32,7 @@ def ex():
         if os.environ.get("CI"):
             pytest.fail("PyYAML is unavailable, so the CI-shell extractor cannot be tested")
         pytest.skip("PyYAML is required")
-    spec = importlib.util.spec_from_file_location("extract_ci_shell", SCRIPT)
+    spec: ModuleSpec = importlib.util.spec_from_file_location("extract_ci_shell", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -91,7 +94,7 @@ not-a-job:
 
 
 @pytest.fixture(scope="module")
-def files(ex):
+def files(ex: types.ModuleType) -> dict[str, str]:
     return ex.extract(SAMPLE)
 
 
@@ -100,7 +103,7 @@ def at(text: str, n: int) -> str:
     return text.splitlines()[n - 1]
 
 
-def test_items_are_line_aligned_with_the_ci_file(files):
+def test_items_are_line_aligned_with_the_ci_file(files: dict[str, str]) -> None:
     a = files["job-a.script.sh"]
     assert [at(a, n) for n in (11, 12, 13)] == ["one", "two", "single"]
     # Quoted items are items too, and sit on their own line.
@@ -108,40 +111,40 @@ def test_items_are_line_aligned_with_the_ci_file(files):
     assert at(a, 15) == "single quoted"
 
 
-def test_a_folded_block_starts_on_the_line_after_its_indicator(files):
+def test_a_folded_block_starts_on_the_line_after_its_indicator(files: dict[str, str]) -> None:
     assert at(files["job-b.script.sh"], 21) == "folded line"
 
 
-def test_a_single_string_script_is_linted(files):
+def test_a_single_string_script_is_linted(files: dict[str, str]) -> None:
     assert at(files["job-c.script.sh"], 29) == "echo single string"
 
 
-def test_before_script_and_script_share_a_file_after_script_does_not(files):
+def test_before_script_and_script_share_a_file_after_script_does_not(files: dict[str, str]) -> None:
     assert at(files["template.tmpl.script.sh"], 5) == "echo before"
     assert "cleanup" not in files["job-b.script.sh"]
     assert at(files["job-b.after_script.sh"], 25) == "cleanup"
 
 
-def test_references_are_skipped_not_linted_as_text(files):
+def test_references_are_skipped_not_linted_as_text(files: dict[str, str]) -> None:
     assert ".included" not in files["job-a.script.sh"]
     # A whole-key !reference must not produce a file of template names.
     assert "job-a.after_script.sh" not in files
     assert not any(name.startswith("not-a-job") for name in files)
 
 
-def test_a_hidden_template_and_a_job_of_the_same_name_both_survive(files):
+def test_a_hidden_template_and_a_job_of_the_same_name_both_survive(files: dict[str, str]) -> None:
     assert "echo before" in files["template.tmpl.script.sh"]
     assert "echo plain twin" in files["tmpl.script.sh"]
     assert files["template.tmpl.script.sh"].startswith("# shellcheck shell=bash\n")
     assert files["tmpl.script.sh"].startswith("# shellcheck shell=sh\n")
 
 
-def test_names_that_sanitise_alike_do_not_overwrite(ex):
+def test_names_that_sanitise_alike_do_not_overwrite(ex: types.ModuleType) -> None:
     out = ex.extract("# h\njob x:\n  script:\n  - echo one\njob_x:\n  script:\n  - echo two\n")
     assert sorted(out) == ["job_x.script.sh", "job_x~2.script.sh"]
 
 
-def test_three_names_that_sanitise_alike_all_survive(ex):
+def test_three_names_that_sanitise_alike_all_survive(ex: types.ModuleType) -> None:
     # Two would pass with `if` instead of `while`; the third is what needs the loop.
     ci = "# h\n" + "".join(f"{n}:\n  script:\n  - echo {i}\n"
                            for i, n in enumerate(("a b", "a_b", "a/b")))
@@ -150,7 +153,7 @@ def test_three_names_that_sanitise_alike_all_survive(ex):
     assert all(any(f"echo {i}" in text for text in out.values()) for i in range(3))
 
 
-def test_merge_keys_are_followed(files):
+def test_merge_keys_are_followed(files: dict[str, str]) -> None:
     merged = files["job-merge.script.sh"]
     assert at(merged, 37) == "echo from anchor"
     assert merged.startswith("# shellcheck shell=sh\n")  # python:*-alpine is not bash
@@ -182,25 +185,25 @@ nested:
 
 
 @pytest.fixture(scope="module")
-def merges(ex):
+def merges(ex: types.ModuleType) -> dict[str, str]:
     return ex.extract(MERGES)
 
 
-def test_the_first_of_several_merged_anchors_wins(merges):
+def test_the_first_of_several_merged_anchors_wins(merges: dict[str, str]) -> None:
     text = merges["two-anchors.script.sh"]
     assert "echo first" in text and "echo second" not in text
 
 
-def test_a_jobs_own_key_beats_a_merged_one(merges):
+def test_a_jobs_own_key_beats_a_merged_one(merges: dict[str, str]) -> None:
     text = merges["own-wins.script.sh"]
     assert "echo own" in text and "echo first" not in text
 
 
-def test_a_merge_inside_a_merged_anchor_is_followed(merges):
+def test_a_merge_inside_a_merged_anchor_is_followed(merges: dict[str, str]) -> None:
     assert "echo base" in merges["nested.script.sh"]
 
 
-def test_with_several_extends_parents_the_last_image_wins(ex):
+def test_with_several_extends_parents_the_last_image_wins(ex: types.ModuleType) -> None:
     # GitLab merges parents in order, so a later parent's image overrides an earlier one.
     ci = ("# h\n.sh-img:\n  image: docker:24\n.bash-img:\n  image: python:3.12-slim\n"
           "last-bash:\n  extends: [.sh-img, .bash-img]\n  script:\n  - true\n"
@@ -210,7 +213,7 @@ def test_with_several_extends_parents_the_last_image_wins(ex):
     assert out["last-sh.script.sh"].startswith("# shellcheck shell=sh\n")
 
 
-def test_an_unresolvable_winning_parent_makes_the_image_unknown(ex):
+def test_an_unresolvable_winning_parent_makes_the_image_unknown(ex: types.ModuleType) -> None:
     # .included is not in this file and comes last, so it decides the image; the bash
     # image of the earlier in-file parent must not leak through. Same one level down.
     ci = ("# h\n.local-bash:\n  image: python:3.12-slim\n"
@@ -225,20 +228,20 @@ def test_an_unresolvable_winning_parent_makes_the_image_unknown(ex):
     assert out["control.script.sh"].startswith("# shellcheck shell=bash\n")
 
 
-def test_an_extends_cycle_terminates(ex):
+def test_an_extends_cycle_terminates(ex: types.ModuleType) -> None:
     ci = ("# h\n.a:\n  extends: .b\n.b:\n  extends: .a\n"
           "job:\n  extends: .a\n  script:\n  - true\n")
     assert ex.extract(ci)["job.script.sh"].startswith("# shellcheck shell=sh\n")
 
 
-def test_a_block_at_end_of_file_without_newline_stays_in_place(ex):
+def test_a_block_at_end_of_file_without_newline_stays_in_place(ex: types.ModuleType) -> None:
     # No trailing newline: the end mark is mid-line, not at column 0 of the next line.
     out = ex.extract("# h\njob:\n  script:\n  - |\n    echo a\n    echo b")["job.script.sh"]
     assert [at(out, 5), at(out, 6)] == ["echo a", "echo b"]
     assert "# .gitlab-ci.yml:" not in out
 
 
-def test_an_item_that_spills_moves_alone(files):
+def test_an_item_that_spills_moves_alone(files: dict[str, str]) -> None:
     spill = files["job-spill.script.sh"]
     # The quoted item expands to two lines but owns one; it moves after the last CI
     # line, and the item below it keeps its own line number.
@@ -246,14 +249,14 @@ def test_an_item_that_spills_moves_alone(files):
     assert spill.splitlines()[-3:] == ["# .gitlab-ci.yml:43", "echo a", "echo b"]
 
 
-def test_one_node_used_twice_in_a_shell_is_linted_twice_without_shifting(files):
+def test_one_node_used_twice_in_a_shell_is_linted_twice_without_shifting(files: dict[str, str]) -> None:
     alias = files["job-alias.script.sh"]
     assert at(alias, 48) == "echo shared"
     assert alias.splitlines()[-2:] == ["# .gitlab-ci.yml:48", "echo shared"]
     assert len(alias.splitlines()) == len(SAMPLE.splitlines()) + 2
 
 
-def test_the_shell_follows_the_image_including_through_extends(files):
+def test_the_shell_follows_the_image_including_through_extends(files: dict[str, str]) -> None:
     assert files["job-a.script.sh"].startswith("# shellcheck shell=bash\n")
     assert files["job-b.script.sh"].startswith("# shellcheck shell=sh\n")
     assert files["job-c.script.sh"].startswith("# shellcheck shell=bash\n")  # image: {name:}
@@ -299,12 +302,12 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ("registry.example/python:3.12-slim", "sh"),
     ],
 )
-def test_image_to_shell(ex, image, shell):
+def test_image_to_shell(ex: types.ModuleType, image: str, shell: str) -> None:
     ci = f"# h\njob:\n  image: {image}\n  script:\n  - true\n"
     assert ex.extract(ci)["job.script.sh"].startswith(f"# shellcheck shell={shell}\n")
 
 
-def test_every_literal_block_in_the_real_ci_file_is_extracted_in_place(ex):
+def test_every_literal_block_in_the_real_ci_file_is_extracted_in_place(ex: types.ModuleType) -> None:
     """The real file, not the sample: if a job shape appears that the extractor does not
     understand, its block silently stops being linted, and this is where that shows."""
     text = CI.read_text(encoding="utf-8")

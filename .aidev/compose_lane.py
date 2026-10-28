@@ -60,7 +60,7 @@ def log(msg: str) -> None:
 
 
 class Service:
-    def __init__(self, name: str, spec: dict, lane: "Lane"):
+    def __init__(self, name: str, spec: dict, lane: "Lane") -> None:
         self.name = name
         self.spec = spec
         self.lane = lane
@@ -152,7 +152,7 @@ class Service:
             entry = self.spec.get("entrypoint")
             if entry != ["/bin/sh", "-c"]:
                 raise SystemExit(f"{self.name}: unsupported entrypoint {entry!r}")
-            script = cmd[0] if isinstance(cmd, list) else cmd
+            script: str = cmd[0] if isinstance(cmd, list) else cmd
             return ["sh", "-c", self.rewrite(script)]
         raise SystemExit(f"{self.name}: no local runner for image {image!r}")
 
@@ -247,7 +247,7 @@ def seconds(value) -> float:
 
 
 class Lane:
-    def __init__(self, compose: Path, wait: str, out: Path, suite: str):
+    def __init__(self, compose: Path, wait: str, out: Path, suite: str) -> None:
         self.compose_dir = compose.parent.resolve()
         self.root = Path.cwd().resolve()
         self.out = out
