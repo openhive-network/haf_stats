@@ -1053,6 +1053,14 @@ it rather than falling back. A haf_stats replay alongside a hivemind replay ther
 at hivemind's pace. `haf_stats.hivemind_wait_timeout` (seconds, a session setting on the
 processor's connection) turns a longer wait into an error; unset, it waits.
 
+A batch waits until hivemind has reached all of it before it reads any of hivemind's
+tables, so a waiting processor holds no lock on them. hivemind drops `hive_posts`' foreign
+keys and indexes when it falls back into massive sync (101 or more blocks behind, e.g.
+after a restart), and a lock held through the wait would leave the two blocked on each
+other, with hivemind's API queued behind them
+([#118](https://gitlab.syncad.com/hive/haf_stats/-/issues/118)). During a catch-up, haf_stats
+therefore trails hivemind by up to one batch (10,000 blocks in massive sync).
+
 **Known difference on the hivemind source.** hivemind's massive sync drops a re-created
 reply whose parent was also deleted and re-created in the same batch
 ([hivemind#394](https://gitlab.syncad.com/hive/hivemind/-/issues/394)): on 52 days of

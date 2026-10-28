@@ -26,11 +26,15 @@ SELECT
     (SELECT array_agg(source) FROM haf_stats_app.content_source_config) AS sources;
 CREATE TABLE public.ci118_result (failure TEXT);
 
--- hivemind as far as block 37500030 of the 37500001..37500045 range below, with the index the
--- source reads hive_posts by; the source recorded as hivemind; nothing processed yet.
+-- hivemind as far as block 37500030 of the 37500001..37500045 range below: its context is at
+-- the range's end, but its completion marker (hive_state, which the wait reads on every pass)
+-- is at 37500030. The index the source reads hive_posts by; the source recorded as hivemind;
+-- nothing processed yet. The stub has no hive_state, so creating it fails loudly if one exists.
 CREATE INDEX ci118_hive_posts_block_num_created ON hivemind_app.hive_posts (block_num_created);
+CREATE TABLE hivemind_app.hive_state (last_completed_block_num INT NOT NULL);
+INSERT INTO hivemind_app.hive_state VALUES (37500030);
 INSERT INTO hafd.contexts (name, current_block_num, irreversible_block)
-VALUES ('hivemind_app', 37500030, 37500030);
+VALUES ('hivemind_app', 37500045, 37500045);
 DELETE FROM haf_stats_app.content_source_config;
 INSERT INTO haf_stats_app.content_source_config (source) VALUES ('hivemind');
 UPDATE haf_stats_app.app_status SET last_processed_block = 0;
@@ -56,7 +60,7 @@ BEGIN
             SELECT a.wait_event INTO _event FROM pg_stat_activity AS a WHERE a.pid = _pid;
             EXIT WHEN _event = 'PgSleep';
             IF dblink_is_busy('ci118_waiter') = 0 THEN
-                RAISE EXCEPTION 'process_content_stats returned instead of waiting for hivemind (behind the range at 37500030): %',
+                RAISE EXCEPTION 'process_content_stats returned instead of waiting for hivemind (usable through 37500030): %',
                     COALESCE(dblink_error_message('ci118_waiter'), 'no error');
             END IF;
             IF clock_timestamp() > _deadline THEN
@@ -107,6 +111,7 @@ INSERT INTO haf_stats_app.content_source_config (source)
 SELECT unnest(sources) FROM public.ci118_saved WHERE sources IS NOT NULL;
 DELETE FROM hafd.contexts WHERE name = 'hivemind_app';
 DROP INDEX hivemind_app.ci118_hive_posts_block_num_created;
+DROP TABLE hivemind_app.hive_state;
 DROP EXTENSION dblink;
 
 DO $report$

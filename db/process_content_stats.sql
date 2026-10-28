@@ -1214,8 +1214,6 @@ SET jit = OFF
 AS $$
 DECLARE
     _high_water INT;
-    _done INT;
-    _end INT;
 BEGIN
 
 
@@ -1237,16 +1235,18 @@ IF _first_block <= _high_water THEN
         USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
 END IF;
 
--- On the hivemind source no batch may read hive_posts past what hivemind has written, so a
--- range it has only partly reached is processed in the pieces it has, waiting in between
--- (wait_for_hivemind); never past it, and never from the other source.
+-- On the hivemind source no batch may read hive_posts past what hivemind has written, so the
+-- whole range waits until hivemind has reached its last block (wait_for_hivemind), and only
+-- then reads hivemind's tables; never past it, and never from the other source.
+--
+-- Wait first, read after, never the other way round (#118). The wait sleeps inside the block
+-- driver's transaction, which keeps every lock it has taken until it commits. hivemind drops
+-- hive_posts' foreign keys and indexes (ACCESS EXCLUSIVE) when it enters massive sync, which
+-- is when this waits for it: a lock on hive_posts held through the wait would leave the two
+-- waiting on each other for good, with every hive_posts reader queued behind hivemind.
 IF haf_stats_app.content_source() = 'hivemind' THEN
-    _done := _first_block - 1;
-    WHILE _done < _last_block LOOP
-        _end := LEAST(_last_block, haf_stats_app.wait_for_hivemind(_done + 1));
-        PERFORM haf_stats_app.process_content_stats_range(_done + 1, _end, TRUE);
-        _done := _end;
-    END LOOP;
+    PERFORM haf_stats_app.wait_for_hivemind(_last_block);
+    PERFORM haf_stats_app.process_content_stats_range(_first_block, _last_block, TRUE);
 ELSE
     PERFORM haf_stats_app.process_content_stats_range(_first_block, _last_block, FALSE);
 END IF;

@@ -9,8 +9,10 @@
 --   2. Equality: the content processors over the same blocks produce the same content volume,
 --      account content, community activity, author cohorts and engagement from either source,
 --      and the hivemind source writes no comment_registry row.
---   3. The clamp: with hivemind's context behind the processor, no content-stats batch ends past
---      hivemind's head; the range is processed in the pieces hivemind has reached.
+--   3. The clamp: while hivemind has reached only part of a range, none of it is processed;
+--      once hivemind has reached all of it, it is processed as one range. Waiting first and
+--      reading after is what keeps the wait from holding locks on hivemind's tables (#118;
+--      tests/ci_hivemind_wait_locks.sql checks the locks themselves).
 --   4. The wait: below hivemind's head nothing is processed and nothing falls back; it waits
 --      (here bounded by haf_stats.hivemind_wait_timeout into an error). hivemind's completion
 --      marker and a missing block_num_created index hold it back too.
@@ -219,7 +221,7 @@ $equal$;
 
 -- ---------------------------------------------------------------------------
 -- 3. The clamp. The per-range body is replaced, for this transaction, by one that records the
---    range it was given and then lets hivemind advance by ten blocks.
+--    range it was given and hivemind's head at that moment.
 -- ---------------------------------------------------------------------------
 CREATE TEMP TABLE ci_ranges (first_block INT NOT NULL, last_block INT NOT NULL, hivemind_head INT NOT NULL);
 
@@ -234,33 +236,49 @@ AS $fn$
 BEGIN
     INSERT INTO ci_ranges
     SELECT _first_block, _last_block, c.current_block_num FROM hafd.contexts AS c WHERE c.name = 'hivemind_app';
-    UPDATE hafd.contexts SET current_block_num = current_block_num + 10 WHERE name = 'hivemind_app';
 END;
 $fn$;
 
-UPDATE hafd.contexts SET current_block_num = 37500019 WHERE name = 'hivemind_app';
-SELECT haf_stats_app.process_content_stats(37500001, 37500045);
+SET LOCAL haf_stats.hivemind_wait_timeout = '1';
 
 DO $clamp$
 DECLARE
     _got TEXT;
 BEGIN
+    -- hivemind through 37500019 of 37500001..37500045: it waits for the rest, and processes
+    -- nothing meanwhile, not even the part hivemind has reached.
+    UPDATE hafd.contexts SET current_block_num = 37500019 WHERE name = 'hivemind_app';
+    BEGIN
+        PERFORM haf_stats_app.process_content_stats(37500001, 37500045);
+        RAISE EXCEPTION 'ci: no wait';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE '%hivemind has not reached block 37500045 (usable through 37500019)%' THEN
+            RAISE;
+        END IF;
+    END;
+    IF EXISTS (SELECT 1 FROM ci_ranges) THEN
+        RAISE EXCEPTION 'hivemind source: processed % while hivemind was only through 37500019; nothing may be read before hivemind has the whole range',
+            (SELECT string_agg(format('%s..%s', first_block, last_block), ', ' ORDER BY first_block) FROM ci_ranges);
+    END IF;
+
+    -- hivemind through the whole range: one range, never past hivemind's head.
+    UPDATE hafd.contexts SET current_block_num = 37500045 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.process_content_stats(37500001, 37500045);
     IF EXISTS (SELECT 1 FROM ci_ranges WHERE last_block > hivemind_head) THEN
         RAISE EXCEPTION 'hivemind source: a content-stats batch ended past hivemind''s head: %',
             (SELECT string_agg(format('%s..%s (head %s)', first_block, last_block, hivemind_head), ', ' ORDER BY first_block) FROM ci_ranges);
     END IF;
     SELECT string_agg(format('%s..%s', first_block, last_block), ', ' ORDER BY first_block) INTO _got FROM ci_ranges;
-    IF _got IS DISTINCT FROM '37500001..37500019, 37500020..37500029, 37500030..37500039, 37500040..37500045' THEN
-        RAISE EXCEPTION 'hivemind source: expected the range in the four pieces hivemind had reached, got %', _got;
+    IF _got IS DISTINCT FROM '37500001..37500045' THEN
+        RAISE EXCEPTION 'hivemind source: expected the range as one, once hivemind had reached all of it, got %', _got;
     END IF;
-    RAISE NOTICE 'hivemind source: clamp verified (%)', _got;
+    RAISE NOTICE 'hivemind source: clamp verified (nothing while hivemind was partway; then %)', _got;
 END
 $clamp$;
 
 -- ---------------------------------------------------------------------------
 -- 4. The wait
 -- ---------------------------------------------------------------------------
-SET LOCAL haf_stats.hivemind_wait_timeout = '1';
 
 DO $wait$
 DECLARE
@@ -272,7 +290,7 @@ BEGIN
         PERFORM haf_stats_app.process_content_stats(37500001, 37500045);
         RAISE EXCEPTION 'ci: no wait';
     EXCEPTION WHEN raise_exception THEN
-        IF SQLERRM NOT LIKE '%hivemind has not reached block 37500001 (usable through 37500000)%' THEN
+        IF SQLERRM NOT LIKE '%hivemind has not reached block 37500045 (usable through 37500000)%' THEN
             RAISE;
         END IF;
     END;
