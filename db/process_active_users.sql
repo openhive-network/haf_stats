@@ -374,11 +374,17 @@ BEGIN
         RETURNING 1
     ),
     -- One row per authored op, so a multi-signer op counts as one operation. An op's day and
-    -- op_class are its own, so DISTINCT over the three keeps exactly one row per op: one
-    -- DISTINCT the planner can hash, instead of two COUNT(DISTINCT op_id), each a sort.
+    -- op_class are its own, so one row per op_id is one DISTINCT for both counts below
+    -- instead of two COUNT(DISTINCT op_id). DISTINCT ON, never a hashed DISTINCT or GROUP BY:
+    -- a HAF op id packs the block number and the op's position into one bigint, and
+    -- hashint8 XOR-folds the two halves, so a 10k-block batch's ids collapse onto ~50 per
+    -- hash value and a HashAggregate over them runs for minutes. DISTINCT ON is
+    -- always a Unique over sorted input, here the temp table's primary key, which leads
+    -- with op_id.
     batch_op AS MATERIALIZED (
-        SELECT DISTINCT day, op_class, op_id
+        SELECT DISTINCT ON (op_id) day, op_class, op_id
         FROM haf_stats_batch_authored_ops
+        ORDER BY op_id
     ),
     -- Operation volume per class plus the -1 ALL rollup.
     op_counts AS (
