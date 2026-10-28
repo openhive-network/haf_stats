@@ -22,7 +22,8 @@ project adds to its CI lane runs here too), and runs each one as a local process
     docker/haf_stats_nginx.conf.template and endpoints/rewrite_rules.conf, rendered
     as docker/rewriter_entrypoint.sh renders them, on unprivileged ports.
   - `tavern` runs /opt/venv's pytest over the mounted tests with the `-m` marker
-    expression the service's command names (CI pip-installs the same versions).
+    expression the service's command names (CI runs the same versions, from
+    common-ci-configuration's python-test-tools image).
 
 Bind mounts at container paths are served by rewriting those paths in commands,
 environment values and mounted shell scripts; host names of the services run here

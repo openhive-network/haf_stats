@@ -269,6 +269,8 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ("python:3.12-slim-bookworm", "bash"),
         ('"${HAF_APP_TEST_RUNNER_IMAGE}"', "bash"),
         ("$HAF_APP_TEST_RUNNER_IMAGE", "bash"),
+        ('"${PYTHON_TEST_TOOLS_IMAGE}"', "bash"),
+        ("$PYTHON_TEST_TOOLS_IMAGE", "bash"),
         # busybox ash: linting these as bash would hide every SC3xxx finding.
         ("python:3.12-alpine", "sh"),
         ("python:3.12-alpine3.20", "sh"),
@@ -292,6 +294,7 @@ def test_the_shell_follows_the_image_including_through_extends(files):
         ('"${HAF_APP_TEST_RUNNER_IMAGE_X}"', "sh"),
         ('"${HAF_APP_TEST_RUNNER_IMAGE"', "sh"),
         ('"$HAF_APP_TEST_RUNNER_IMAGE}"', "sh"),
+        ('"${PYTHON_TEST_TOOLS_IMAGE_X}"', "sh"),
         # Any other registry path is unknown, so it gets the stricter shell.
         ("registry.example/python:3.12-slim", "sh"),
     ],

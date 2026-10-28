@@ -224,7 +224,7 @@ services:
     # docker/haf_stats_nginx.conf.template) that nothing was using. Every other
     # dependency in this file waits on a condition; these two were the only
     # short-form ones, and short form waits for container START, not readiness.
-    # tavern spends 20-40s in `pip install` before its first request so the race is
+    # tavern spends seconds collecting before its first request so the race is
     # unlikely, but "unlikely" is how flakes are described before they happen.
     healthcheck:
       # Same probe haf_api_node uses for the sibling rewriter images
@@ -241,12 +241,11 @@ services:
         condition: service_started
 
   tavern:
-    image: python:3.12-slim
-    # Pin pytest<9: pytest 9 dropped _pytest._code.code.FormattedExcinfo, which
-    # tavern 3.6.0 imports, so an unpinned install breaks collection at import time.
+    image: "${PYTHON_TEST_TOOLS_IMAGE:-registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools:develop}"
+    # pytest and tavern come with common-ci-configuration's python-test-tools image, at
+    # the versions its docker-bake.hcl defines; CI passes the tag its templates use.
     command: >
-      sh -c "pip install tavern 'pytest<9' -q &&
-             pytest /tests/tavern -m 'negative or synthetic' --tb=short -v"
+      sh -c "pytest /tests/tavern -m 'negative or synthetic' --tb=short -v"
     volumes:
       - ../tests/tavern:/tests/tavern:ro
     environment:

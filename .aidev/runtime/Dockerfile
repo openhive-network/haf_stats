@@ -12,8 +12,10 @@
 #   + shellcheck 0.11.0, hadolint (the latest-alpine CI's hadolint job ran on
 #     2026-10-24), the docker CLI and its compose plugin (`docker compose config` only;
 #     no daemon is used)
-#   + /opt/venv: tavern 3.7.1 + pytest 8.4.2 (what CI's tavern lanes resolved),
-#     pyyaml, openapi-spec-validator 0.9.0; /opt/sqlfluff: sqlfluff 3.3.0;
+#   + /opt/venv: tavern + pytest at the versions common-ci-configuration's
+#     python-test-tools image ships (CI's tavern and unit jobs run in it or in
+#     haf-app-test-runner, built on it; today pytest 9.1.1, tavern 3.7.1), read from
+#     that image so they are not pinned here a second time, pyyaml, openapi-spec-validator 0.9.0; /opt/sqlfluff: sqlfluff 3.3.0;
 #     /opt/openapi-venv + /opt/openapi/process_openapi.py: scripts/openapi_rewrite.sh's
 #     pinned generator and venv, for its COMMON_CI_OFFLINE=1 mode
 #   + /app -> /tmp/aidev-app, which .aidev/compose_lane.py points at the db/,
@@ -27,13 +29,19 @@ FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3@sha256:6a
 FROM koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
 FROM hadolint/hadolint:latest-alpine@sha256:a1d49ae1a4e83c1dbad26b8c1ad7588c8bd1e04f4866b34ad3cac50335198552 AS hadolint
 FROM docker:24-cli@sha256:2b62f89aaab9e4df0ff843f0d9a7bbd17340a9ba7c660ba6f40b1f00b38c2a4d AS docker
+# python-test-tools:develop as of 2026-10-27. Its glibc Python 3.14 venv cannot be
+# copied into this Alpine image, so only its pytest and tavern versions are taken.
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools@sha256:6c8fd2223bb119ab10c6354349472b58e60a530ef4e13530671eac0237aa7080 AS test-tools
+RUN python3 -m pip freeze | grep -iE '^(pytest|tavern)==' > /test-tools.txt \
+    && test "$(wc -l < /test-tools.txt)" -eq 2
 
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:9f5e12cd984bf12746ce9af081868e09ced8068f@sha256:1008ee680742d09b3542393f8c3c5212162fab2893a3f5e13c546100de821ebe
 
 USER root
+COPY --from=test-tools /test-tools.txt /opt/test-tools.txt
 RUN apk add --no-cache bash coreutils findutils grep sed gawk git curl postgresql-client python3 py3-psycopg2 \
     && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir tavern==3.7.1 pytest==8.4.2 pyyaml==6.0.3 openapi-spec-validator==0.9.0 \
+    && /opt/venv/bin/pip install --no-cache-dir -r /opt/test-tools.txt pyyaml==6.0.3 openapi-spec-validator==0.9.0 \
     && python3 -m venv /opt/sqlfluff \
     && /opt/sqlfluff/bin/pip install --no-cache-dir sqlfluff==3.3.0 \
     && python3 -m venv /opt/openapi-venv \
