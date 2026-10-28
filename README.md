@@ -1054,31 +1054,36 @@ therefore moves at hivemind's pace.
 
 The processor checks this before it runs anything, and while hivemind is behind it rolls
 the batch back and asks HAF for it again, so nothing stays open while it waits
-([#123](https://gitlab.syncad.com/hive/haf_stats/-/issues/123)): no transaction, no lock on
-hivemind's tables or on haf_stats' own HAF context row, and a restarted processor does not
-queue behind the old one.
+([#123](https://gitlab.syncad.com/hive/haf_stats/-/issues/123)): no transaction ID (nothing
+written), no lock on hivemind's tables or on haf_stats' own HAF context row, and a restarted
+processor does not queue behind the old one.
 
-* Under `haf_app_driver.py` the batch raises SQLSTATE `55H18`, which the driver retries. It
+* Under `haf_app_driver.py` the batch raises SQLSTATE `55R23`, which the driver retries. It
   logs `database connection problem: haf_stats: hivemind has not reached block N (usable
-  through M); blocks A..B are left for a retry`, plus the context lines PostgreSQL adds,
-  then reconnects and tries again every 5 seconds (its `--retry-delay`). That repeats for
-  as long as hivemind is behind. The "connection problem" wording is the driver's and
-  cannot be changed from here.
+  through M); blocks A..B are left for a retry` with the HINT and CONTEXT lines PostgreSQL
+  adds, then `reconnecting in 5.0s` and its connect banner, and tries again every 5 seconds
+  (its `--retry-delay`). That repeats for as long as hivemind is behind. The "connection
+  problem" wording is the driver's and cannot be changed from here.
 * The legacy `CALL main()` loop logs one `waiting for hivemind` notice, retries every
   second, and logs again when processing resumes.
 
 Either way the block-processing healthcheck turns unhealthy once the wait passes
 `HAF_STATS_HEALTHCHECK_MAX_AGE_SECONDS` (300 s), as it did when the wait was inside the
-batch: HAF's heartbeat is written in the transaction that is rolled back.
+batch: after the first retry no HAF heartbeat is committed, since it is written in the
+transaction that is rolled back. For the same reason a wait longer than HAF's dead-app
+timeout (4 hours, its `dead_app_contexts_auto_detach` cron job) gets the haf_stats context
+detached; the next iteration attaches it again where it was.
 
 hivemind drops `hive_posts`' foreign keys (`ALTER TABLE ... DROP CONSTRAINT`, an ACCESS
 EXCLUSIVE lock) whenever it falls back into massive sync -- 101 or more blocks behind, as
 after about five minutes of downtime -- and its indexes as well at 2,000,000 or more. A
 lock held through a wait would leave the two blocked on each other, with hivemind's API
 queued behind them ([#118](https://gitlab.syncad.com/hive/haf_stats/-/issues/118)).
-`haf_stats.hivemind_wait_timeout` (seconds, a session setting) bounds
-`haf_stats_app.wait_for_hivemind`, which `rebuild_content_volume.sh` runs as a pre-check;
-the block processor never waits in it.
+`haf_stats_app.wait_for_hivemind` waits that way, reading no hivemind table first. The
+content-stats step still calls it as a guard, in case hivemind goes back after the batch's
+check (a fork, or a restart into massive sync that drops the index); otherwise it returns
+at once there. `haf_stats.hivemind_wait_timeout` (seconds, a session setting) bounds it, and
+`rebuild_content_volume.sh` runs it as a pre-check with a timeout of 0.
 
 This adds little delay: hivemind advances its completion marker only per live block and at
 the end of its own massive sync, so while it catches up there was never a partial range to

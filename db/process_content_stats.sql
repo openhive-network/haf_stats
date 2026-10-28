@@ -517,12 +517,12 @@ END;
 $$;
 
 -- The block driver's gate (#123): process_blocks calls it first, before any processor runs.
--- While hivemind has not reached the delivered range it raises SQLSTATE 55H18, so the driver
+-- While hivemind has not reached the delivered range it raises SQLSTATE 55R23, so the driver
 -- rolls the range back and asks for it again later, instead of the batch sleeping inside the
 -- driver's transaction for as long as hivemind takes.
 --
 -- The code is in class 55, "object not in prerequisite state". psycopg2 has no exception of
--- its own for 55H18 and raises its class's, OperationalError -- one of the two that
+-- its own for 55R23 and raises its class's, OperationalError -- one of the two that
 -- haf_app_driver.py retries: it logs "database connection problem: <this message>", reconnects
 -- and calls hive.app_next_iteration again after --retry-delay (5 s). Any other error ends the
 -- driver. tests/ci_driver_hivemind_retry.py runs the shipped driver against it.
@@ -537,7 +537,7 @@ DECLARE
 BEGIN
     IF _usable IS NOT NULL THEN
         RAISE EXCEPTION 'haf_stats: hivemind has not reached block % (usable through %); blocks %..% are left for a retry', _last_block, _usable, _first_block, _last_block
-            USING ERRCODE = '55H18',
+            USING ERRCODE = '55R23',
                   HINT = 'Expected while hivemind catches up: the block driver rolls the range back and retries it. See README, "Content source".';
     END IF;
 END;
@@ -546,8 +546,10 @@ $$;
 -- Waits until the hivemind source may read through _block, and returns the highest block it
 -- may read. scripts/rebuild_content_volume.sh calls it once as a pre-check, and
 -- process_content_stats with a batch's last block before reading anything from hivemind.
--- Both block drivers have already made sure hivemind is there (require_content_source,
--- main()), so in the block path it returns at once.
+-- Both block drivers check first (require_content_source, main()), so in the block path it
+-- normally returns at once. It still waits, inside the batch's transaction, if hivemind goes
+-- back between that check and this call -- a fork, or a restart into massive sync that drops
+-- the block_num_created index.
 --
 -- Waits, never falls back: a batch processed from the other source would mix the two (see the
 -- section header). haf_stats.hivemind_wait_timeout (seconds) turns a wait longer than that into
@@ -1316,7 +1318,8 @@ END IF;
 -- then reads hivemind's tables; never past it, and never from the other source.
 --
 -- Both block drivers check that first and retry the range later rather than wait here (#123),
--- so in the block path this wait returns at once. It stays as the guard for any other caller.
+-- so this wait normally returns at once. It stays as the guard for hivemind going back after
+-- that check (see wait_for_hivemind).
 --
 -- Wait first, read after, never the other way round (#118). A wait here sleeps inside the
 -- caller's transaction, which keeps every lock it has taken until it commits. hivemind drops

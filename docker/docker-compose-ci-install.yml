@@ -359,7 +359,7 @@ services:
       driver-retry:
         condition: service_completed_successfully
 
-  # #123: while hivemind is behind a range, the installed process_blocks raises 55H18 at once,
+  # #123: while hivemind is behind a range, the installed process_blocks raises 55R23 at once,
   # the haf_app_driver.py this image ships rolls the range back and retries it, and the legacy
   # main() loop retries it outside a transaction. The only lane with both the installed app and
   # the shipped driver; the stub has no block streaming, so the script stands in

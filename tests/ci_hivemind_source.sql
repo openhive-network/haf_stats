@@ -18,7 +18,7 @@
 --      marker and a missing block_num_created index hold it back too; an error reading the
 --      marker is raised, not taken for "no marker".
 --   5. The block drivers' check (#123): while hivemind is behind a range, require_content_source
---      raises 55H18 at once and hivemind_behind says how far hivemind is usable; neither waits.
+--      raises 55R23 at once and hivemind_behind says how far hivemind is usable; neither waits.
 --
 -- One transaction, rolled back: the processors' output, the source record, hivemind's context
 -- row, its index and hive_state are this file's alone.
@@ -362,7 +362,7 @@ $wait$;
 -- ---------------------------------------------------------------------------
 -- 5. The block drivers' check (#123): require_content_source, which process_blocks calls
 --    first, and hivemind_behind, which main() calls. Neither waits: while hivemind is behind
---    the range they report it at once -- require_content_source as SQLSTATE 55H18, the code
+--    the range they report it at once -- require_content_source as SQLSTATE 55R23, the code
 --    haf_app_driver.py retries (tests/ci_driver_hivemind_retry.py) -- and once hivemind has
 --    reached it they let it through. The timeout is long, so a check that waited would be
 --    seen taking seconds and then raising the wait's own error.
@@ -400,9 +400,9 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS _state = RETURNED_SQLSTATE, _message = MESSAGE_TEXT;
     END;
-    IF _state IS DISTINCT FROM '55H18'
+    IF _state IS DISTINCT FROM '55R23'
        OR _message NOT LIKE '%hivemind has not reached block 37500045 (usable through 37500030); blocks 37500001..37500045 are left for a retry%' THEN
-        RAISE EXCEPTION 'hivemind check: hivemind behind the range must raise 55H18 naming the range and 37500030, got % (%)', _state, _message;
+        RAISE EXCEPTION 'hivemind check: hivemind behind the range must raise 55R23 naming the range and 37500030, got % (%)', _state, _message;
     END IF;
     IF clock_timestamp() - _started > INTERVAL '2 seconds' THEN
         RAISE EXCEPTION 'hivemind check: require_content_source took % to report hivemind behind; it must not wait', clock_timestamp() - _started;
@@ -429,7 +429,7 @@ BEGIN
     END IF;
     PERFORM haf_stats_app.require_content_source(37500001, 37500045);
 
-    -- No hivemind context is a configuration error, not something to retry: not 55H18.
+    -- No hivemind context is a configuration error, not something to retry: not 55R23.
     DELETE FROM hafd.contexts WHERE name = 'hivemind_app';
     BEGIN
         PERFORM haf_stats_app.require_content_source(37500001, 37500045);
@@ -441,7 +441,7 @@ BEGIN
         RAISE EXCEPTION 'hivemind check: no hivemind context must raise P0001 "no hivemind_app context", got % (%)', _state, _message;
     END IF;
 
-    RAISE NOTICE 'hivemind source: block-driver check verified (internal -> through; behind -> 55H18 at once; missing index -> 0; reached -> through; no context -> P0001)';
+    RAISE NOTICE 'hivemind source: block-driver check verified (internal -> through; behind -> 55R23 at once; missing index -> 0; reached -> through; no context -> P0001)';
 END
 $gate$;
 

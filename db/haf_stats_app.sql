@@ -585,7 +585,7 @@ BEGIN
         -- On the hivemind content source, a range hivemind has not reached yet is rolled back
         -- -- which also releases the context row hive.app_next_iteration just moved -- and asked
         -- for again a second later (#123). Waiting for hivemind inside this transaction instead
-        -- held it open for as long as hivemind took. process_blocks raises 55H18 for the same
+        -- held it open for as long as hivemind took. process_blocks raises 55R23 for the same
         -- case, since the driver owns its transaction.
         _hivemind_usable := haf_stats_app.hivemind_behind(_block_range.last_block);
         IF _hivemind_usable IS NOT NULL THEN
@@ -682,7 +682,7 @@ BEGIN
         RETURN;
     END IF;
 
-    -- First, before anything runs: on the hivemind content source, raises 55H18 while hivemind
+    -- First, before anything runs: on the hivemind content source, raises 55R23 while hivemind
     -- has not reached the range, which the driver rolls back and retries (#123).
     PERFORM haf_stats_app.require_content_source(_block_range.first_block, _block_range.last_block);
 

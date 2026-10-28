@@ -28,9 +28,10 @@
 --     (db/process_content_stats.sql), when a deployment selects it. That source checks
 --     hivemind itself before each batch and retries the batch later while hivemind is
 --     behind (require_content_source, #123). That holds the whole batch back, as a
---     dependency would, but it also counts hivemind's completion marker and its
---     block_num_created index, which the dependency limit does not, and it applies only
---     on the hivemind source. Under tests/, the parity
+--     dependency would, but it also caps at hive_state.last_completed_block_num and
+--     requires the block_num_created index, where the dependency limit reads only
+--     hivemind's completed_block_num() (its position less any in-flight massive batch),
+--     and it applies only on the hivemind source. Under tests/, the parity
 --     oracle reads it with dynamic SQL so it degrades when hivemind is absent.
 --
 -- Declaring the dependency anyway would clamp every delivered range to hivemind's
