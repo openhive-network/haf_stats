@@ -24,7 +24,7 @@ SET ROLE haf_stats_owner;
 --   * its active_users_period_counts day/week/month rows and its active_users_account_monthly
 --     month. They are refreshed up to the day a batch's refresh starts from, and N >= 7 keeps the
 --     week of that day, as well as its month, inside the window. During massive sync the refreshes
---     are deferred (defer_rollup_refresh, db/haf_stats_app.sql) and recorded from the first
+--     are deferred (defer_rollup_refresh, db/deferred_rollup_refreshes.sql) and recorded from the first
 --     batch's day; then the periods before the new first day are restated here, once, and the
 --     record moves up to it - as prune_content_presence (db/process_content_stats.sql) does for
 --     the content presence sets;

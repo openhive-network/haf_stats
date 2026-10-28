@@ -271,7 +271,7 @@ _DEFERRED_CALL = re.compile(r"PERFORM haf_stats_app\.(refresh_\w+)\(.*\n.*report
 
 
 def test_every_deferred_refresh_is_timed_under_its_own_name() -> None:
-    body = _sql("haf_stats_app.sql")
+    body = _sql("deferred_rollup_refreshes.sql")
     body = body[body.index("CREATE OR REPLACE FUNCTION haf_stats_app.run_deferred_rollup_refreshes("):]
     timed = [(m.group(1), m.group(2)) for m in _DEFERRED_CALL.finditer(body)]
 

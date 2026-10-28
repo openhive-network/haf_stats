@@ -47,7 +47,8 @@
 #                     gone between two batches as a crash would leave it,
 #                     tests/ci_deferred_refresh_recorded.sql; then, timed apart from the
 #                     sync, the call that batch makes,
-#                     haf_stats_app.prepare_rollup_refreshes(FALSE) (deferred-refresh.log);
+#                     haf_stats_app.prepare_rollup_refreshes(FALSE), then
+#                     haf_stats_app.run_deferred_engagement_refresh() (deferred-refresh.log);
 #                     then tests/ci_deferred_refresh_complete.sql and
 #                     tests/ci_daily_retention_equality.sql (.gitlab-ci.yml's sync job
 #                     runs the same four steps; keep them in step); then
@@ -333,7 +334,7 @@ sync_blocks() {
     [ "$block" -ge "$STOP_AT_BLOCK" ] || { echo "expected block $STOP_AT_BLOCK"; return 1; }
     cq -f tests/ci_deferred_refresh_recorded.sql || return 1
     t0="$(date +%s.%N)"
-    if ! cq -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);" \
+    if ! cq -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE); SELECT haf_stats_app.run_deferred_engagement_refresh();" \
         > "$deferred_log" 2>&1; then
         echo "the deferred rollup refreshes failed ($deferred_log):"; tail -40 "$deferred_log"
         return 1

@@ -11,10 +11,9 @@
 --      to whole months. A refresh from genesis afterwards restates nothing it cannot recount.
 --   B. During massive sync the active-user refreshes are deferred: the prune restates the periods
 --      before the window first and moves the record up, and the deferred refresh then completes
---      the rollups to exactly what one refresh over the unpruned history gives. This lane has no
---      haf_stats_app.run_deferred_rollup_refreshes (db/haf_stats_app.sql needs a HAF), so the
---      deferred refresh is run as that function runs it: from the record to the last processed
---      day. The CI sync runs the real one over a pruned replay (tests/ci_deferred_refresh_*.sql).
+--      the rollups to exactly what one refresh over the unpruned history gives. The deferred
+--      refresh is run here as haf_stats_app.run_deferred_rollup_refreshes runs it for this
+--      record alone: from the record to the last processed day. The CI sync runs the real one over a pruned replay (tests/ci_deferred_refresh_*.sql).
 --   C. A database from before #124 mid-replay - active_users_daily on its old key with
 --      idx_aud_opclass_day, the rollups owed from the first day, nothing pruned - converted by
 --      haf_stats_app.upgrade_daily_retention: the same end state as A and B.
