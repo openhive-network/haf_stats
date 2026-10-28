@@ -1024,9 +1024,10 @@ per deployment:
 * **`hivemind`** reads the creations hivemind already stores: `hivemind_app.hive_posts` has
   one row per creation, a re-creation after delete included, with its block, depth, parent
   and community. `comment_registry` then stays empty. Content volume, the account content
-  counts, community activity, unique authors, author retention and the engagement post set
-  all come out the same; `post_engagement`'s vote and reply counts still come from the
-  operations.
+  counts, community activity, unique authors and author retention all come out the same.
+  `post_engagement` (4.4 GB at block 67.45M) is not written either: the engagement rollup
+  behind `get_network_engagement` is computed from `hive_posts` and `hive_votes` instead (see
+  "Engagement on the hivemind source" below).
 
 `install_app.sh` decides and records it. With `--content-source=auto` (the default;
 `HAF_STATS_CONTENT_SOURCE` sets it too) a new deployment takes `hivemind` when the
@@ -1035,7 +1036,7 @@ per deployment:
 blocks before the choice existed counts as `internal`. `--content-source=hivemind` or
 `=internal` forces it. The reads are granted by `db/builtin_roles.sql` -- `USAGE` on
 `hivemind_app` and `SELECT` on `hive_posts`, `hive_accounts`, `hive_permlink_data`,
-`hive_communities` and `hive_state`, to `haf_stats_owner` only -- when hivemind is installed
+`hive_communities`, `hive_state` and `hive_votes`, to `haf_stats_owner` only -- when hivemind is installed
 and the installing role may grant them (its owner or a superuser). **A node that installs
 hivemind after haf_stats gets them by re-running `install_app.sh`.**
 
@@ -1060,6 +1061,43 @@ reply whose parent was also deleted and re-created in the same batch
 comments are missing from its counts, and their operations are counted as edits -- where
 the internal source matches hived's `post_count`. `tests/parity/content_vs_hivemind.sql`
 reports `NOT RUN` on such a node, since both sides are then hivemind's.
+
+**Engagement on the hivemind source.** `engagement_period_counts` (the per-day/week/month
+post, vote and reply totals behind `get_network_engagement`) is refreshed for the creation-days a
+batch touched, as on the internal source, but each day is recomputed from hivemind: its posts are
+the `hive_posts` root rows that are the first root creation of their author/permlink, dated by
+that block; a post's replies are the direct replies under any of its root creations, deleted ones
+included; its votes are, per `hive_votes` row, `1 + num_changes`, less one where the vote now
+stands at 0%. The batch stages the touched days from hivemind too (the root posts it created,
+replied to or voted on). The post set, the post days and the reply counts are exactly
+`post_engagement`'s. The vote count is not: `post_engagement` counts vote ops with a non-zero
+weight, and hivemind keeps no per-op history, so a voter who unvoted and voted again counts each
+unvote here. Measured on steem-20 against its `post_engagement` (posts / votes / replies / posts
+with no vote / posts with no reply):
+
+| day | `post_engagement` | hivemind |
+|---|---|---|
+| 2016-09-10 | 1686 / 44630 / 4312 / 34 / 460 | 1686 / 44651 / 4313 / 34 / 459 |
+| 2018-03-15 | 43931 / 619350 / 90867 / 3740 / 18800 | 43931 / 619615 / 90873 / (not measured) / 18800 |
+| 2020-06-10 | 4044 / 235211 / 6746 / 172 / 1631 | 4044 / 235153 / 6758 / 172 / 1629 |
+
+Votes are within 0.05% per day. The reply and zero-reply differences are replies made after
+`post_engagement`'s last processed block, which hivemind already had (on 2020-06-10, 6747
+replies up to the processor's head). Counting distinct voters instead would be 0.2-0.7% low.
+hivemind is never behind the processor, so a refresh may count a vote or reply from a block the
+processor has yet to reach; that block re-stages the day.
+
+A refresh of the 22-23 creation-days a live hour of 2022 touched (84-90k posts) took 0.46-0.50 s
+warm (0.5-1.0 s cold) on steem-20, against 25-28 ms from `post_engagement`; it runs once per
+1200 blocks. Staging the touched days from hivemind costs 0.15 s for a 10,000-block batch, and
+each batch no longer writes `post_engagement`.
+
+An install over a hivemind-sourced deployment that still holds `post_engagement` (one upgraded
+from a release that wrote it, or switched by `rebuild_content_volume.sh`) rebuilds the rollup from
+hivemind and then empties the table, in one transaction, and reports the all-time totals before
+and after (`retire_post_engagement`, step 7c). An internal-source deployment keeps it. Switching
+from hivemind back to internal leaves `post_engagement` without the posts created before the
+switch, so their later votes and replies are not counted; replay to have them.
 
 `network_voter_daily` and `network_author_daily`, the sets the vote and content rollups
 count unique voters and authors from, are read only by the processor, which deletes what it

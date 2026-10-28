@@ -12,7 +12,8 @@ SET ROLE haf_stats_owner;
 --                                    (tables network_vote_daily + network_voter_daily)
 --   * get_network_engagement       — per-post vote/reply counts for engagement quality
 --                                    metrics (avg votes/comments per post, zero-
---                                    engagement percentages; table post_engagement)
+--                                    engagement percentages; table post_engagement, or
+--                                    hivemind's posts and votes on the hivemind source)
 --
 -- Author rewards are NOT stored here: they already live in
 -- haf_stats_backend.account_financial_daily (process_financial.sql) and the
@@ -135,6 +136,10 @@ DROP INDEX IF EXISTS haf_stats_backend.idx_acomd_account_day;
 -- counts every create event by its own day — the two diverge by the number of
 -- re-creations (small; ~155 over the first 5M blocks).
 -- vote_count and reply_count accumulate across processor batches via bulk UPDATE.
+--
+-- Written by the internal content source only. On the hivemind source the same per-post counts
+-- are read from hivemind's hive_posts and hive_votes when the rollup is refreshed (see "Rollup
+-- refresh" below), and this table stays empty -- emptied on upgrade by retire_post_engagement.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.post_engagement (
     author_id INT NOT NULL,
     permlink TEXT NOT NULL,
@@ -393,7 +398,8 @@ BEGIN
         VALUES
         ('hive_posts', 'id'), ('hive_posts', 'author_id'), ('hive_posts', 'permlink_id'),
         ('hive_posts', 'parent_id'), ('hive_posts', 'depth'), ('hive_posts', 'community_id'),
-        ('hive_posts', 'block_num_created'),
+        ('hive_posts', 'block_num_created'), ('hive_posts', 'root_id'),
+        ('hive_votes', 'post_id'), ('hive_votes', 'num_changes'), ('hive_votes', 'vote_percent'),
         ('hive_accounts', 'id'), ('hive_accounts', 'name'),
         ('hive_permlink_data', 'id'), ('hive_permlink_data', 'permlink'),
         ('hive_communities', 'id'), ('hive_communities', 'name')
@@ -1045,7 +1051,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Rollup refresh (feeds get_network_engagement)
 --
--- Two entry points that maintain engagement_period_counts directly from post_engagement:
+-- Two entry points that maintain engagement_period_counts:
 --   refresh_engagement_full()     — rebuild everything. Install-time backfill on an already-synced
 --                                   node + manual repairs. Clears the rollup, stages every
 --                                   creation-day, and delegates to refresh_engagement_touched (so the
@@ -1057,7 +1063,25 @@ $$;
 --                                   engagement_touched_days, re-roll their week/month periods from
 --                                   those 'day' rows, then drain the staging set.
 -- Both roll week/month by summing the rollup's own 'day' slice (~one row per day) rather than
--- re-scanning the millions-of-rows post_engagement per period.
+-- re-scanning the millions-of-rows post set per period.
+--
+-- The 'day' rows come from post_engagement on the internal content source, and from hivemind on
+-- the hivemind source (refresh_engagement_days_from_hivemind), which already holds every post,
+-- reply and vote; post_engagement is not written there. What hivemind gives for post_engagement's
+-- counts:
+--   * the post set and post_day: a root post's (author, permlink) dated by the block of its FIRST
+--     root creation -- exact;
+--   * reply_count: direct replies created under any root incarnation of that key from its first
+--     root creation on, deleted ones included -- exact (hive_posts keeps a deleted reply's row);
+--   * vote_count: post_engagement counts vote ops with a non-zero weight. hive_votes keeps one row
+--     per (voter, post) with its current vote_percent and num_changes (vote ops after the first),
+--     so the count is each row's 1 + num_changes, less one where the vote now stands at 0%. That
+--     is exact unless a voter unvoted and then voted again (each such unvote counts here) or
+--     hivemind dropped a vote cast on an earlier incarnation of a re-created post. Measured on
+--     steem-20 (README, "Content source"): within 0.05% of post_engagement's sum_votes per day.
+-- The counts are hivemind's as of its head, which is never behind the processor's (the content
+-- source waits for it), so a refresh may already include a vote or reply from a block the
+-- processor has yet to reach; that block re-stages the day, so the next refresh restates it.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_full;
@@ -1067,13 +1091,22 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     -- Rebuild from scratch: clear the rollup, stage every creation-day, then let the touched path
-    -- (which computes the 'day' rows from post_engagement and rolls week/month from them) fill it
-    -- all. Keeps the day/week/month roll-up SQL in one place (refresh_engagement_touched).
+    -- (which computes the 'day' rows and rolls week/month from them) fill it all. Keeps the
+    -- day/week/month roll-up SQL in one place (refresh_engagement_touched).
     TRUNCATE haf_stats_backend.engagement_period_counts;
 
-    INSERT INTO haf_stats_backend.engagement_touched_days (day)
-    SELECT DISTINCT post_day FROM haf_stats_backend.post_engagement
-    ON CONFLICT (day) DO NOTHING;
+    -- On the hivemind source every day with a post creation: a day whose posts are all
+    -- re-creations stages, computes no 'day' row, and leaves nothing behind after the TRUNCATE.
+    IF haf_stats_app.content_source() = 'hivemind' THEN
+        INSERT INTO haf_stats_backend.engagement_touched_days (day)
+        SELECT ncd.day FROM haf_stats_backend.network_content_daily AS ncd
+        WHERE ncd.posts > 0
+        ON CONFLICT (day) DO NOTHING;
+    ELSE
+        INSERT INTO haf_stats_backend.engagement_touched_days (day)
+        SELECT DISTINCT post_day FROM haf_stats_backend.post_engagement
+        ON CONFLICT (day) DO NOTHING;
+    END IF;
 
     PERFORM haf_stats_app.refresh_engagement_touched();
 END;
@@ -1091,25 +1124,30 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 1. Recompute the 'day' rollup rows for exactly the touched creation-days (each an
-    -- idx_pe_post_day range). A day is only staged when a post with that post_day was inserted or
-    -- had its vote/reply count changed, and post_engagement rows are never deleted, so every touched
-    -- day still has >= 1 post - a 'day' row can only need upsert, never removal.
-    INSERT INTO haf_stats_backend.engagement_period_counts
-        (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
-    SELECT 'day', pe.post_day,
-           COUNT(*),
-           SUM(pe.vote_count),
-           SUM(pe.reply_count),
-           COUNT(*) FILTER (WHERE pe.vote_count = 0),
-           COUNT(*) FILTER (WHERE pe.reply_count = 0)
-    FROM haf_stats_backend.post_engagement pe
-    WHERE pe.post_day IN (SELECT day FROM haf_stats_backend.engagement_touched_days)
-    GROUP BY pe.post_day
-    ON CONFLICT (period_type, period) DO UPDATE SET
-        total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
-        sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
-        zero_comment_posts = EXCLUDED.zero_comment_posts;
+    -- 1. Recompute the 'day' rollup rows for exactly the touched creation-days. A day is only
+    -- staged when a post first created that day was inserted or had its vote/reply count changed,
+    -- and posts are never removed (neither post_engagement rows nor hive_posts rows), so every
+    -- touched day still has >= 1 post - a 'day' row can only need upsert, never removal.
+    IF haf_stats_app.content_source() = 'hivemind' THEN
+        PERFORM haf_stats_app.refresh_engagement_days_from_hivemind();
+    ELSE
+        -- Each touched day is an idx_pe_post_day range.
+        INSERT INTO haf_stats_backend.engagement_period_counts
+            (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+        SELECT 'day', pe.post_day,
+               COUNT(*),
+               SUM(pe.vote_count),
+               SUM(pe.reply_count),
+               COUNT(*) FILTER (WHERE pe.vote_count = 0),
+               COUNT(*) FILTER (WHERE pe.reply_count = 0)
+        FROM haf_stats_backend.post_engagement pe
+        WHERE pe.post_day IN (SELECT day FROM haf_stats_backend.engagement_touched_days)
+        GROUP BY pe.post_day
+        ON CONFLICT (period_type, period) DO UPDATE SET
+            total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
+            sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
+            zero_comment_posts = EXCLUDED.zero_comment_posts;
+    END IF;
 
     -- 2. Re-roll every week/month a touched day falls in by summing the rollup's own 'day' rows for
     -- that period - ALL of the period's days, not just the touched ones, so the totals stay exact
@@ -1148,6 +1186,187 @@ BEGIN
         zero_comment_posts = EXCLUDED.zero_comment_posts;
 
     DELETE FROM haf_stats_backend.engagement_touched_days;
+END;
+$$;
+
+-- Step 1 of refresh_engagement_touched on the hivemind source: the 'day' rows of the touched
+-- creation-days, from hive_posts and hive_votes (see the section header for what each count is).
+-- Its own plpgsql function so that an install without hivemind_app never plans a statement that
+-- names it.
+DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_days_from_hivemind;
+CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_days_from_hivemind()
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+    INSERT INTO haf_stats_backend.engagement_period_counts
+        (period_type, period, total_posts, sum_votes, sum_replies, zero_vote_posts, zero_comment_posts)
+    WITH day_blocks AS MATERIALIZED (
+        -- Each day's block range: its first and last block time through hafd.blocks' created_at
+        -- index, then the blocks stamped with exactly that time. A MIN(num) over a created_at
+        -- RANGE is planned as a walk of the primary key instead, tens of seconds per day.
+        SELECT
+            t.day,
+            (SELECT MIN(b.num) FROM hafd.blocks AS b
+             WHERE b.created_at = (SELECT MIN(f.created_at) FROM hafd.blocks AS f WHERE f.created_at >= t.day)) AS lo,
+            (SELECT MAX(b.num) FROM hafd.blocks AS b
+             WHERE b.created_at = (SELECT MAX(l.created_at) FROM hafd.blocks AS l WHERE l.created_at < t.day + 1)) AS hi
+        FROM haf_stats_backend.engagement_touched_days AS t
+    ),
+    -- Every creation of those days, read by block_num_created alone: MATERIALIZED keeps the
+    -- depth = 0 filter below out of this scan, where the planner would AND in hivemind's index on
+    -- depth (every root post of the chain) at a cost of most of a second per day.
+    created AS MATERIALIZED (
+        SELECT d.day, hp.id, hp.author_id, hp.permlink_id, hp.block_num_created, hp.depth
+        FROM day_blocks AS d
+        JOIN hivemind_app.hive_posts AS hp ON hp.block_num_created BETWEEN d.lo AND d.hi
+    ),
+    -- The posts of those days: each key's first root creation. A later root creation of the same
+    -- key is a re-creation, which keeps the first one's day. A scalar subquery, one probe of the
+    -- key's few rows each: as NOT EXISTS the planner hash-anti-joins every root post of the chain.
+    posts AS (
+        SELECT c.day, c.author_id, c.permlink_id, c.block_num_created
+        FROM created AS c
+        WHERE c.depth = 0
+          -- Row 0 is hivemind's placeholder parent of every root post, not a creation.
+          AND c.id > 0
+          AND c.block_num_created = (
+              SELECT MIN(e.block_num_created) FROM hivemind_app.hive_posts AS e
+              WHERE e.author_id = c.author_id AND e.permlink_id = c.permlink_id AND e.depth = 0
+          )
+    ),
+    per_post AS (
+        SELECT
+            p.day,
+            (SELECT COALESCE(SUM(1 + v.num_changes) - COUNT(*) FILTER (WHERE v.vote_percent = 0), 0)
+             FROM hivemind_app.hive_posts AS i
+             JOIN hivemind_app.hive_votes AS v ON v.post_id = i.id
+             WHERE i.author_id = p.author_id AND i.permlink_id = p.permlink_id
+               AND i.block_num_created >= p.block_num_created) AS votes,
+            -- A direct reply shares its parent's root, which is the parent itself for a root
+            -- incarnation; root_id, unlike parent_id, has an index that keeps deleted replies.
+            (SELECT COUNT(*)
+             FROM hivemind_app.hive_posts AS i
+             JOIN hivemind_app.hive_posts AS r ON r.root_id = i.root_id AND r.parent_id = i.id
+             WHERE i.author_id = p.author_id AND i.permlink_id = p.permlink_id
+               AND i.block_num_created >= p.block_num_created) AS replies
+        FROM posts AS p
+    )
+    SELECT 'day', pp.day,
+           COUNT(*),
+           SUM(pp.votes),
+           SUM(pp.replies),
+           COUNT(*) FILTER (WHERE pp.votes = 0),
+           COUNT(*) FILTER (WHERE pp.replies = 0)
+    FROM per_post AS pp
+    GROUP BY pp.day
+    ON CONFLICT (period_type, period) DO UPDATE SET
+        total_posts = EXCLUDED.total_posts, sum_votes = EXCLUDED.sum_votes,
+        sum_replies = EXCLUDED.sum_replies, zero_vote_posts = EXCLUDED.zero_vote_posts,
+        zero_comment_posts = EXCLUDED.zero_comment_posts;
+END;
+$$;
+
+-- The hivemind source's counterpart of the processor's post_engagement staging: records in
+-- engagement_touched_days the creation-day of every root post this batch created, replied to or
+-- voted on (a vote with a non-zero weight, as post_engagement counts them). A key's day is that of
+-- its first root creation in hive_posts; a key that never was a root post stages nothing. Reads
+-- the batch's stages (haf_stats_batch_creations, haf_stats_batch_ops), so it runs inside
+-- process_content_stats_range, after they are filled.
+DROP FUNCTION IF EXISTS haf_stats_app.stage_engagement_days_from_hivemind;
+CREATE OR REPLACE FUNCTION haf_stats_app.stage_engagement_days_from_hivemind()
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+    INSERT INTO haf_stats_backend.engagement_touched_days (day)
+    WITH engaged AS (
+        SELECT hp.author_id, hp.permlink_id
+        FROM haf_stats_batch_creations AS c
+        JOIN hivemind_app.hive_posts AS hp ON hp.id = c.id
+        WHERE c.parent_author = ''
+        UNION
+        SELECT pp.author_id, pp.permlink_id
+        FROM haf_stats_batch_creations AS c
+        JOIN hivemind_app.hive_posts AS hp ON hp.id = c.id
+        JOIN hivemind_app.hive_posts AS pp ON pp.id = hp.parent_id
+        WHERE c.parent_author <> ''
+        UNION
+        SELECT ha.id, pd.id
+        FROM (
+            SELECT DISTINCT ov.body_value ->> 'author' AS author, ov.body_value ->> 'permlink' AS permlink
+            FROM haf_stats_batch_ops AS ov
+            WHERE ov.op_type_id = 0   -- hive::protocol::vote_operation
+              AND (ov.body_value ->> 'weight')::INT <> 0
+        ) AS v
+        JOIN hivemind_app.hive_accounts AS ha ON ha.name = v.author
+        JOIN hivemind_app.hive_permlink_data AS pd ON pd.permlink = v.permlink
+    )
+    SELECT DISTINCT b.created_at::DATE
+    FROM engaged AS e
+    CROSS JOIN LATERAL (
+        SELECT MIN(r.block_num_created) AS block_num
+        FROM hivemind_app.hive_posts AS r
+        WHERE r.author_id = e.author_id AND r.permlink_id = e.permlink_id AND r.depth = 0
+    ) AS f
+    JOIN hafd.blocks AS b ON b.num = f.block_num
+    ON CONFLICT (day) DO NOTHING;
+END;
+$$;
+
+-- Empties post_engagement on a deployment that has switched to the hivemind source -- upgraded
+-- from a release that wrote it there, or rebuilt from the internal source -- once
+-- engagement_period_counts has been rebuilt from hivemind. Both in the caller's transaction, so a
+-- failed rebuild keeps the table. Reports the rollup's all-time totals before and after, the
+-- difference the switch made (see "Rollup refresh" above for why votes can differ). A no-op on
+-- the internal source and once the table is empty. While hivemind is not usable through the
+-- processed blocks (wait_for_hivemind: behind, or in its own massive sync without its indexes) it
+-- keeps the table and says so, rather than wait or rebuild over unindexed tables; the next install
+-- retires it.
+DROP FUNCTION IF EXISTS haf_stats_app.retire_post_engagement;
+CREATE OR REPLACE FUNCTION haf_stats_app.retire_post_engagement()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _size CONSTANT TEXT := pg_size_pretty(pg_total_relation_size('haf_stats_backend.post_engagement'));
+    _timeout CONSTANT TEXT := current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+    _before TEXT;
+    _after TEXT;
+BEGIN
+    IF haf_stats_app.content_source() <> 'hivemind'
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_backend.post_engagement) THEN
+        RETURN;
+    END IF;
+
+    PERFORM set_config('haf_stats.hivemind_wait_timeout', '0', TRUE);
+    BEGIN
+        PERFORM haf_stats_app.wait_for_hivemind(
+            (SELECT GREATEST(COALESCE(MAX(s.last_processed_block), 0), 1) FROM haf_stats_app.app_status AS s));
+    EXCEPTION WHEN raise_exception THEN
+        PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
+        RAISE NOTICE 'haf_stats: post_engagement (%) kept: hivemind is not usable through the processed blocks yet (%); the next install retires it', _size, SQLERRM;
+        RETURN;
+    END;
+    PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
+
+    SELECT format('%s posts, %s votes, %s replies, %s with no vote, %s with no reply',
+                  SUM(total_posts), SUM(sum_votes), SUM(sum_replies), SUM(zero_vote_posts), SUM(zero_comment_posts))
+    INTO _before
+    FROM haf_stats_backend.engagement_period_counts WHERE period_type = 'day';
+
+    PERFORM haf_stats_app.refresh_engagement_full();
+
+    SELECT format('%s posts, %s votes, %s replies, %s with no vote, %s with no reply',
+                  SUM(total_posts), SUM(sum_votes), SUM(sum_replies), SUM(zero_vote_posts), SUM(zero_comment_posts))
+    INTO _after
+    FROM haf_stats_backend.engagement_period_counts WHERE period_type = 'day';
+
+    TRUNCATE haf_stats_backend.post_engagement;
+    RAISE NOTICE 'haf_stats: engagement_period_counts rebuilt from hivemind (before: %; after: %); post_engagement (%) emptied',
+        COALESCE(_before, 'empty'), COALESCE(_after, 'empty'), _size;
 END;
 $$;
 
@@ -1284,7 +1503,8 @@ PERFORM haf_stats_app.prepare_batch_creations(_first_block, _last_block, _hivemi
 --   account_content_daily — author's posts/comments + parent's replies_received, and the
 --                           voter's votes_cast + author's votes_received
 --   post_engagement       — per-post reply and vote counts (insert new root posts seeded with
---                           this batch's counts + update the posts that already existed)
+--                           this batch's counts + update the posts that already existed); the
+--                           internal source only, as hivemind holds them on the other
 --   network_vote_daily    — daily up/down/un/self counters
 --   network_voter_daily   — distinct (day, voter) set for exact unique voters
 --   community stage       — this batch's created comments, for resolve_community_batch()
@@ -1547,7 +1767,7 @@ batch_replies AS (
     FROM (
         SELECT parent_author, parent_permlink, COUNT(*) AS cnt
         FROM classified
-        WHERE is_create AND parent_author <> ''
+        WHERE is_create AND parent_author <> '' AND NOT _hivemind
         GROUP BY parent_author, parent_permlink
     ) agg
     JOIN hafd.accounts a ON a.name = agg.parent_author
@@ -1571,7 +1791,7 @@ batch_votes AS (
     FROM (
         SELECT vo.author, vo.permlink, COUNT(*) AS cnt
         FROM vote_ops vo
-        WHERE vo.weight != 0
+        WHERE vo.weight != 0 AND NOT _hivemind
         GROUP BY vo.author, vo.permlink
     ) agg
     JOIN hafd.accounts a ON a.name = agg.author
@@ -1605,6 +1825,7 @@ insert_posts AS (
     LEFT JOIN batch_engagement be
         ON be.author_id = c.author_id AND be.permlink = c.permlink
     WHERE c.is_create AND c.parent_author = ''
+      AND NOT _hivemind
     ORDER BY c.author_id, c.permlink, c.id
     ON CONFLICT (author_id, permlink) DO NOTHING
     -- RETURNING yields only genuinely-inserted rows (ON CONFLICT skips re-creations),
@@ -1621,6 +1842,7 @@ update_engagement AS (
     FROM batch_engagement be
     WHERE pe.author_id = be.author_id
       AND pe.permlink  = be.permlink
+      AND NOT _hivemind
     -- The post's creation-day may be old; record it so its engagement period is re-rolled
     -- by the boundary hook (the forward block-window refresh would never revisit it).
     RETURNING pe.post_day
@@ -1724,6 +1946,12 @@ ON CONFLICT (account_id, day) DO UPDATE SET
 -- source wrote account_community_daily above (hivemind_communities).
 IF NOT _hivemind THEN
     PERFORM haf_stats_app.resolve_community_batch();
+END IF;
+
+-- The hivemind source writes no post_engagement, so the creation-days it would have staged come
+-- from hivemind instead (see "Rollup refresh" above).
+IF _hivemind THEN
+    PERFORM haf_stats_app.stage_engagement_days_from_hivemind();
 END IF;
 
 -- Refresh the get_network_vote_stats and get_network_content_volume rollups on a ~1200-block

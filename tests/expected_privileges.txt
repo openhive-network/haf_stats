@@ -55,6 +55,7 @@ function haf_stats_app.refresh_account_cohort_retention(_as_of timestamp without
 function haf_stats_app.refresh_active_users_account_monthly(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_active_users_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_author_cohort_retention(_as_of timestamp without time zone, _from_month date, _to_month date) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.refresh_engagement_days_from_hivemind() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_engagement_full() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_engagement_touched() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_financial_monthly(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -71,11 +72,13 @@ function haf_stats_app.resolve_community_batch() | owner=haf_stats_owner | secde
 function haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_category(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_name(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.retire_post_engagement() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes_past_massive() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.select_content_source(_requested text, _allow_switch boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.stage_engagement_days_from_hivemind() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.sync_status() | owner=haf_stats_owner | secdef=true | acl=haf_stats_user:EXECUTE
 function haf_stats_app.to_filter_date(_input text, _default date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
