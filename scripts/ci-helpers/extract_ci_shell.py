@@ -65,13 +65,15 @@ SCRIPT_KEYS = ("before_script", "script", "after_script")
 
 # The runner uses bash when the image has it and falls back to sh otherwise. Only these
 # images are known to ship bash: Debian-based python tags (plain, -slim, -bookworm, ...)
-# and the HAF test runner. Anything else is linted as POSIX sh, the common denominator:
+# and common-ci-configuration's Ubuntu-based test images (the HAF test runner and
+# python-test-tools). Anything else is linted as POSIX sh, the common denominator:
 # docker:24, alpine, postgres:*-alpine and python:*-alpine are busybox ash, and an image
 # inherited from an included template is unknown here.
 BASH_IMAGES = re.compile(
     r"^((docker\.io/)?(library/)?python:\d+(\.\d+)*(-(slim|bookworm|bullseye|trixie))*"
     r"(@sha256:[0-9a-f]{64})?"
-    r"|\$(HAF_APP_TEST_RUNNER_IMAGE|\{HAF_APP_TEST_RUNNER_IMAGE\}))$"
+    r"|\$(HAF_APP_TEST_RUNNER_IMAGE|\{HAF_APP_TEST_RUNNER_IMAGE\}"
+    r"|PYTHON_TEST_TOOLS_IMAGE|\{PYTHON_TEST_TOOLS_IMAGE\}))$"
 )
 
 # Jobs whose image is inherited from an included template, so the table above cannot

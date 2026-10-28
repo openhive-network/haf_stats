@@ -144,7 +144,8 @@ The checks run in a container with your uid: `Dockerfile.rewriter`'s base
 (common-ci-configuration's openresty image), plus bash, `psql`, python3 and git,
 `install_with_app_lock.py` and `haf_app_driver.py` from `psql:14-3` (the app image's
 base), PostgREST 12.2.3, ShellCheck 0.11.0, hadolint, the docker CLI and its compose
-plugin, tavern 3.7.1 + pytest 8.4.2 (what CI's tavern lanes install) with pyyaml and
+plugin, tavern + pytest at the versions common-ci-configuration's `python-test-tools` image
+ships (read from that image, pinned by digest: CI's tavern and unit jobs run in it) with pyyaml and
 openapi-spec-validator in `/opt/venv`, sqlfluff 3.3.0, and `scripts/openapi_rewrite.sh`'s
 generator and venv; every base pinned by digest, nothing installed at run time.
 

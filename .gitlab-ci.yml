@@ -114,10 +114,10 @@ variables:
   CACHE_MANAGER: "/tmp/cache-manager.sh"
   CACHE_MANAGER_REF: "96889a650b3f45244cecc4bb3f250af439a71900"
 
-  # Centralized runner image with Docker + psql. NOTE: pytest/tavern are NOT
-  # preinstalled — the common-ci .tavern_install_deps script pip-installs them
-  # into docker/venv (see pattern-test below).
-  HAF_APP_TEST_RUNNER_IMAGE: "registry.gitlab.syncad.com/hive/common-ci-configuration/haf-app-test-runner:2.2"
+  # Test tools (pytest, tavern, ...) come from common-ci-configuration's images at
+  # the versions its docker-bake.hcl defines: HAF_APP_TEST_RUNNER_IMAGE (from
+  # haf_app_testing.gitlab-ci.yml) and PYTHON_TEST_TOOLS_IMAGE (from
+  # base.gitlab-ci.yml). Don't pin them, or install a tool at job time, here.
   # Per-build network so DinD job containers can reach the compose services.
   FF_NETWORK_PER_BUILD: "true"
   GIT_SUBMODULE_STRATEGY: "none"
@@ -138,9 +138,10 @@ workflow:
 
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
-  # Pinned to a SHA (not develop) for reproducibility — bump deliberately.
+  # develop, as balance_tracker, haf_block_explorer and reputation_tracker include it:
+  # its templates and its test images' moving `develop` tags change together.
 - project: 'hive/common-ci-configuration'
-  ref: 4fd0bd8c4d3eedeb342f4cfa411726a3ae3ed662
+  ref: develop
   file:
   - '/templates/base.gitlab-ci.yml'
   - '/templates/docker_image_jobs.gitlab-ci.yml'
@@ -543,15 +544,13 @@ ci-shell-lint:
 # shape was hardened.
 shell-tests:
   stage: lint
-  # Pinned for the reason shell-lint and sql-lint pin theirs, and because this file
-  # already pins `pytest<9` elsewhere: pytest 9 dropped an internal tavern depends on.
-  image: python:3.11-slim
+  # pytest and pyyaml (tests/unit/test_compose_contract.py parses docker-compose.yml)
+  # come with the image. That test FAILS rather than skips when the module is missing
+  # under CI, for the same reason the bash harness does -- a silent skip would put the
+  # compose file back to uncovered.
+  image: "${PYTHON_TEST_TOOLS_IMAGE}"
   needs: []
   script:
-    # pyyaml: tests/unit/test_compose_contract.py parses docker-compose.yml. It FAILS
-    # rather than skips when the module is missing under CI, for the same reason the
-    # bash harness does -- a silent skip would put the compose file back to uncovered.
-  - pip install --quiet 'pytest<9' pyyaml
     # CI is set, so tests/unit/shell_harness.py FAILS rather than skips if bash ever
     # leaves the image -- otherwise every shell test would quietly stop running and the
     # pipeline would stay green with the scripts uncovered.
@@ -1308,23 +1307,18 @@ sync:
 # (negatives/synthetic edge cases run on the fast stub stack instead).
 pattern-test:
   extends: .haf_stats_dind_test
-  # The runner image has no pytest/tavern; .tavern_install_deps creates a venv at
-  # ${CI_PROJECT_DIR}/docker/venv (compose_startup cd's into docker/) and installs
-  # them. Re-reference the base before_script so it isn't clobbered by this override.
+  # pytest and tavern come with HAF_APP_TEST_RUNNER_IMAGE (first on PATH);
+  # .tavern_install_deps only checks they are there and logs their versions.
+  # Re-reference the base before_script so it isn't clobbered by this override.
   before_script:
   - !reference [.haf_app_dind_complete_test, before_script]
   - !reference [.tavern_install_deps, script]
-  - |
-    # .tavern_install_deps installs pytest>=8 with no upper bound. pytest 9 dropped
-    # _pytest._code.code.FormattedExcinfo, which tavern imports, breaking collection
-    # at import time — the same reason the stub stack pins it (docker-compose-ci.yml).
-    # Cap it here too so a future pytest 9 resolve can't break this job.
-    . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
-    pip install --quiet 'pytest<9'
   script:
   - |
-    . "${CI_PROJECT_DIR}/docker/venv/bin/activate"
-    DOCKER_IP=$(getent hosts docker 2>/dev/null | awk '/^[0-9]+\./{print $1; exit}')
+    # IPv4 first, as the template's own readiness check does: on a dual-stack DinD
+    # network `getent hosts` returns only the IPv6 address, which PostgREST does
+    # not listen on.
+    DOCKER_IP=$(getent ahostsv4 docker 2>/dev/null | awk '{print $1; exit}')
     DOCKER_IP="${DOCKER_IP:-docker}"
     echo "Running tavern pattern suite against http://${DOCKER_IP}:3000"
     API_URL="http://${DOCKER_IP}:3000" \
