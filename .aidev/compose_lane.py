@@ -22,7 +22,8 @@ project adds to its CI lane runs here too), and runs each one as a local process
     docker/haf_stats_nginx.conf.template and endpoints/rewrite_rules.conf, rendered
     as docker/rewriter_entrypoint.sh renders them, on unprivileged ports.
   - `tavern` runs /opt/venv's pytest over the mounted tests with the `-m` marker
-    expression the service's command names (CI pip-installs the same versions).
+    expression the service's command names (CI runs the same versions, from
+    common-ci-configuration's python-test-tools image).
 
 Bind mounts at container paths are served by rewriting those paths in commands,
 environment values and mounted shell scripts; host names of the services run here
@@ -59,7 +60,7 @@ def log(msg: str) -> None:
 
 
 class Service:
-    def __init__(self, name: str, spec: dict, lane: "Lane"):
+    def __init__(self, name: str, spec: dict, lane: "Lane") -> None:
         self.name = name
         self.spec = spec
         self.lane = lane
@@ -151,7 +152,7 @@ class Service:
             entry = self.spec.get("entrypoint")
             if entry != ["/bin/sh", "-c"]:
                 raise SystemExit(f"{self.name}: unsupported entrypoint {entry!r}")
-            script = cmd[0] if isinstance(cmd, list) else cmd
+            script: str = cmd[0] if isinstance(cmd, list) else cmd
             return ["sh", "-c", self.rewrite(script)]
         raise SystemExit(f"{self.name}: no local runner for image {image!r}")
 
@@ -246,7 +247,7 @@ def seconds(value) -> float:
 
 
 class Lane:
-    def __init__(self, compose: Path, wait: str, out: Path, suite: str):
+    def __init__(self, compose: Path, wait: str, out: Path, suite: str) -> None:
         self.compose_dir = compose.parent.resolve()
         self.root = Path.cwd().resolve()
         self.out = out
