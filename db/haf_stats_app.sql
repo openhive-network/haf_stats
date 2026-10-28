@@ -552,6 +552,8 @@ AS $$
 DECLARE
     _block_range hive.blocks_range;
     _massive BOOLEAN;
+    _hivemind_usable INT;
+    _hivemind_waiting BOOLEAN := FALSE;
 BEGIN
     PERFORM haf_stats_app.allow_processing();
     RAISE NOTICE 'haf_stats starting. Last processed block: %', hive.app_get_current_block_num(_context);
@@ -578,6 +580,26 @@ BEGIN
 
         IF _block_range IS NULL THEN
             CONTINUE;
+        END IF;
+
+        -- On the hivemind content source, a range hivemind has not reached yet is rolled back
+        -- -- which also releases the context row hive.app_next_iteration just moved -- and asked
+        -- for again a second later (#123). Waiting for hivemind inside this transaction instead
+        -- held it open for as long as hivemind took. process_blocks raises 55H18 for the same
+        -- case, since the driver owns its transaction.
+        _hivemind_usable := haf_stats_app.hivemind_behind(_block_range.last_block);
+        IF _hivemind_usable IS NOT NULL THEN
+            ROLLBACK;
+            IF NOT _hivemind_waiting THEN
+                RAISE NOTICE 'haf_stats: waiting for hivemind to reach block % (usable through %)', _block_range.last_block, _hivemind_usable;
+                _hivemind_waiting := TRUE;
+            END IF;
+            PERFORM pg_sleep(1);
+            CONTINUE;
+        END IF;
+        IF _hivemind_waiting THEN
+            RAISE NOTICE 'haf_stats: hivemind has reached block %; processing resumes', _block_range.last_block;
+            _hivemind_waiting := FALSE;
         END IF;
 
         _massive := hive.get_current_stage_name(_context) = 'MASSIVE_PROCESSING';
@@ -659,6 +681,10 @@ BEGIN
     IF _block_range IS NULL THEN
         RETURN;
     END IF;
+
+    -- First, before anything runs: on the hivemind content source, raises 55H18 while hivemind
+    -- has not reached the range, which the driver rolls back and retries (#123).
+    PERFORM haf_stats_app.require_content_source(_block_range.first_block, _block_range.last_block);
 
     _massive := hive.get_current_stage_name('haf_stats') = 'MASSIVE_PROCESSING';
 
