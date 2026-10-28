@@ -54,6 +54,7 @@ PROCESSORS: tuple[str, ...] = (
     "process_network_ops",
     "process_network_custom_json",
     "process_witness_blocks",
+    "process_daily_retention",
 )
 
 #: Each rollup/period/retention refresh, and the processor it runs inside. A refresh runs

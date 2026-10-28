@@ -231,6 +231,12 @@ run_sql_file "${SCRIPT_DIR}/../db/process_content_cohorts.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_custom_json.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_ops.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_network_custom_json.sql"
+# The retention window of the per-account daily rows (#124), and the one-time conversion of a
+# database that predates it, in steps that each commit (so plain psql -f, never atomic). After
+# every file whose functions the conversion calls: the active-user refreshes, backfill_rc_exact
+# and the three custom_json rollup row functions it recomputes a day with. Before step 8, whose
+# empty-rollup backfills it leaves nothing to do for active users.
+run_sql_file "${SCRIPT_DIR}/../db/daily_retention.sql"
 run_sql_file "${SCRIPT_DIR}/../db/process_witness_blocks.sql"
 run_sql_file_atomic "${SCRIPT_DIR}/../db/process_governance_concentration.sql"
 run_sql_file_atomic "${SCRIPT_DIR}/../db/process_hp_distribution.sql"

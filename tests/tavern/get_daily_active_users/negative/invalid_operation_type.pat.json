@@ -1,6 +1,6 @@
 {
   "code": "22023",
   "details": null,
-  "hint": "Must be a comma-separated subset of: post, comment, vote, transfer, custom_json (or all)",
+  "hint": "Must be one of: post, comment, vote, transfer, custom_json, all",
   "message": "invalid operation_type: wibble"
 }

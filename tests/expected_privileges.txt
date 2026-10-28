@@ -13,16 +13,20 @@ function haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=
 function haf_stats_app.content_source() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.continue_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.create_context_if_not_exists() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.custom_json_rc_unsettled_days(_from date, _to date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.custom_json_type_id_of(_json_id text) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.daily_retention_keep_from(_day date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.expected_op_type_names() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.finalize_active_users_before(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.get_required_authorities_safe(_body jsonb) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.is_community_name(_name text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.main(IN _context hafd.context_name) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.max_interaction_ops() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.merge_retired_custom_json() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.network_custom_json_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.network_op_rows(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prepare_batch_authored_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -42,10 +46,13 @@ function haf_stats_app.process_content_stats(_first_block integer, _last_block i
 function haf_stats_app.process_content_stats_range(_first_block integer, _last_block integer, _hivemind boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_content_volume(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.process_daily_retention(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_financial(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_network_custom_json(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_network_ops(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.process_witness_blocks(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prune_account_custom_json_daily_by_copy(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.prune_active_users_daily(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.prune_content_presence(_refresh_lo date, _batch_first date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.rc_avg_cost(_op_type_id smallint, _day date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.rc_cost_available() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -65,6 +72,7 @@ function haf_stats_app.refresh_network_content_periods(_lo date, _hi date) | own
 function haf_stats_app.refresh_network_vote_periods(_lo date, _hi date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.refresh_rc_op_stats() | owner=haf_admin | secdef=false | acl=haf_stats_owner:EXECUTE
 function haf_stats_app.refresh_top_accounts_alltime() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE
+function haf_stats_app.rekey_active_users_daily(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_deferred_refresh_timing(_step text, _dirty_from date, _as_of timestamp without time zone, _started timestamp with time zone) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_operation_counts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_processor_timing(_step text, _first_block integer, _last_block integer, _started timestamp with time zone, _reads text[], _within text) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -73,17 +81,23 @@ function haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | sec
 function haf_stats_app.resolve_dapp_category(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_name(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.retire_post_engagement() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.roll_up_account_custom_json(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.roll_up_account_custom_json_accounts(_keep date, _lo_id integer, _hi_id integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes_past_massive() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.select_content_source(_requested text, _allow_switch boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.set_daily_retention_floor(_daily_table text, _kept_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stage_engagement_days_from_hivemind() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.stage_retired_custom_json() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.sync_status() | owner=haf_stats_owner | secdef=true | acl=haf_stats_user:EXECUTE
 function haf_stats_app.to_filter_date(_input text, _default date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.top_accounts_window(_from date, _to date, _now date, OUT lead_from date, OUT lead_to date, OUT trail_from date, OUT trail_to date, OUT mm_from date, OUT mm_to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.top_accounts_window_retained(_from date, _to date, _now date, _kept_from date, OUT lead_from date, OUT lead_to date, OUT trail_from date, OUT trail_to date, OUT mm_from date, OUT mm_to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.try_jsonb(_txt text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
+function haf_stats_app.upgrade_daily_retention(IN _commit boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.wait_for_hivemind(_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_endpoints.get_account_community_activity(account text, from_date text, to_date text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_endpoints.get_account_content_stats(account text, from_date text, to_date text, granularity text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -121,6 +135,7 @@ table haf_stats_app.app_config | owner=haf_stats_owner | acl=haf_stats_user:SELE
 table haf_stats_app.app_status | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.app_version | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.content_source_config | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.daily_retention_floor | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_app.deferred_rollup_refreshes | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.haf_stats | owner=haf_stats_owner | acl=<default>
 table haf_stats_backend.account_cohort_members | owner=haf_stats_owner | acl=haf_stats_user:SELECT
@@ -128,6 +143,7 @@ table haf_stats_backend.account_cohort_retention | owner=haf_stats_owner | acl=h
 table haf_stats_backend.account_community_daily | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_content_daily | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_custom_json_daily | owner=haf_stats_owner | acl=haf_stats_user:SELECT
+table haf_stats_backend.account_custom_json_monthly | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_financial_alltime | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_financial_daily | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_financial_monthly | owner=haf_stats_owner | acl=haf_stats_user:SELECT

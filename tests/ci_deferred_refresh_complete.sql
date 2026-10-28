@@ -13,6 +13,12 @@
 -- restate unique voters/authors only for the periods those sets still cover in full, so the two
 -- rollups that count them have their unique counts compared from the voter floor on (the
 -- months before it were restated during the sync, as the sets were pruned).
+--
+-- active_users_daily is pruned the same way (db/daily_retention.sql): it holds its rows from the
+-- floor in daily_retention_floor on, and a refresh never restates a period starting before that
+-- floor. So the two active-user rollups are rebuilt from the floor on, and their periods before
+-- it are kept as the sync restated them; tests/ci_daily_retention_equality.sql compares those with
+-- what the history before the prune gives.
 
 SET ROLE haf_stats_owner;
 
@@ -112,11 +118,15 @@ BEGIN;
 
 TRUNCATE haf_stats_backend.account_financial_monthly,
     haf_stats_backend.account_cohort_retention,
-    haf_stats_backend.active_users_period_counts,
-    haf_stats_backend.active_users_account_monthly,
     haf_stats_backend.network_vote_period_counts,
     haf_stats_backend.network_content_period_counts,
     haf_stats_backend.author_cohort_retention;
+
+-- Every active-user period starting on or after the floor: what a refresh from genesis restates.
+DELETE FROM haf_stats_backend.active_users_period_counts
+WHERE period >= (SELECT f.kept_from FROM haf_stats_app.daily_retention_floor AS f WHERE f.daily_table = 'active_users_daily');
+DELETE FROM haf_stats_backend.active_users_account_monthly
+WHERE month >= (SELECT f.kept_from FROM haf_stats_app.daily_retention_floor AS f WHERE f.daily_table = 'active_users_daily');
 
 DO $rebuild$
 DECLARE
