@@ -195,15 +195,19 @@ BEGIN
                       ELSE 0 END AS rc
         FROM share AS s
     )
-    -- A hashed join to the asked-for ids, not `= ANY(_op_ids)`: ANY scans the array for every
-    -- row, which is quadratic in the number of ops.
+    -- A join to the asked-for ids, not `= ANY(_op_ids)`: ANY scans the array for every row,
+    -- which is quadratic in the number of ops. The ids are deduplicated by sorting
+    -- (DISTINCT ON), not hashing: hashint8 folds an op id's block number onto its position, so
+    -- ids from many blocks share hash values and a HashAggregate over them degrades.
     SELECT st.id, st.rc::BIGINT
     FROM (
         SELECT n.last_id AS id, n.rc_cost AS rc FROM tx_size AS n WHERE n.n_ops = 1
         UNION ALL
         SELECT s.id, s.rc FROM settled AS s
     ) AS st
-    JOIN (SELECT DISTINCT u.id FROM unnest(_op_ids) AS u(id)) AS want ON want.id = st.id;
+    JOIN (
+        SELECT DISTINCT ON (u.id) u.id FROM unnest(_op_ids) AS u(id) ORDER BY u.id
+    ) AS want ON want.id = st.id;
 END;
 $$;
 
