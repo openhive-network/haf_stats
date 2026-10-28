@@ -63,6 +63,21 @@ CREATE TABLE IF NOT EXISTS hivemind_app.hive_permlink_data (
     permlink VARCHAR(255) NOT NULL UNIQUE
 );
 
+-- One row per (voter, post), as hivemind keeps it: the current vote_percent, and num_changes the
+-- vote ops after the first. The engagement rollup reads it on the hivemind source; the rows are
+-- tests/ci_hivemind_source.sql's, beside the vote ops it adds.
+CREATE TABLE IF NOT EXISTS hivemind_app.hive_votes (
+    id BIGINT PRIMARY KEY,
+    post_id INTEGER NOT NULL,
+    voter_id INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    permlink_id INTEGER NOT NULL,
+    vote_percent INTEGER NOT NULL DEFAULT 0,
+    num_changes INTEGER NOT NULL DEFAULT 0,
+    block_num INTEGER NOT NULL,
+    UNIQUE (voter_id, author_id, permlink_id)
+);
+
 INSERT INTO hivemind_app.hive_communities (id, type_id, name, title)
 VALUES (1, 1, 'hive-100001', 'Test Community')
 ON CONFLICT (id) DO NOTHING;

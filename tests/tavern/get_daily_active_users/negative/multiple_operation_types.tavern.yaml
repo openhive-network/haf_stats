@@ -1,0 +1,25 @@
+---
+test_name: Daily active users rejects more than one operation type
+
+marks:
+  - patterntest
+  - negative
+
+includes:
+  - !include ../../common.yaml
+
+# Active accounts are counted per class (active_users_period_counts), and the per-account rows a
+# union of classes would be recounted from are kept only for a recent window (#124).
+stages:
+  - name: Reject two operation types
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        operation_types: "post,vote"
+    response:
+      status_code: 400
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          error_response: true

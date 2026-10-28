@@ -273,7 +273,7 @@ BEGIN
     -- Refresh only near hourly block boundaries; retention is a coarse metric and
     -- the affected cohorts are exactly re-aggregated when the refresh fires. During
     -- massive sync it is recorded instead, from its earliest cohort month (see
-    -- defer_rollup_refresh, db/haf_stats_app.sql).
+    -- defer_rollup_refresh, db/deferred_rollup_refreshes.sql).
     IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         _from_month := (
             DATE_TRUNC('month', _block_time - INTERVAL '180 days')
