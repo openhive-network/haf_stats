@@ -444,6 +444,10 @@ $$;
 -- The highest block the hivemind source may read, once it is at least _block. Every
 -- content-stats batch on that source ends at or below it (process_content_stats).
 --
+-- It reads hafd.contexts, the catalog and hive_state, releasing hive_state's lock before it
+-- sleeps, so a caller that has not read hivemind's tables yet holds no lock on any of them
+-- while this waits (#118).
+--
 -- hivemind's context head (hafd.contexts.current_block_num), capped by its own completion marker
 -- (hive_state.last_completed_block_num) where it has one: in massive sync hivemind advances its
 -- head before that batch's rows are written. While hive_posts has no valid index leading with
@@ -475,7 +479,15 @@ BEGIN
         END IF;
 
         IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
-            SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+            -- Read in a subtransaction that is then rolled back on purpose: that releases the
+            -- lock the read took on hive_state, so none is held through the sleep below (#118).
+            -- _completed keeps its value; plpgsql variables are not rolled back.
+            BEGIN
+                SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+                RAISE EXCEPTION USING ERRCODE = 'HS118';
+            EXCEPTION WHEN SQLSTATE 'HS118' THEN
+                NULL;
+            END;
             _head := LEAST(_head, COALESCE(_completed, _head));
         END IF;
 
