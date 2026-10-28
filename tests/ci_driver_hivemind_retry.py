@@ -194,6 +194,8 @@ def main() -> int:
     cur = admin.cursor()
     created_stage = False
     created_loop = False
+    created_iteration = False
+    created_hivemind_context = False
     created_schema = False
     created_tables: list[str] = []
     saved_sources = None
@@ -228,7 +230,14 @@ def main() -> int:
 
         cur.execute("CREATE SEQUENCE public.ci123_iterations")
         cur.execute("SELECT nextval('public.ci123_iterations')")  # last_value readable from 1
+        # Stand-ins only where the stub has nothing of its own, so the cleanup drops only them.
+        if one(cur, "SELECT EXISTS (SELECT 1 FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = 'hive' AND p.proname = 'app_next_iteration')"):
+            raise SystemExit("setup: the stub now has hive.app_next_iteration; this test's stand-in would replace it")
+        if one(cur, "SELECT EXISTS (SELECT 1 FROM hafd.contexts WHERE name = 'hivemind_app')"):
+            raise SystemExit("setup: the stub now has a hivemind_app context; this test would delete it")
         cur.execute(FAKE_ITERATION)
+        created_iteration = True
         if one(cur, "SELECT to_regprocedure('hive.get_current_stage_name(hafd.context_name)') IS NULL"):
             cur.execute(FAKE_STAGE)
             created_stage = True
@@ -249,6 +258,7 @@ def main() -> int:
         cur.execute(
             "INSERT INTO hafd.contexts (name, current_block_num, irreversible_block) "
             "VALUES ('hivemind_app', %s, %s)", (partway, partway))
+        created_hivemind_context = True
 
         # 1. process_blocks reports hivemind behind at once, as 55R23.
         conn = connect()
@@ -337,6 +347,15 @@ def main() -> int:
               f"main() processed {first}..{last} once hivemind reached it "
               f"(app_status {last_processed()}, context {context('haf_stats')}, error {loop_error!r})")
 
+        # Stop it once it is waiting for the next range, so that wait has been logged.
+        resumed_at = iterations(cur)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and thread.is_alive():
+            cur.execute("SELECT wait_event FROM pg_stat_activity WHERE pid = %s", (loop_pid,))
+            row = cur.fetchone()
+            if iterations(cur) > resumed_at and row and row[0] == "PgSleep":
+                break
+            time.sleep(0.1)
         cur.execute("SELECT haf_stats_app.stop_processing()")
         thread.join(15)
         if thread.is_alive():
@@ -367,8 +386,9 @@ def main() -> int:
         if thread is not None and thread.is_alive():
             cur.execute("SELECT pg_terminate_backend(%s)", (loop_pid,))
             thread.join(15)
-        cur.execute("DROP PROCEDURE IF EXISTS hive.app_next_iteration(hive.contexts_group, INT, INT, BOOLEAN)")
-        cur.execute("DROP PROCEDURE IF EXISTS hive.app_next_iteration(hafd.context_name, INT, INT, BOOLEAN)")
+        if created_iteration:
+            cur.execute("DROP PROCEDURE hive.app_next_iteration(hive.contexts_group, INT, INT, BOOLEAN)")
+            cur.execute("DROP PROCEDURE hive.app_next_iteration(hafd.context_name, INT, INT, BOOLEAN)")
         if created_stage:
             cur.execute("DROP FUNCTION hive.get_current_stage_name(hafd.context_name)")
         cur.execute("DROP SEQUENCE IF EXISTS public.ci123_iterations")
@@ -381,7 +401,8 @@ def main() -> int:
             cur.execute(f"DROP TABLE hivemind_app.{table}")
         if created_schema:
             cur.execute("DROP SCHEMA hivemind_app")
-        cur.execute("DELETE FROM hafd.contexts WHERE name = 'hivemind_app'")
+        if created_hivemind_context:
+            cur.execute("DELETE FROM hafd.contexts WHERE name = 'hivemind_app'")
         if position is not None:
             cur.execute("UPDATE hafd.contexts SET current_block_num = %s WHERE name = 'haf_stats'", (position,))
         if processed is not None:

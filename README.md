@@ -1072,7 +1072,8 @@ Either way the block-processing healthcheck turns unhealthy once the wait passes
 batch: after the first retry no HAF heartbeat is committed, since it is written in the
 transaction that is rolled back. For the same reason a wait longer than HAF's dead-app
 timeout (4 hours, its `dead_app_contexts_auto_detach` cron job) gets the haf_stats context
-detached; the next iteration attaches it again where it was.
+detached; HAF attaches it again in the first iteration that commits once hivemind has
+caught up (in the LIVE stage, as it always does).
 
 hivemind drops `hive_posts`' foreign keys (`ALTER TABLE ... DROP CONSTRAINT`, an ACCESS
 EXCLUSIVE lock) whenever it falls back into massive sync -- 101 or more blocks behind, as
