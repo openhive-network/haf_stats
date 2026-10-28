@@ -11,6 +11,9 @@
 --      engagement rollup (engagement_period_counts) from either source, and the hivemind source
 --      writes no comment_registry or post_engagement row. An upgraded hivemind deployment's
 --      post_engagement is emptied once the rollup is rebuilt from hivemind, to the same rows.
+--      Outside a batch, the rollup is computed from hivemind only once hivemind has reached every
+--      processed block: before that, the full rebuild and the deferred drain leave the drain
+--      recorded for the next batch's wait, and run once hivemind is there, to the same rows (#126).
 --   3. The clamp: while hivemind has reached only part of a range, none of it is processed;
 --      once hivemind has reached all of it, it is processed as one range. Waiting first and
 --      reading after is what keeps the wait from holding locks on hivemind's tables (#118;
@@ -328,6 +331,57 @@ BEGIN
     RAISE NOTICE 'hivemind source: retire_post_engagement rebuilt the engagement rollup from hivemind and emptied post_engagement; a no-op on the internal source';
 END
 $retire$;
+
+-- Outside a batch (install_app.sh's empty-rollup backfill and deferred refreshes), with hivemind
+-- behind the processed blocks: nothing is read from it, and the drain stays recorded for the next
+-- batch, which runs it after its hivemind wait. Once hivemind is there, the drain runs.
+DO $install$
+DECLARE
+    _diff TEXT;
+BEGIN
+    UPDATE hafd.contexts SET current_block_num = 0 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.refresh_engagement_full();
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait')
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days) THEN
+        RAISE EXCEPTION 'hivemind source: refresh_engagement_full, with hivemind behind, did not leave its days staged and the drain recorded';
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.engagement_period_counts) THEN
+        RAISE EXCEPTION 'hivemind source: refresh_engagement_full computed the rollup while hivemind was behind the processed blocks';
+    END IF;
+    PERFORM haf_stats_app.run_deferred_engagement_refresh();
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.engagement_period_counts)
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait') THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh ran while hivemind was behind the processed blocks';
+    END IF;
+    IF current_setting('haf_stats.hivemind_wait_timeout', TRUE) IS DISTINCT FROM '' THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh left haf_stats.hivemind_wait_timeout at %',
+            current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+    END IF;
+
+    UPDATE hafd.contexts SET current_block_num = 37500045 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.run_deferred_engagement_refresh();
+    IF EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait')
+       OR EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days) THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh did not drain once hivemind had reached the processed blocks';
+    END IF;
+
+    SELECT string_agg(format('%s: %s', d.side, d.row_text), ', ' ORDER BY d.side, d.row_text) INTO _diff
+    FROM (
+        (SELECT 'expected' AS side, row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts'
+         EXCEPT ALL
+         SELECT 'expected', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30')
+        UNION ALL
+        (SELECT 'got', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30'
+         EXCEPT ALL
+         SELECT 'got', row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts')
+    ) AS d;
+    IF _diff IS NOT NULL THEN
+        RAISE EXCEPTION 'hivemind source: the rollup the deferred drain computed differs from the internal source''s: %', _diff;
+    END IF;
+
+    RAISE NOTICE 'hivemind source: outside a batch the engagement rollup waits for hivemind to reach the processed blocks, then comes out the same';
+END
+$install$;
 
 -- ---------------------------------------------------------------------------
 -- 3. The clamp. The per-range body is replaced, for this transaction, by one that records the

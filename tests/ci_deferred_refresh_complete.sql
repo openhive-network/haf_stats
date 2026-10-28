@@ -1,5 +1,6 @@
 -- After the first batch outside massive sync has run the deferred rollup refreshes
--- (haf_stats_app.prepare_rollup_refreshes(FALSE)): the record is cleared, and every rollup
+-- (haf_stats_app.prepare_rollup_refreshes(FALSE), then run_deferred_engagement_refresh() for the
+-- engagement drain the hivemind source leaves until after a hivemind wait): the record is cleared, and every rollup
 -- holds exactly the rows a from-genesis rebuild of it gives. A record dirty from too late
 -- a day, or a refresh it missed, shows here as rows the rebuild has and the refresh lacks.
 --

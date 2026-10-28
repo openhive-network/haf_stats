@@ -1096,6 +1096,15 @@ $$;
 -- The counts are hivemind's as of its head, which is never behind the processor's (the content
 -- source waits for it), so a refresh may already include a vote or reply from a block the
 -- processor has yet to reach; that block re-stages the day, so the next refresh restates it.
+--
+-- So on the hivemind source a refresh reads hivemind only after a hivemind wait in its own
+-- transaction (#118, #126): inside a batch after process_content_stats' wait_for_hivemind, and
+-- outside one only once hivemind_unusable_reason() finds hivemind usable through every processed
+-- block. Where neither holds -- the deferred drain at the start of a batch
+-- (run_deferred_rollup_refreshes, db/deferred_rollup_refreshes.sql), or an install while
+-- hivemind is behind -- the drain is recorded in deferred_rollup_refreshes as
+-- 'engagement_after_hivemind_wait', with the creation-days left staged, and the next batch's
+-- process_content_stats runs it after its wait (drain_deferred_engagement_refresh).
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_full;
@@ -1103,6 +1112,8 @@ CREATE OR REPLACE FUNCTION haf_stats_app.refresh_engagement_full()
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    _unusable TEXT;
 BEGIN
     -- Rebuild from scratch: clear the rollup, stage every creation-day, then let the touched path
     -- (which computes the 'day' rows and rolls week/month from them) fill it all. Keeps the
@@ -1116,6 +1127,18 @@ BEGIN
         SELECT ncd.day FROM haf_stats_backend.network_content_daily AS ncd
         WHERE ncd.posts > 0
         ON CONFLICT (day) DO NOTHING;
+
+        -- Not over blocks hivemind has yet to write: left to the next batch, after its wait.
+        _unusable := haf_stats_app.hivemind_unusable_reason();
+        IF _unusable IS NOT NULL THEN
+            INSERT INTO haf_stats_app.deferred_rollup_refreshes (processor, dirty_from)
+            SELECT 'engagement_after_hivemind_wait', MIN(t.day)
+            FROM haf_stats_backend.engagement_touched_days AS t
+            HAVING COUNT(*) > 0
+            ON CONFLICT (processor) DO NOTHING;
+            RAISE NOTICE 'haf_stats: engagement_period_counts is computed by the next batch, after its hivemind wait: %', _unusable;
+            RETURN;
+        END IF;
     ELSE
         INSERT INTO haf_stats_backend.engagement_touched_days (day)
         SELECT DISTINCT post_day FROM haf_stats_backend.post_engagement
@@ -1123,6 +1146,76 @@ BEGIN
     END IF;
 
     PERFORM haf_stats_app.refresh_engagement_touched();
+END;
+$$;
+
+-- NULL when hivemind is usable through every block haf_stats has processed -- what
+-- wait_for_hivemind would return at once for -- and otherwise wait_for_hivemind's reason. Never
+-- waits, so a caller outside the block path can tell whether it may read hivemind now.
+DROP FUNCTION IF EXISTS haf_stats_app.hivemind_unusable_reason;
+CREATE OR REPLACE FUNCTION haf_stats_app.hivemind_unusable_reason()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _timeout CONSTANT TEXT := current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+BEGIN
+    PERFORM set_config('haf_stats.hivemind_wait_timeout', '0', TRUE);
+    BEGIN
+        PERFORM haf_stats_app.wait_for_hivemind(
+            (SELECT GREATEST(COALESCE(MAX(s.last_processed_block), 0), 1) FROM haf_stats_app.app_status AS s));
+    EXCEPTION WHEN raise_exception THEN
+        PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
+        RETURN SQLERRM;
+    END;
+    PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
+    RETURN NULL;
+END;
+$$;
+
+-- The engagement drain recorded for after a hivemind wait (see the section header), in the batch:
+-- called by process_content_stats_range on the hivemind source, after process_content_stats'
+-- wait. Clears the record and drains engagement_touched_days; a no-op when nothing is recorded.
+DROP FUNCTION IF EXISTS haf_stats_app.drain_deferred_engagement_refresh;
+CREATE OR REPLACE FUNCTION haf_stats_app.drain_deferred_engagement_refresh()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    DELETE FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait';
+    IF FOUND THEN
+        PERFORM haf_stats_app.refresh_engagement_touched();
+    END IF;
+END;
+$$;
+
+-- The same drain outside a batch (install_app.sh through run_deferred_rollup_refreshes_past_massive,
+-- or a sync stopped short of its first live batch), when hivemind is usable through the processed
+-- blocks now; otherwise it stays recorded for the next batch. Never waits.
+DROP FUNCTION IF EXISTS haf_stats_app.run_deferred_engagement_refresh;
+CREATE OR REPLACE FUNCTION haf_stats_app.run_deferred_engagement_refresh()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _unusable TEXT;
+    _t TIMESTAMPTZ := clock_timestamp();
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes AS d
+        WHERE d.processor = 'engagement_after_hivemind_wait'
+    ) THEN
+        RETURN;
+    END IF;
+    _unusable := haf_stats_app.hivemind_unusable_reason();
+    IF _unusable IS NOT NULL THEN
+        RAISE NOTICE 'haf_stats: the deferred engagement refresh runs on the next batch, after its hivemind wait: %', _unusable;
+        RETURN;
+    END IF;
+    PERFORM haf_stats_app.drain_deferred_engagement_refresh();
+    IF current_setting('haf_stats.processor_timings', TRUE) = 'on' THEN
+        PERFORM haf_stats_app.report_deferred_refresh_timing('refresh_engagement_touched', NULL, NULL, _t);
+    END IF;
 END;
 $$;
 
@@ -1346,7 +1439,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     _size CONSTANT TEXT := pg_size_pretty(pg_total_relation_size('haf_stats_backend.post_engagement'));
-    _timeout CONSTANT TEXT := current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+    _unusable TEXT;
     _before TEXT;
     _after TEXT;
 BEGIN
@@ -1355,16 +1448,11 @@ BEGIN
         RETURN;
     END IF;
 
-    PERFORM set_config('haf_stats.hivemind_wait_timeout', '0', TRUE);
-    BEGIN
-        PERFORM haf_stats_app.wait_for_hivemind(
-            (SELECT GREATEST(COALESCE(MAX(s.last_processed_block), 0), 1) FROM haf_stats_app.app_status AS s));
-    EXCEPTION WHEN raise_exception THEN
-        PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
-        RAISE NOTICE 'haf_stats: post_engagement (%) kept: hivemind is not usable through the processed blocks yet (%); the next install retires it', _size, SQLERRM;
+    _unusable := haf_stats_app.hivemind_unusable_reason();
+    IF _unusable IS NOT NULL THEN
+        RAISE NOTICE 'haf_stats: post_engagement (%) kept: hivemind is not usable through the processed blocks yet (%); the next install retires it', _size, _unusable;
         RETURN;
-    END;
-    PERFORM set_config('haf_stats.hivemind_wait_timeout', COALESCE(_timeout, ''), TRUE);
+    END IF;
 
     SELECT format('%s posts, %s votes, %s replies, %s with no vote, %s with no reply',
                   SUM(total_posts), SUM(sum_votes), SUM(sum_replies), SUM(zero_vote_posts), SUM(zero_comment_posts))
@@ -1998,7 +2086,7 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql);
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/deferred_rollup_refreshes.sql);
     -- engagement_touched_days keeps every creation-day staged meanwhile for the deferred drain.
     IF haf_stats_app.defer_rollup_refresh('process_content_stats', _first_day) THEN
         -- Restates the periods that can no longer change, once a month of chain time, so the
@@ -2022,8 +2110,9 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         -- catch-up, but a bulk replay-then-serve flow - e.g. sync to head then run the API - never
         -- produced the small LIVE batch that would trigger its drain, leaving the rollup permanently
         -- empty. The massive-sync deferral above is drained by run_deferred_rollup_refreshes on the
-        -- first LIVE batch of any size and at install over a context past massive sync; a sync
-        -- stopped while still in massive sync (--stop-at-block) has to call it itself.)
+        -- first LIVE batch of any size and at install over a context past massive sync -- on the
+        -- hivemind source by that batch after its wait, below; a sync stopped while still in
+        -- massive sync (--stop-at-block) has to call it itself.)
         IF _timed THEN _t := clock_timestamp(); END IF;
         PERFORM haf_stats_app.refresh_engagement_touched();
         IF _timed THEN _t := haf_stats_app.report_processor_timing('refresh_engagement_touched', _first_block, _last_block, _t, '{}', 'process_content_stats'); END IF;
@@ -2032,6 +2121,13 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         PERFORM haf_stats_app.prune_content_presence(
             _first_day, (SELECT created_at::DATE FROM hafd.blocks WHERE num = _first_block));
     END IF;
+END IF;
+
+-- The engagement drain left recorded for after a hivemind wait (see "Rollup refresh" above): this
+-- batch has waited, so it runs it now, unless this batch defers its refreshes (massive sync).
+-- When the boundary refresh above ran, there is nothing left to drain and this only clears the record.
+IF _hivemind AND current_setting('haf_stats.defer_rollup_refreshes', TRUE) IS DISTINCT FROM 'on' THEN
+    PERFORM haf_stats_app.drain_deferred_engagement_refresh();
 END IF;
 
 END;

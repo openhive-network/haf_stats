@@ -1234,7 +1234,7 @@ sync:
     cd "${CI_PROJECT_DIR}" || exit 1
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_recorded.sql
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on \
-      -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);"
+      -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE); SELECT haf_stats_app.run_deferred_engagement_refresh();"
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_complete.sql
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_daily_retention_equality.sql
     echo -e "\e[0Ksection_end:$(date +%s):deferred\r\e[0K"

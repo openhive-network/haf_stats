@@ -436,7 +436,7 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql).
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/deferred_rollup_refreshes.sql).
     IF NOT haf_stats_app.defer_rollup_refresh('process_active_users', _first_day) THEN
         -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
         _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';

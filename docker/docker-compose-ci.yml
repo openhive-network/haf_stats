@@ -35,6 +35,7 @@ services:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_setup.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /schema_migration.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /deferred_rollup_refreshes.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_block_range.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_account_cohorts.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /cohort_fixture.sql &&
@@ -122,6 +123,9 @@ services:
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.
       - ../db/schema_migration.sql:/schema_migration.sql:ro
+      # The massive-sync deferral and the per-batch call that runs it, out of db/haf_stats_app.sql
+      # so that tests/ci_hivemind_wait_locks.sql can run the real batch start (#126).
+      - ../db/deferred_rollup_refreshes.sql:/deferred_rollup_refreshes.sql:ro
       - ../db/process_block_range.sql:/process_block_range.sql:ro
       - ../tests/cohort_fixture.sql:/cohort_fixture.sql:ro
       # prepare_batch_authored_ops' second run through the per-row authority wrapper, which only

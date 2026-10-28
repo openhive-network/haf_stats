@@ -104,7 +104,7 @@ services:
           echo "waiting for block processing to reach $${REPLAY_STOP_AT_BLOCK}"
           sleep 10
         done
-        psql -X -v ON_ERROR_STOP=on -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);"
+        psql -X -v ON_ERROR_STOP=on -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE); SELECT haf_stats_app.run_deferred_engagement_refresh();"
     environment:
       PGHOST:     /var/run/postgresql
       PGUSER:     haf_stats_owner
