@@ -83,6 +83,8 @@ db/
                             custom_json ops (owner/admin gated)
   process_witness_blocks.sql
                             ✓ Per-witness blocks produced + scheduled slots missed, per day
+  daily_retention.sql       The retention window of active_users_daily and account_custom_json_daily
+                            (#124), and the in-place conversion of a database that predates it
 
 Dockerfile                  App image (one image, three services, dispatched by verb)
 Dockerfile.rewriter         The public REST surface: nginx + endpoints/rewrite_rules.conf
@@ -170,6 +172,11 @@ direction as compact codes, lets a node with hivemind leave `comment_registry` e
 `network_author_daily` to the window the processor still reads. Measured on a replay at
 block 44.8M that was ~11 GB of avoidable on-disk size (ZFS lz4); re-measure after a replay.
 
+They also predate issue #124, which keeps the per-account rows of `active_users_daily` and
+`account_custom_json_daily` only for a recent window (see
+[Per-account daily rows](#per-account-daily-rows-a-recent-window-only)): from late 2021 the two
+together grow by several hundred thousand rows a day, almost all of them custom_json bots.
+
 They also predate issue #120, which keys `account_custom_json_daily` and
 `network_custom_json_daily` on HAF's `custom_json_type_id` (SMALLINT, `hafd.custom_json_types`)
 instead of the id text: ~13 bytes less per row, in the heap and again in the primary key. The
@@ -228,6 +235,51 @@ SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);
 On the 1→5M range that one call took about 4 s. CI's `sync` job, `.aidev/run-checks.sh`'s
 sync step and `docker/docker-compose-test.yml` all stop at a block in massive sync and make
 this call before anything reads the rollups.
+
+### Per-account daily rows: a recent window only
+
+`active_users_daily` (one row per account, day and op class) and `account_custom_json_daily` (one
+per account, day and custom_json id) keep their rows only for a recent window
+(`db/daily_retention.sql`, #124). The window is `haf_stats_app.app_config.daily_retention_days`
+(default 35, at least 7) and ends at a month start: the first day kept is the 1st of the month
+that day count back reaches, so between 35 and about 66 days are kept and the month in progress is
+always among them. A day leaves only once everything derived from it is final:
+
+- for `active_users_daily`, its day, week and month in `active_users_period_counts` and its month
+  in `active_users_account_monthly`. During massive sync, where those refreshes are deferred, the
+  prune first restates the periods before the window and moves the deferred record up to it;
+- for `account_custom_json_daily`, its `rc_exact`: a day whose custom_json rows are not all exact
+  while its blocks record RC is filled by `haf_stats_app.backfill_rc_exact` first. Its rows then
+  move to `account_custom_json_monthly`, one row per account, month and id, with the RC each day
+  was priced at then (`rc_exact` where set, else the estimate at that day's rate), so a later rate
+  recalibration does not reprice those months.
+
+The batch that crosses the window's month boundary does the work; every other batch only checks
+it. `haf_stats_app.daily_retention_floor` records the first day each table still holds.
+`active_users_daily` is keyed `(op_class, day, account_id)`, the shape of its one remaining read.
+
+What the endpoints do with it:
+
+- `/network/daily-active-users` reads only `active_users_period_counts`, so it takes one
+  `operation_types` class or `all`; a list of several classes is refused (400), since the union
+  of their accounts cannot be counted from the per-class rows.
+- `/network/top-accounts` `transaction_count`, `/account/{account}/dapp-footprint` and
+  `/account/{account}/rc-footprint` with `group_by=app` or `category` widen a range that starts
+  before the window to whole calendar months (from the 1st of `from_date`'s month, and to the end
+  of `to_date`'s month when that is before the window too). `dapp-footprint` reports the range it
+  summed in `from_date`/`to_date`. Ranges inside the window, and month-aligned ones, answer
+  exactly as before. `rc-footprint` `group_by=op_type` and `/account/{account}/rc-footprint-timeline`
+  read the operations and are never widened.
+- A refresh from genesis (`refresh_active_users_periods('2016-03-24')`) restates only from the
+  first kept day: the rollups are the only record of the periods before it.
+
+Upgrading a node that ran an earlier version converts it in place, in steps that each commit, so
+an interrupted install resumes: the active-user rollups owed before the window are restated a
+month at a time, `active_users_daily` is rebuilt on its new key from its kept rows (dropping
+`idx_aud_opclass_day`), and `account_custom_json_daily`'s older rows are rolled into months a range
+of accounts at a time before the table is replaced by its kept rows. The end state is a fresh
+replay's. `scripts/rebuild_custom_json.sh` rebuilds both custom_json tables and applies the window
+again when its replay is done.
 
 ## Quick Start (Development)
 
@@ -960,7 +1012,7 @@ Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths 
 | `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql, exact_rc.sql | RC for an account's signed ops (exact where the node records it, see [Exact RC](#exact-rc)), grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql, exact_rc.sql | Per-account RC (exact where recorded) as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq, rc_source) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
 | `GET /account/{account}/dapp-footprint` | ✅ Live | process_custom_json.sql | Per-account custom_json activity resolved to DApp names and categories |
-| `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
+| `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, for one op class or all, by granularity |
 | `GET /network/content-volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
 | `GET /network/engagement` | ✅ Live | process_content_stats.sql | Network-wide posts, average votes/comments per post and zero-engagement shares, by period |
 | `GET /network/vote-stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Backfill per-account custom_json activity (account_custom_json_daily) from raw HAF data.
+# Backfill per-account custom_json activity (account_custom_json_daily, and
+# account_custom_json_monthly before its retention window) from raw HAF data.
 #
 # process_custom_json is additive, so a re-run would double-count; this script TRUNCATEs
 # first and then sweeps the full history once. Run it on a fresh deploy (the forward
@@ -67,8 +68,11 @@ refuse_if_processor_live
 log "Rebuilding custom_json activity through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
 
+# The months before the retention window (db/daily_retention.sql) are rebuilt too: the replay
+# writes every day back at day grain, and the window is applied again once it is done.
 psql_cmd -c "
-    TRUNCATE TABLE haf_stats_backend.account_custom_json_daily;
+    TRUNCATE TABLE haf_stats_backend.account_custom_json_daily, haf_stats_backend.account_custom_json_monthly;
+    DELETE FROM haf_stats_app.daily_retention_floor WHERE daily_table = 'account_custom_json_daily';
 "
 
 first="${FROM_BLOCK}"
@@ -84,5 +88,10 @@ while (( first <= TO_BLOCK )); do
 done
 
 refuse_if_processor_started_during_rebuild "Its head-block writes have double-counted onto the rebuilt table."
+log "Moving the rebuilt days before the retention window to account_custom_json_monthly..."
+psql_cmd -c "
+    SELECT haf_stats_app.roll_up_account_custom_json(haf_stats_app.daily_retention_keep_from(
+        (SELECT b.created_at::DATE FROM hafd.blocks AS b WHERE b.num = ${TO_BLOCK})));
+"
 
 log "Custom_json rebuild complete."

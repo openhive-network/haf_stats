@@ -711,6 +711,21 @@ CREATE TABLE IF NOT EXISTS haf_stats_app.app_config (
 );
 INSERT INTO haf_stats_app.app_config (swagger_base_url) VALUES ('/ci-base-url');
 
+-- The retention floor of the per-account daily tables (db/daily_retention.sql): empty, so the
+-- endpoints read every range from the daily rows, as the fixtures below expect.
+CREATE TABLE IF NOT EXISTS haf_stats_app.daily_retention_floor (
+    daily_table TEXT PRIMARY KEY,
+    kept_from DATE NOT NULL
+);
+GRANT SELECT ON haf_stats_app.daily_retention_floor TO haf_stats_user;
+
+-- The massive-sync deferral record (db/haf_stats_app.sql, which this lane does not load), which
+-- the retention prune restates ahead of (tests/ci_daily_retention.sql).
+CREATE TABLE IF NOT EXISTS haf_stats_app.deferred_rollup_refreshes (
+    processor TEXT PRIMARY KEY,
+    dirty_from DATE NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Backend tables (from process_financial.sql, process_rc.sql,
 -- process_account_cohorts.sql, process_content_stats.sql)
@@ -796,22 +811,10 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_period_counts (
 INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
 VALUES
     ('month', '2020-01-01', -1, 100, 5000),
-    ('month', '2020-02-01', -1, 150, 6000)
+    ('month', '2020-02-01', -1, 150, 6000),
+    ('month', '2020-02-01', 1, 7, 9)
 ON CONFLICT DO NOTHING;
 
--- Fallback fixture (multi-class re-aggregation): a post+vote query with to_date mid-February
--- must still return the FULL February - accounts active after the 15th are included and an
--- account active in both classes counts once. op_class 1 = post, 3 = vote.
-INSERT INTO haf_stats_backend.active_users_daily (day, op_class, account_id, ops)
-VALUES
-    ('2020-02-10', 1, 1001, 1), ('2020-02-10', 3, 1001, 1),
-    ('2020-02-20', 1, 1002, 1),
-    ('2020-02-20', 3, 1003, 1)
-ON CONFLICT DO NOTHING;
-INSERT INTO haf_stats_backend.active_user_ops_daily (day, op_class, operations)
-VALUES
-    ('2020-02-10', 1, 1), ('2020-02-10', 3, 1), ('2020-02-20', 1, 1), ('2020-02-20', 3, 1)
-ON CONFLICT DO NOTHING;
 
 -- get_network_top_accounts source tables (mirror db/process_*.sql + process_top_accounts_alltime.sql,
 -- not loaded by the stub). The monthly rollups are created EMPTY: they must exist so the endpoint's
@@ -1023,6 +1026,19 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_daily (
     PRIMARY KEY (account_id, day, custom_json_type_id)
 );
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
+
+-- Its months before the retention window (db/process_custom_json.sql): empty, like the floor.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_monthly (
+    account_id INT NOT NULL,
+    month DATE NOT NULL,
+    custom_json_type_id SMALLINT NOT NULL,
+    op_count BIGINT NOT NULL,
+    op_bytes BIGINT NOT NULL,
+    rc NUMERIC NOT NULL,
+    exact_ops BIGINT NOT NULL,
+    PRIMARY KEY (account_id, month, custom_json_type_id)
+);
+GRANT SELECT ON haf_stats_backend.account_custom_json_monthly TO haf_stats_user;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.rc_op_stats_daily (
     day DATE NOT NULL,

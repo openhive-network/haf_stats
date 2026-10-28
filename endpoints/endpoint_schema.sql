@@ -325,6 +325,59 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.top_accounts_window(DATE, DATE, DATE) TO haf_stats_user;
 
+-- The same split for a daily table that keeps only a recent window (#124): get_network_top_accounts'
+-- transaction_count reads active_users_daily, which holds its rows from _kept_from on
+-- (haf_stats_app.daily_retention_floor, a month start); the months before it are only in
+-- active_users_account_monthly. So a range starting before _kept_from is widened to whole months:
+-- its first month, and its last too when it also ends before _kept_from, are read whole from the
+-- monthly rollup, and from _kept_from on the range is split as top_accounts_window splits it. A
+-- range starting at or after _kept_from, or a NULL _kept_from (nothing pruned), is
+-- top_accounts_window's split unchanged.
+DROP FUNCTION IF EXISTS haf_stats_app.top_accounts_window_retained;
+CREATE OR REPLACE FUNCTION haf_stats_app.top_accounts_window_retained(
+    _from DATE,
+    _to DATE,
+    _now DATE,
+    _kept_from DATE,
+    OUT lead_from DATE,
+    OUT lead_to DATE,
+    OUT trail_from DATE,
+    OUT trail_to DATE,
+    OUT mm_from DATE,
+    OUT mm_to DATE
+)
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    _w RECORD;
+BEGIN
+    IF _kept_from IS NULL OR _from >= _kept_from THEN
+        SELECT * INTO lead_from, lead_to, trail_from, trail_to, mm_from, mm_to
+        FROM haf_stats_app.top_accounts_window(_from, _to, _now);
+        RETURN;
+    END IF;
+
+    mm_from := DATE_TRUNC('month', _from)::DATE;
+    IF _to < _kept_from THEN
+        lead_from  := DATE '3000-01-01'; lead_to  := DATE '1900-01-01';
+        trail_from := DATE '3000-01-01'; trail_to := DATE '1900-01-01';
+        mm_to      := DATE_TRUNC('month', _to)::DATE;
+        RETURN;
+    END IF;
+
+    -- _kept_from is a month start, so this split has no leading days: its months, if any, start at
+    -- _kept_from and continue the ones before it.
+    SELECT * INTO _w FROM haf_stats_app.top_accounts_window(_kept_from, _to, _now);
+    lead_from := _w.lead_from;   lead_to := _w.lead_to;
+    trail_from := _w.trail_from; trail_to := _w.trail_to;
+    mm_to := CASE WHEN _w.mm_from <= _w.mm_to THEN _w.mm_to
+                  ELSE DATE_TRUNC('month', _kept_from - 1)::DATE END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION haf_stats_app.top_accounts_window_retained(DATE, DATE, DATE, DATE) TO haf_stats_user;
+
 /** openapi
 openapi: 3.1.0
 info:
@@ -1110,7 +1163,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint",
-        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed. Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than rc_exact_op_cap ops (returned on every row) is priced entirely with the estimate, to keep the call fast. For group_by=app and group_by=category the custom_json buckets come from the per-account daily rollup: each day's row is exact where the rollup recorded it and the byte-aware estimate otherwise, with no op limit; the non-custom_json bucket is exact under the op limit. Every row says which it got: rc_source (recorded, estimated or mixed), rc_exact_ops (how many of its ops were priced exactly), rc_exact_op_cap (the limit this node applies) and rc_over_cap (whether this window exceeded it), so a caller never has to infer it.",
+        "description": "Breakdown of Resource Credit consumption for an account over a time range, grouped by operation type or DApp. Counts the ops the account itself signed. Where the node records the RC each transaction cost (HAF 1.28.8 and later, from hardfork 20), an op is priced with its EXACT share of that cost: the whole cost for a single-op transaction, and for a multi-op transaction a share in proportion to the op-count estimate of each op. Otherwise an op is priced with that ESTIMATE (op_count * average rc_api cost from the calibrated rc_op_stats_daily rates). A window in which the account signed more than rc_exact_op_cap ops (returned on every row) is priced entirely with the estimate, to keep the call fast. For group_by=app and group_by=category the custom_json buckets come from the per-account daily rollup: each day's row is exact where the rollup recorded it and the byte-aware estimate otherwise, with no op limit; the non-custom_json bucket is exact under the op limit. That rollup keeps days only for a recent window (from the first day of the month at least 35 days back, by default) and whole months before it, priced when they were rolled up: for group_by=app and group_by=category a range starting before the window is widened to whole calendar months (from the 1st of from_date's month, and to the end of to_date's month when that is before the window too), for every bucket. group_by=op_type is never widened. Every row says which it got: rc_source (recorded, estimated or mixed), rc_exact_ops (how many of its ops were priced exactly), rc_exact_op_cap (the limit this node applies) and rc_over_cap (whether this window exceeded it), so a caller never has to infer it.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint",
         "parameters": [
           {
@@ -1227,7 +1280,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account RC footprint timeline",
-        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total when the account signed at most rc_exact_op_cap ops in the window (rc-footprint returns the value on every row); above that rc-footprint is all estimate while each timeline event stays exact where recorded. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). rc_source says which pricing each event got. Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
+        "description": "Per-event drill-down companion to rc-footprint: one row per RC-spending operation the account signed, most recent first, with the op type, resolved DApp name (+ raw custom_json id), block, timestamp and RC consumed. rc_consumed is the EXACT share of the RC its transaction cost where the node records it (HAF 1.28.8 and later, from hardfork 20), and otherwise the op-count ESTIMATE priced from the calibrated rc_op_stats_daily rates. Each event is priced the same way as in rc-footprint group_by=op_type, so summing rc_consumed over a window reconciles with that total when the account signed at most rc_exact_op_cap ops in the window (rc-footprint returns the value on every row); above that rc-footprint is all estimate while each timeline event stays exact where recorded. Optional op_type_filter / app_filter narrow the timeline to the events of one op type or DApp (the same events as the matching rc-footprint bucket; each event is still priced per op, so an app_filter sum matches the op_type total, not the byte-aware group_by=app figure). The DApps an account used are looked up in the custom_json rollup, which keeps whole months only before its retention window, but the events are always taken from the operations over exactly [from_date, to_date]: the timeline is never widened to whole months. rc_source says which pricing each event got. Pages via limit_count/offset_start, or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.",
         "operationId": "haf_stats_endpoints.get_account_rc_footprint_timeline",
         "parameters": [
           {
@@ -1400,7 +1453,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account DApp footprint",
-        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. rc_source (recorded, estimated or mixed; null when there are no ops) and rc_exact_ops say which pricing the total and each category and DApp got. Defaults to the last 30 days.",
+        "description": "Per-account custom_json activity over a time range, grouped by DApp and the registry-defined category each app belongs to (custom_json_app_registry). Returns a single object with KPI fields (total ops, top category, top DApp), the per-category breakdown (for a donut chart), and the per-DApp breakdown tagged with its category (for a drill-down bar chart) - so the client renders the whole dashboard from one response. The primary metric is op COUNT (custom_json operations signed by the account). RC figures add up the per-account daily rollup: each daily row is the EXACT RC its operations' transactions recorded where the node has it (HAF 1.28.8 and later, from hardfork 20, for rows the processor built or the backfill filled from operations that all had one), and otherwise the calibrated ESTIMATE (rc_op_stats_daily rates sampled from rc_api). A multi-signer op counts its whole RC for each signer, as it counts once per signer in op_count. rc_source (recorded, estimated or mixed; null when there are no ops) and rc_exact_ops say which pricing the total and each category and DApp got. Defaults to the last 30 days. The rollup keeps days only for a recent window (from the first day of the month at least 35 days back, by default) and whole months before it, priced when they were rolled up: a range starting before the window is widened to whole calendar months (from the 1st of from_date's month, and to the end of to_date's month when that is before the window too), and from_date/to_date in the response are the range actually summed.",
         "operationId": "haf_stats_endpoints.get_account_dapp_footprint",
         "parameters": [
           {
@@ -2347,7 +2400,7 @@ DECLARE
           "Network"
         ],
         "summary": "Daily active users",
-        "description": "Unique accounts that authored (signed) at least one operation per period, and the total volume of those operations, at the chosen granularity. An account is \"active\" when hive.get_required_authorities reports it as a required signer of an operation, so every authored op type counts and virtual (block/witness) activity is excluded. active_accounts is exact at the requested granularity (an account active on several days counts once per period); operations is a distinct-operation count (a multisig op counts once). operation_types selects which categories count: a comma-separated subset of post, comment, vote, transfer, custom_json, or \"all\" (the default), which counts every authored operation - not just the sum of the named categories.",
+        "description": "Unique accounts that authored (signed) at least one operation per period, and the total volume of those operations, at the chosen granularity. An account is \"active\" when hive.get_required_authorities reports it as a required signer of an operation, so every authored op type counts and virtual (block/witness) activity is excluded. active_accounts is exact at the requested granularity (an account active on several days counts once per period); operations is a distinct-operation count (a multisig op counts once). operation_types selects which category counts: one of post, comment, vote, transfer, custom_json, or \"all\" (the default), which counts every authored operation - not just the sum of the named categories. Several categories at once are refused (400): the per-account rows a union of categories would be recounted from are kept only for a recent window, and a union of distinct accounts cannot be derived from the per-category counts.",
         "operationId": "haf_stats_endpoints.get_daily_active_users",
         "parameters": [
           {
@@ -2395,7 +2448,7 @@ DECLARE
               "type": "string",
               "default": "all"
             },
-            "description": "Comma-separated subset of post, comment, vote, transfer, custom_json, or \"all\" (every authored operation). Defaults to all."
+            "description": "One of post, comment, vote, transfer, custom_json, or \"all\" (every authored operation). Defaults to all. A list naming more than one category is refused with 400; one that includes \"all\" means all."
           }
         ],
         "responses": {
@@ -2723,7 +2776,7 @@ DECLARE
           "Network"
         ],
         "summary": "Top accounts per metric",
-        "description": "Top N accounts ranked by the chosen metric. Reward and transfer metrics sum haf_stats financial data over [from_date, to_date]; transaction_count sums authored (signed) operations over the same range; hp_balance ranks the CURRENT own vesting balance from balance_tracker and ignores from_date/to_date (empty result if no balance_tracker schema is readable on the deployment). Default sort keys - author_rewards and curation_rewards: vests, then hbd, then hive sums; transfer_volume_in/out: hive, then hbd sums; transaction_count: op count; hp_balance: vesting balance. Ties broken by account id (creation order). Value fields not applicable to a metric are 0. Optional order_by/order_direction re-rank the FULL population before truncating (a true top/bottom-N by any displayed column, not a client-side re-sort of a biased top-N): order_by must be a column the metric populates (author/curation rewards: value_vests|value_hive|value_hbd|op_count|account; transfers: value_hive|value_hbd|op_count|account; transaction_count: op_count|account; hp_balance: value_vests|account) - other combos return 400. order_direction asc yields a true bottom-N. Omitting both reproduces the default ranking exactly.",
+        "description": "Top N accounts ranked by the chosen metric. Reward and transfer metrics sum haf_stats financial data over [from_date, to_date]; transaction_count sums authored (signed) operations over the same range, except that per-account days are kept only for a recent window (from the first day of the month at least 35 days back, by default): a range starting before it is widened to whole calendar months - from the 1st of from_date's month, and to the end of to_date's month when that is before the window too; hp_balance ranks the CURRENT own vesting balance from balance_tracker and ignores from_date/to_date (empty result if no balance_tracker schema is readable on the deployment). Default sort keys - author_rewards and curation_rewards: vests, then hbd, then hive sums; transfer_volume_in/out: hive, then hbd sums; transaction_count: op count; hp_balance: vesting balance. Ties broken by account id (creation order). Value fields not applicable to a metric are 0. Optional order_by/order_direction re-rank the FULL population before truncating (a true top/bottom-N by any displayed column, not a client-side re-sort of a biased top-N): order_by must be a column the metric populates (author/curation rewards: value_vests|value_hive|value_hbd|op_count|account; transfers: value_hive|value_hbd|op_count|account; transaction_count: op_count|account; hp_balance: value_vests|account) - other combos return 400. order_direction asc yields a true bottom-N. Omitting both reproduces the default ranking exactly.",
         "operationId": "haf_stats_endpoints.get_network_top_accounts",
         "parameters": [
           {
@@ -4346,6 +4399,11 @@ $$;
       group_by=category the custom_json buckets come from the per-account daily rollup:
       each day's row is exact where the rollup recorded it and the byte-aware estimate
       otherwise, with no op limit; the non-custom_json bucket is exact under the op limit.
+      That rollup keeps days only for a recent window (from the first day of the month at least
+      35 days back, by default) and whole months before it, priced when they were rolled up: for
+      group_by=app and group_by=category a range starting before the window is widened to whole
+      calendar months (from the 1st of from_date's month, and to the end of to_date's month when
+      that is before the window too), for every bucket. group_by=op_type is never widened.
       Every row says which it got: rc_source (recorded, estimated or mixed), rc_exact_ops (how
       many of its ops were priced exactly), rc_exact_op_cap (the limit this node applies) and
       rc_over_cap (whether this window exceeded it), so a caller never has to infer it.
@@ -4455,6 +4513,7 @@ DECLARE
     _to_block INT;
     _lo_seq BIGINT;
     _hi_seq BIGINT;
+    _cj_kept DATE;
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
@@ -4465,6 +4524,20 @@ BEGIN
         RAISE SQLSTATE '22023' USING
             MESSAGE = 'invalid group_by: ' || COALESCE(group_by, '(null)'),
             HINT = 'Must be one of: op_type, app, category';
+    END IF;
+
+    -- app and category read the custom_json rollup, which keeps days only for the retention window
+    -- and whole months before it (db/daily_retention.sql, #124): a range starting before the window
+    -- is widened to whole months, for every bucket, so the buckets still add up to one window.
+    IF group_by <> 'op_type' THEN
+        _cj_kept := (SELECT f.kept_from FROM haf_stats_app.daily_retention_floor f
+                     WHERE f.daily_table = 'account_custom_json_daily');
+        IF _from < _cj_kept THEN
+            _from := DATE_TRUNC('month', _from)::DATE;
+            IF _to < _cj_kept THEN
+                _to := (DATE_TRUNC('month', _to) + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
+            END IF;
+        END IF;
     END IF;
 
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = account;
@@ -4585,17 +4658,30 @@ BEGIN
         RETURN QUERY
         WITH cj_by_id AS (
             -- rc_consumed stays NUMERIC here and is cast once per label below, as the single-level
-            -- SUM did, so splitting the sum in two changes no figure.
-            SELECT acj.custom_json_type_id,
-                   SUM(acj.op_count)             AS op_count,
-                   SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc)) AS rc_consumed,
-                   -- A day's row carries rc_exact only when all its ops had a recorded cost.
-                   SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL) AS exact_ops
-            FROM haf_stats_backend.account_custom_json_daily acj
-            CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
-            WHERE acj.account_id = _account_id
-              AND acj.day BETWEEN _from AND _to
-            GROUP BY acj.custom_json_type_id
+            -- SUM did, so splitting the sum in two changes no figure. Days in the window are priced
+            -- here; the months before it carry the RC their days were priced at when rolled up.
+            SELECT x.custom_json_type_id,
+                   SUM(x.op_count)    AS op_count,
+                   SUM(x.rc_consumed) AS rc_consumed,
+                   SUM(x.exact_ops)   AS exact_ops
+            FROM (
+                SELECT acj.custom_json_type_id,
+                       acj.op_count,
+                       COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc) AS rc_consumed,
+                       -- A day's row carries rc_exact only when all its ops had a recorded cost.
+                       CASE WHEN acj.rc_exact IS NOT NULL THEN acj.op_count END AS exact_ops
+                FROM haf_stats_backend.account_custom_json_daily acj
+                CROSS JOIN LATERAL haf_stats_app.rc_rate(18::SMALLINT, acj.day) dr
+                WHERE acj.account_id = _account_id
+                  AND acj.day BETWEEN GREATEST(_from, _cj_kept) AND _to
+                UNION ALL
+                SELECT m.custom_json_type_id, m.op_count, m.rc, m.exact_ops
+                FROM haf_stats_backend.account_custom_json_monthly m
+                WHERE m.account_id = _account_id
+                  AND m.month BETWEEN _from AND _to
+                  AND m.month < _cj_kept
+            ) x
+            GROUP BY x.custom_json_type_id
         ),
         cj AS (
             SELECT CASE WHEN group_by = 'category'
@@ -4703,7 +4789,10 @@ $$;
       where recorded. Optional op_type_filter / app_filter narrow the
       timeline to the events of one op type or DApp (the same events as the matching rc-footprint
       bucket; each event is still priced per op, so an app_filter sum matches the op_type total,
-      not the byte-aware group_by=app figure). rc_source says which pricing each event got.
+      not the byte-aware group_by=app figure). The DApps an account used are looked up in the
+      custom_json rollup, which keeps whole months only before its retention window, but the
+      events are always taken from the operations over exactly [from_date, to_date]: the timeline
+      is never widened to whole months. rc_source says which pricing each event got.
       Pages via limit_count/offset_start,
       or O(1)-at-any-depth keyset paging by passing the previous page's last op_seq as before_seq.
     operationId: haf_stats_endpoints.get_account_rc_footprint_timeline
@@ -5017,14 +5106,22 @@ BEGIN
         -- filters to the rollup's freshness the same way group_by=app already is; each event is
         -- priced per op, exact or the op-count estimate, as in the branch above.
         -- The rollup keys on custom_json_type_id; the raw ops are matched on their body id, so the
-        -- set is of the ids' text (hafd.custom_json_types).
+        -- set is of the ids' text (hafd.custom_json_types). Before the retention window the rollup
+        -- has whole months only (db/daily_retention.sql, #124), so there the set is of the ids used
+        -- in any month the window overlaps: a superset, which the op scan below narrows to the
+        -- window exactly, so the events returned are the same.
         SELECT ARRAY(
             SELECT cjt.custom_json_id::TEXT
             FROM (
-                SELECT DISTINCT acj.custom_json_type_id
+                SELECT acj.custom_json_type_id
                 FROM haf_stats_backend.account_custom_json_daily acj
                 WHERE acj.account_id = _account_id
                   AND acj.day BETWEEN _from AND _to
+                UNION
+                SELECT m.custom_json_type_id
+                FROM haf_stats_backend.account_custom_json_monthly m
+                WHERE m.account_id = _account_id
+                  AND m.month BETWEEN DATE_TRUNC('month', _from)::DATE AND _to
             ) used
             JOIN hafd.custom_json_types cjt ON cjt.id = used.custom_json_type_id
             WHERE (_app_filter IS NULL OR haf_stats_app.resolve_dapp_name(cjt.custom_json_id) = _app_filter)
@@ -5097,7 +5194,11 @@ $$;
       multi-signer op counts its whole RC for each signer, as it counts once per signer in
       op_count. rc_source (recorded, estimated or mixed; null when there are no ops) and
       rc_exact_ops say which pricing the total and each category and DApp got. Defaults to the
-      last 30 days.
+      last 30 days. The rollup keeps days only for a recent window (from the first day of the
+      month at least 35 days back, by default) and whole months before it, priced when they were
+      rolled up: a range starting before the window is widened to whole calendar months (from the
+      1st of from_date's month, and to the end of to_date's month when that is before the window
+      too), and from_date/to_date in the response are the range actually summed.
     operationId: haf_stats_endpoints.get_account_dapp_footprint
     parameters:
       - in: path
@@ -5233,9 +5334,21 @@ DECLARE
     _to DATE;
     _account_id INT;
     _result jsonb;
+    _kept DATE := (SELECT f.kept_from FROM haf_stats_app.daily_retention_floor f
+                   WHERE f.daily_table = 'account_custom_json_daily');
 BEGIN
     _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
     _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
+
+    -- The rollup keeps days only for the retention window and whole months before it
+    -- (db/daily_retention.sql, #124): a range starting before the window is widened to whole
+    -- months, and the response's from_date/to_date say which.
+    IF _from < _kept THEN
+        _from := DATE_TRUNC('month', _from)::DATE;
+        IF _to < _kept THEN
+            _to := (DATE_TRUNC('month', _to) + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
+        END IF;
+    END IF;
 
     SELECT id INTO _account_id FROM hafd.accounts WHERE name = "account";
 
@@ -5269,7 +5382,7 @@ BEGIN
             SELECT DISTINCT acj.day
             FROM haf_stats_backend.account_custom_json_daily acj
             WHERE acj.account_id = _account_id
-              AND acj.day BETWEEN _from AND _to
+              AND acj.day BETWEEN GREATEST(_from, _kept) AND _to
         ) d
         -- Was a hand-inlined copy of the as-of rule (with the same fallback constants); folded
         -- back onto the shared accessor so there is one definition to fix, and so this endpoint
@@ -5281,19 +5394,33 @@ BEGIN
     -- (hafd.custom_json_types) and resolve it to its registered app + category via a
     -- longest-prefix starts_with match against custom_json_app_registry (an unmatched id falls to
     -- 'Uncategorized' with the raw id as the app name). Rolled up to apps (drill-down bars) and
-    -- categories (donut); all in one object.
+    -- categories (donut); all in one object. The months before the window carry the RC their days
+    -- were priced at when they were rolled up.
     per_json AS (
         SELECT
-            acj.custom_json_type_id,
-            SUM(acj.op_count)::BIGINT AS op_count,
-            SUM(COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc))::BIGINT AS rc_consumed,
-            -- A day's row carries rc_exact only when all its ops had a recorded cost (#101).
-            COALESCE(SUM(acj.op_count) FILTER (WHERE acj.rc_exact IS NOT NULL), 0)::BIGINT AS exact_ops
-        FROM haf_stats_backend.account_custom_json_daily acj
-        JOIN day_rate dr ON dr.day = acj.day
-        WHERE acj.account_id = _account_id
-          AND acj.day BETWEEN _from AND _to
-        GROUP BY acj.custom_json_type_id
+            x.custom_json_type_id,
+            SUM(x.op_count)::BIGINT AS op_count,
+            SUM(x.rc_consumed)::BIGINT AS rc_consumed,
+            COALESCE(SUM(x.exact_ops), 0)::BIGINT AS exact_ops
+        FROM (
+            SELECT
+                acj.custom_json_type_id,
+                acj.op_count,
+                COALESCE(acj.rc_exact, acj.op_count * dr.base_rc + acj.op_bytes * dr.byte_rc) AS rc_consumed,
+                -- A day's row carries rc_exact only when all its ops had a recorded cost (#101).
+                CASE WHEN acj.rc_exact IS NOT NULL THEN acj.op_count END AS exact_ops
+            FROM haf_stats_backend.account_custom_json_daily acj
+            JOIN day_rate dr ON dr.day = acj.day
+            WHERE acj.account_id = _account_id
+              AND acj.day BETWEEN GREATEST(_from, _kept) AND _to
+            UNION ALL
+            SELECT m.custom_json_type_id, m.op_count, m.rc, m.exact_ops
+            FROM haf_stats_backend.account_custom_json_monthly m
+            WHERE m.account_id = _account_id
+              AND m.month BETWEEN _from AND _to
+              AND m.month < _kept
+        ) x
+        GROUP BY x.custom_json_type_id
     ),
     resolved AS (
         SELECT
@@ -6577,10 +6704,12 @@ $$;
       virtual (block/witness) activity is excluded. active_accounts is exact at
       the requested granularity (an account active on several days counts once
       per period); operations is a distinct-operation count (a multisig op counts
-      once). operation_types selects which categories count: a comma-separated
-      subset of post, comment, vote, transfer, custom_json, or "all" (the
-      default), which counts every authored operation - not just the sum of the
-      named categories.
+      once). operation_types selects which category counts: one of post, comment,
+      vote, transfer, custom_json, or "all" (the default), which counts every
+      authored operation - not just the sum of the named categories. Several
+      categories at once are refused (400): the per-account rows a union of
+      categories would be recounted from are kept only for a recent window, and a
+      union of distinct accounts cannot be derived from the per-category counts.
     operationId: haf_stats_endpoints.get_daily_active_users
     parameters:
       - in: query
@@ -6614,8 +6743,9 @@ $$;
           type: string
           default: all
         description: >-
-          Comma-separated subset of post, comment, vote, transfer, custom_json,
-          or "all" (every authored operation). Defaults to all.
+          One of post, comment, vote, transfer, custom_json, or "all" (every
+          authored operation). Defaults to all. A list naming more than one
+          category is refused with 400; one that includes "all" means all.
     responses:
       '200':
         description: Daily-active-user time-series ordered by period
@@ -6697,7 +6827,7 @@ BEGIN
     THEN
         _classes := ARRAY[-1]::SMALLINT[];
     ELSE
-        SELECT array_agg(m.code), MAX(m.bad) INTO _classes, _bad
+        SELECT array_agg(DISTINCT m.code), MAX(m.bad) INTO _classes, _bad
         FROM (
             SELECT
                 (CASE btrim(lower(t))
@@ -6716,7 +6846,12 @@ BEGIN
         IF _bad IS NOT NULL THEN
             RAISE SQLSTATE '22023' USING
                 MESSAGE = 'invalid operation_type: ' || _bad,
-                HINT = 'Must be a comma-separated subset of: post, comment, vote, transfer, custom_json (or all)';
+                HINT = 'Must be one of: post, comment, vote, transfer, custom_json, all';
+        END IF;
+        IF array_length(_classes, 1) > 1 THEN
+            RAISE SQLSTATE '22023' USING
+                MESSAGE = 'operation_types names more than one category: ' || operation_types,
+                HINT = 'Ask for one of post, comment, vote, transfer, custom_json, or all: active accounts are counted per category, and a union of categories cannot be derived from those counts';
         END IF;
     END IF;
 
@@ -6727,58 +6862,21 @@ BEGIN
         _classes := ARRAY[-1]::SMALLINT[];
     END IF;
 
-    -- Fast path: ALL (-1) or a single named class is pre-aggregated per period in
-    -- active_users_period_counts (maintained by process_active_users), so read it
-    -- directly instead of COUNT(DISTINCT)-scanning the membership table. Every period
+    -- ALL (-1) and each named class are pre-aggregated per period in
+    -- active_users_period_counts (maintained by process_active_users). Every period
     -- overlapping [_from, _to] is returned at its FULL-period value: a from/to landing
     -- mid-period yields that period's full count, not a partial slice - consistent with
     -- account_cohort_retention and what a time-series chart expects.
-    IF array_length(_classes, 1) = 1 THEN
-        RETURN QUERY
-        SELECT
-            TO_CHAR(pc.period, 'YYYY-MM-DD'),
-            pc.active_accounts,
-            pc.operations
-        FROM haf_stats_backend.active_users_period_counts pc
-        WHERE pc.period_type = granularity
-          AND pc.op_class = _classes[1]
-          AND pc.period >= DATE_TRUNC(granularity, _from)::DATE
-          AND pc.period <= _to
-        ORDER BY 1;
-        RETURN;
-    END IF;
-
-    -- Multi-class subset (>=2 named classes): active_accounts is the DISTINCT union
-    -- across the selected classes (an account active in two of them counts once), which
-    -- the per-class rollup cannot pre-sum, so re-aggregate the membership for these
-    -- uncommon requests. operations is additive per class. Same full-period bucketing.
     RETURN QUERY
-    WITH accounts AS (
-        SELECT
-            DATE_TRUNC(granularity, aud.day)::DATE AS period,
-            COUNT(DISTINCT aud.account_id) AS active_accounts
-        FROM haf_stats_backend.active_users_daily aud
-        WHERE aud.op_class = ANY(_classes)
-          AND aud.day >= DATE_TRUNC(granularity, _from)::DATE
-          AND aud.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
-        GROUP BY 1
-    ),
-    ops AS (
-        SELECT
-            DATE_TRUNC(granularity, auo.day)::DATE AS period,
-            SUM(auo.operations) AS operations
-        FROM haf_stats_backend.active_user_ops_daily auo
-        WHERE auo.op_class = ANY(_classes)
-          AND auo.day >= DATE_TRUNC(granularity, _from)::DATE
-          AND auo.day < (DATE_TRUNC(granularity, _to) + ('1 ' || granularity)::INTERVAL)::DATE
-        GROUP BY 1
-    )
     SELECT
-        TO_CHAR(a.period, 'YYYY-MM-DD'),
-        a.active_accounts::BIGINT,
-        COALESCE(o.operations, 0)::BIGINT
-    FROM accounts a
-    LEFT JOIN ops o ON o.period = a.period
+        TO_CHAR(pc.period, 'YYYY-MM-DD'),
+        pc.active_accounts,
+        pc.operations
+    FROM haf_stats_backend.active_users_period_counts pc
+    WHERE pc.period_type = granularity
+      AND pc.op_class = _classes[1]
+      AND pc.period >= DATE_TRUNC(granularity, _from)::DATE
+      AND pc.period <= _to
     ORDER BY 1;
 END;
 $$;
@@ -7220,7 +7318,10 @@ $$;
     description: >-
       Top N accounts ranked by the chosen metric. Reward and transfer metrics sum
       haf_stats financial data over [from_date, to_date]; transaction_count sums authored
-      (signed) operations over the same range; hp_balance ranks the CURRENT own
+      (signed) operations over the same range, except that per-account days are kept only for a
+      recent window (from the first day of the month at least 35 days back, by default): a range
+      starting before it is widened to whole calendar months - from the 1st of from_date's month,
+      and to the end of to_date's month when that is before the window too; hp_balance ranks the CURRENT own
       vesting balance from balance_tracker and ignores from_date/to_date (empty result if
       no balance_tracker schema is readable on the deployment). Default sort keys -
       author_rewards and curation_rewards: vests, then hbd, then hive sums;
@@ -7417,6 +7518,16 @@ BEGIN
             MESSAGE = 'invalid metric: ' || COALESCE("metric", '(null)'),
             HINT = 'Must be one of: author_rewards, curation_rewards, transfer_volume_in, '
                 || 'transfer_volume_out, hp_balance, transaction_count';
+    END IF;
+
+    -- active_users_daily keeps only the retention window (db/daily_retention.sql), so
+    -- transaction_count widens a range that starts before it to whole months (#124).
+    IF "metric" = 'transaction_count' THEN
+        SELECT w.lead_from, w.lead_to, w.trail_from, w.trail_to, w.mm_from, w.mm_to
+          INTO _lead_from, _lead_to, _trail_from, _trail_to, _mm_from, _mm_to
+          FROM haf_stats_app.top_accounts_window_retained(_from, _to, NOW()::DATE, (
+                   SELECT f.kept_from FROM haf_stats_app.daily_retention_floor f
+                   WHERE f.daily_table = 'active_users_daily')) w;
     END IF;
 
     IF "limit_count" IS NULL OR "limit_count" < 1 OR "limit_count" > 100 THEN

@@ -48,8 +48,9 @@
 #                     tests/ci_deferred_refresh_recorded.sql; then, timed apart from the
 #                     sync, the call that batch makes,
 #                     haf_stats_app.prepare_rollup_refreshes(FALSE) (deferred-refresh.log);
-#                     then tests/ci_deferred_refresh_complete.sql (.gitlab-ci.yml's
-#                     sync job runs the same three steps; keep them in step); then
+#                     then tests/ci_deferred_refresh_complete.sql and
+#                     tests/ci_daily_retention_equality.sql (.gitlab-ci.yml's sync job
+#                     runs the same four steps; keep them in step); then
 #                     scripts/processor_timings_report.py over both logs:
 #                     processor-timings.json and its table
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
@@ -340,6 +341,7 @@ sync_blocks() {
     deferred_seconds="$(echo "$t0 $(date +%s.%N)" | awk '{ printf "%.3f\n", $2 - $1 }')"
     echo "deferred rollup refreshes took ${deferred_seconds}s"
     cq -f tests/ci_deferred_refresh_complete.sql || return 1
+    cq -f tests/ci_daily_retention_equality.sql || return 1
     synced=yes
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
         --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \

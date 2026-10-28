@@ -1,0 +1,46 @@
+---
+test_name: Daily active users takes a list naming one class, or all, as that class
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Only a list naming two different classes is refused (negative/multiple_operation_types): one
+# class named twice is that class, and a list that includes all is all. The fixture
+# (ci_setup.sql) has the post class for February 2020 and ALL for January and February.
+stages:
+  - name: One operation type named twice reads that class
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        from_date: "2020-02-01"
+        to_date: "2020-02-15"
+        granularity: "month"
+        operation_types: "post, post"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-02-01"
+          active_accounts: 7
+          operations: 9
+  - name: A list including all reads ALL
+    request:
+      url: "{api_url}/rpc/get_daily_active_users"
+      method: GET
+      params:
+        from_date: "2020-01-01"
+        to_date: "2020-02-15"
+        granularity: "month"
+        operation_types: "post,vote,all"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          active_accounts: 100
+          operations: 5000
+        - period: "2020-02-01"
+          active_accounts: 150
+          operations: 6000
