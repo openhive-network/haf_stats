@@ -12,7 +12,8 @@
 -- reached. Once it sleeps, this session checks pg_locks for any lock it holds on a
 -- hivemind_app relation, and a third connection must get ACCESS EXCLUSIVE on hive_posts within
 -- lock_timeout, as hivemind's ALTER TABLE would. Then hivemind's completion marker is moved
--- past the range, and the second connection must finish the range without an error.
+-- past the range, and the second connection's call must return without an error.
+-- (That the range is then processed, and as one, is ci_hivemind_source.sql section 3.)
 --
 -- The other connections must see the fixture, so the setup is committed and undone at the
 -- end; the result is recorded and raised only after the cleanup. dblink connects over the
@@ -157,6 +158,6 @@ BEGIN
     IF _failure IS NOT NULL THEN
         RAISE EXCEPTION 'hivemind source (#118): %', _failure;
     END IF;
-    RAISE NOTICE 'hivemind source: waiting for hivemind holds no lock on hivemind_app; hive_posts DDL is not blocked; the range is processed once hivemind completes it';
+    RAISE NOTICE 'hivemind source: waiting for hivemind holds no lock on hivemind_app; hive_posts DDL is not blocked; the wait ends without an error once hivemind completes the range';
 END
 $report$;
