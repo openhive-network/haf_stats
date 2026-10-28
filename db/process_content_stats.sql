@@ -447,8 +447,13 @@ BEGIN
 END;
 $$;
 
--- The highest block the hivemind source may read, once it is at least _block. Every
--- content-stats batch on that source ends at or below it (process_content_stats).
+-- Waits until the hivemind source may read through _block, and returns the highest block it
+-- may read. process_content_stats calls it with a batch's last block before reading anything
+-- from hivemind; scripts/rebuild_content_volume.sh calls it once as a pre-check.
+--
+-- It reads hafd.contexts, the catalog and hive_state, releasing hive_state's lock before it
+-- sleeps, so a caller that has not read hivemind's tables yet holds no lock on any of them
+-- while this waits (#118).
 --
 -- hivemind's context head (hafd.contexts.current_block_num), capped by its own completion marker
 -- (hive_state.last_completed_block_num) where it has one: in massive sync hivemind advances its
@@ -458,7 +463,8 @@ $$;
 --
 -- Waits, never falls back: a batch processed from the other source would mix the two (see the
 -- section header). haf_stats.hivemind_wait_timeout (seconds) turns a wait longer than that into
--- an error; unset, it waits as long as hivemind takes. Each pass is a fresh statement, so it
+-- an error; unset, it waits as long as hivemind takes. One call is one wait, so the timeout
+-- bounds the wait for a whole batch. Each pass is a fresh statement, so it
 -- sees what hivemind has committed since (READ COMMITTED, as both block drivers run).
 DROP FUNCTION IF EXISTS haf_stats_app.wait_for_hivemind;
 CREATE OR REPLACE FUNCTION haf_stats_app.wait_for_hivemind(_block INT)
@@ -481,7 +487,15 @@ BEGIN
         END IF;
 
         IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
-            SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+            -- Read in a subtransaction that is then rolled back on purpose: that releases the
+            -- lock the read took on hive_state, so none is held through the sleep below (#118).
+            -- _completed keeps its value; plpgsql variables are not rolled back.
+            BEGIN
+                SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+                RAISE EXCEPTION USING ERRCODE = 'ZH118';
+            EXCEPTION WHEN SQLSTATE 'ZH118' THEN
+                NULL;
+            END;
             _head := LEAST(_head, COALESCE(_completed, _head));
         END IF;
 
@@ -1433,8 +1447,6 @@ SET jit = OFF
 AS $$
 DECLARE
     _high_water INT;
-    _done INT;
-    _end INT;
 BEGIN
 
 
@@ -1456,16 +1468,19 @@ IF _first_block <= _high_water THEN
         USING HINT = 'To repair content volume, run scripts/rebuild_content_volume.sh (it TRUNCATEs and replays cleanly). To re-replay from scratch, reset haf_stats_app.app_status.last_processed_block to 0 first.';
 END IF;
 
--- On the hivemind source no batch may read hive_posts past what hivemind has written, so a
--- range it has only partly reached is processed in the pieces it has, waiting in between
--- (wait_for_hivemind); never past it, and never from the other source.
+-- On the hivemind source no batch may read hive_posts past what hivemind has written, so the
+-- whole range waits until hivemind has reached its last block (wait_for_hivemind), and only
+-- then reads hivemind's tables; never past it, and never from the other source.
+--
+-- Wait first, read after, never the other way round (#118). The wait sleeps inside the block
+-- driver's transaction, which keeps every lock it has taken until it commits. hivemind drops
+-- hive_posts' foreign keys (ACCESS EXCLUSIVE, no lock_timeout) whenever it enters massive
+-- sync -- 101 or more blocks behind -- and its indexes as well at 2,000,000 or more. That is
+-- when this waits for it: a lock on hive_posts held through the wait would leave the two
+-- waiting on each other for good, with every hive_posts reader queued behind hivemind.
 IF haf_stats_app.content_source() = 'hivemind' THEN
-    _done := _first_block - 1;
-    WHILE _done < _last_block LOOP
-        _end := LEAST(_last_block, haf_stats_app.wait_for_hivemind(_done + 1));
-        PERFORM haf_stats_app.process_content_stats_range(_done + 1, _end, TRUE);
-        _done := _end;
-    END LOOP;
+    PERFORM haf_stats_app.wait_for_hivemind(_last_block);
+    PERFORM haf_stats_app.process_content_stats_range(_first_block, _last_block, TRUE);
 ELSE
     PERFORM haf_stats_app.process_content_stats_range(_first_block, _last_block, FALSE);
 END IF;
