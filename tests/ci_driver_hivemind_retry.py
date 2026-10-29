@@ -186,7 +186,8 @@ def run_driver(module, stop_after_a_range=False):
         def iterate(self):
             self.tries += 1
             # also with stop_after_a_range: its range goes through on the first try, and a
-            # regression that kept it "behind" then fails instead of hanging the lane
+            # regression that kept it "behind" then fails instead of running into install-test's
+            # 600 s timeout
             if self.tries >= RETRIES:
                 self.stop_requested = True
             blocks = super().iterate()
