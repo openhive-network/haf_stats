@@ -15,8 +15,11 @@ reads, with hivemind's context partway through the first range -- so a check aga
 range's first block instead of its last would let the batch through.
 
   1. process_blocks (the driver's entry procedure) raises SQLSTATE 55R23 at once.
-  2. The shipped driver rolls that range back, reconnects and asks again rather than exiting
-     -- and, as a control, exits on an error outside the retried classes, so the code matters.
+  2. The shipped driver rolls that range back and asks again rather than exiting -- and, as a
+     control, exits on an error outside the retried classes, so the code matters. Either
+     driver passes: one without RETRY_LATER_SQLSTATE reconnects to retry (class 55 is an
+     OperationalError to it); one with it (common-ci-configuration!419) retries on the same
+     connection and logs the wait once (#127).
   3. The legacy CALL main() loop asks for the range again about once a second, sleeping with
      no transaction ID in between (nothing written, no row lock held) and logging the wait
      once. When hivemind reaches the range it logs that processing resumes, processes it and
@@ -143,6 +146,10 @@ def load_driver():
     return module
 
 
+# Tries a driver that retries on the same connection gets before the probe stops it (step 2).
+RETRIES = 4
+
+
 def driver_args():
     return argparse.Namespace(
         app="haf_stats", postgres_url=DSN, stop_at_block=None, lock=[], override_max_batch=None,
@@ -155,12 +162,14 @@ def driver_args():
 def run_driver(module, stop_after_a_range=False):
     """The shipped run() and its real loop()/iterate(); only connect() is replaced, because
     the stub has no application registry to read. By default the second connect -- the
-    retry's -- asks the driver to stop, so run() returns once it has reconnected; with
+    retry's -- asks the driver to stop, so run() returns once it has reconnected, and so does
+    the RETRIES-th try, for a driver that retries on the same connection; with
     stop_after_a_range it stops once one range has been processed and committed."""
 
     class Probe(module.Driver):
         connects = 0
         ranges = 0
+        tries = 0
 
         def connect(self):
             self.connects += 1
@@ -175,6 +184,9 @@ def run_driver(module, stop_after_a_range=False):
             self.procedure = "haf_stats_app.process_blocks"
 
         def iterate(self):
+            self.tries += 1
+            if self.tries >= RETRIES and not stop_after_a_range:
+                self.stop_requested = True
             blocks = super().iterate()
             if blocks is not None:
                 self.ranges += 1
@@ -291,10 +303,21 @@ def main() -> int:
         print(log, end="")
         check(raised is None and rc == 0,
               f"the driver did not exit on 55R23 (run() returned {rc}, raised {raised!r})")
-        check(probe.connects == 2, f"the driver reconnected to retry (connects: {probe.connects})")
-        check(f"database connection problem: haf_stats: {behind}" in log,
-              "the driver logged the range as left for a retry")
-        check(iterations(cur) - before == 1, f"one iteration before the retry ({iterations(cur) - before})")
+        tries = iterations(cur) - before
+        if getattr(module, "RETRY_LATER_SQLSTATE", None) == "55R23":
+            print("     (driver with RETRY_LATER_SQLSTATE: retries on the same connection)", flush=True)
+            check(probe.connects == 1, f"the driver retried on the same connection (connects: {probe.connects})")
+            check(tries == RETRIES, f"{RETRIES} tries before the probe stopped it ({tries})")
+            check(log.count("not ready, retrying") == 1 and f": haf_stats: {behind}" in log,
+                  "the driver logged the wait once, with haf_stats' message")
+            check("database connection problem" not in log and "reconnecting" not in log,
+                  "the driver logged no connection problem")
+        else:
+            print("     (driver without RETRY_LATER_SQLSTATE: reconnects to retry)", flush=True)
+            check(probe.connects == 2, f"the driver reconnected to retry (connects: {probe.connects})")
+            check(f"database connection problem: haf_stats: {behind}" in log,
+                  "the driver logged the range as left for a retry")
+            check(tries == 1, f"one iteration before the retry ({tries})")
         check(context("haf_stats") == position, "the driver's retry left the haf_stats context where it was")
 
         # Control: an error outside the retried classes ends the driver, so the code is what

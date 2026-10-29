@@ -1122,7 +1122,11 @@ processor does not queue behind the old one.
   through M); blocks A..B are left for a retry` with the HINT and CONTEXT lines PostgreSQL
   adds, then `reconnecting in 5.0s` and its connect banner, and tries again every 5 seconds
   (its `--retry-delay`). That repeats for as long as hivemind is behind. The "connection
-  problem" wording is the driver's and cannot be changed from here.
+  problem" wording is the driver's and cannot be changed from here. A driver with
+  [common-ci-configuration!419](https://gitlab.syncad.com/hive/common-ci-configuration/-/merge_requests/419)
+  retries `55R23` on the same connection instead, logging `blocks A..B not ready, retrying:
+  <the message>` once, `still not ready after Ns` every 10 minutes, and `range ready after
+  Ns` when the batch goes through.
 * The legacy `CALL main()` loop logs one `waiting for hivemind` notice, retries every
   second, and logs again when processing resumes.
 
