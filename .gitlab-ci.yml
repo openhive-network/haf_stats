@@ -1191,7 +1191,9 @@ sync:
     echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for haf_stats to process to head..."
+    t0=$(date +%s.%N)
     "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-sync.sh" --postgres-access="${POSTGRES_ACCESS}"
+    echo "TIMING sync_wait_seconds $(echo "$t0 $(date +%s.%N)" | awk '{printf "%.3f", $2-$1}')"
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
   - |
     # The block-processing healthcheck, run the way Docker runs it: inside the LIVE
@@ -1233,8 +1235,13 @@ sync:
     docker compose "${COMPOSE_OPTIONS[@]}" stop haf-stats-process
     cd "${CI_PROJECT_DIR}" || exit 1
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_recorded.sql
+    t0=$(date +%s.%N)
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on \
-      -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);"
+      -c "SET ROLE haf_stats_owner; SET haf_stats.processor_timings = on; SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);" \
+      > docker/deferred-refresh.log 2>&1
+    echo "TIMING deferred_seconds $(echo "$t0 $(date +%s.%N)" | awk '{printf "%.3f", $2-$1}')"
+    psql "${POSTGRES_ACCESS}" -X -Atc "SELECT 'SIZE ' || t || ' ' || COALESCE(pg_total_relation_size(to_regclass('haf_stats_backend.' || t))::text, 'missing') FROM unnest(ARRAY['account_financial_daily', 'network_voter_daily', 'network_author_daily']) t"
+    psql "${POSTGRES_ACCESS}" -X -Atc "SELECT 'BLOCK ' || MAX(last_processed_block) FROM haf_stats_app.app_status"
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_complete.sql
     echo -e "\e[0Ksection_end:$(date +%s):deferred\r\e[0K"
   - |
@@ -1269,13 +1276,14 @@ sync:
     # (the path .haf_app_sync_artifacts publishes).
     tar -czvf container-logs.tar.gz ./*.log || true
     echo -e "\e[0Ksection_end:$(date +%s):shutdown\r\e[0K"
-  - !reference [.haf_app_sync_save_cache_conditional, script]
   after_script: !reference [.haf_app_sync_cleanup, after_script]
   artifacts: !reference [.haf_app_sync_artifacts, artifacts]
+  when: manual
   tags:
   - public-runner-docker
   - data-cache-storage
   - fast
+  - hive-builder-11
 
 # =============================================================================
 # TEST — extract the haf_haf_stats_sync cache, start HAF (--skip-hived) +
