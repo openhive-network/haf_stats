@@ -229,7 +229,7 @@ if command -v haf_app_driver.py >/dev/null 2>&1 \
     if registry_has_haf_stats; then
         log "haf_stats is registered in the HAF application registry; running haf_app_driver.py"
         exec haf_app_driver.py --app=haf_stats \
-            --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing" \
+            --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing&options=-c%20haf_stats.processor_timings%3Don" \
             --startup-marker=
     fi
     # Deliberately does not name a cause. Every psql failure in the probe above is
