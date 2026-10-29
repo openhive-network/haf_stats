@@ -96,11 +96,11 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
     assert report["batches"] == 3
     assert report["sync_wall_seconds"] == 100.0
     assert report["blocks_per_second"] == 20000.0
-    assert report["processors"]["process_witness_blocks"] == {"seconds": 7.0, "calls": 3, "share": 0.0714}
+    assert report["processors"]["process_witness_blocks"] == {"seconds": 7.0, "calls": 3, "share": 0.0667}
     assert report["processing_seconds"] == 7.0 * len(PROCESSORS)
     assert report["instrumentation_seconds"] == 1.5
     assert report["refreshes"]["refresh_financial_monthly"] == {
-        "seconds": 0.6, "calls": 2, "share": 0.0061, "within": "process_financial"}
+        "seconds": 0.6, "calls": 2, "share": 0.0057, "within": "process_financial"}
     assert report["refreshes"]["refresh_engagement_touched"]["calls"] == 1
     assert report["refreshes"]["refresh_author_cohort_retention"]["calls"] == 0
     # A batch counts towards the million its first block is in.
@@ -115,7 +115,7 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
     assert report["operations"]["producer_reward_operation"] == 300
 
     table = capsys.readouterr().out
-    assert re.search(r"^process_financial +7\.00 +7\.1% +3 +1\.00 +6\.00$", table, re.M)
+    assert re.search(r"^process_financial +7\.00 +6\.7% +3 +1\.00 +6\.00$", table, re.M)
     assert re.search(r"^  refresh_financial_monthly +0\.60 +0\.6% +2 +0\.00 +0\.60$", table, re.M)
     assert "sync wall 100.0s over 3 batches (blocks 1..2000000)" in table
     assert "process_financial: transfer_operation 9" in table
@@ -271,7 +271,7 @@ _DEFERRED_CALL = re.compile(r"PERFORM haf_stats_app\.(refresh_\w+)\(.*\n.*report
 
 
 def test_every_deferred_refresh_is_timed_under_its_own_name() -> None:
-    body = _sql("haf_stats_app.sql")
+    body = _sql("deferred_rollup_refreshes.sql")
     body = body[body.index("CREATE OR REPLACE FUNCTION haf_stats_app.run_deferred_rollup_refreshes("):]
     timed = [(m.group(1), m.group(2)) for m in _DEFERRED_CALL.finditer(body)]
 

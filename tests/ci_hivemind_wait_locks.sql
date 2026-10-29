@@ -18,6 +18,13 @@
 -- past the range, and the second connection's call must return without an error.
 -- (That the range is then processed, and as one, is ci_hivemind_source.sql section 3.)
 --
+-- Twice: once for process_content_stats alone, and once for the first batch outside massive
+-- sync with deferred refreshes recorded (#126). That batch starts as main() and process_blocks()
+-- start it, with prepare_rollup_refreshes(FALSE), in the same transaction and before the range,
+-- and the content refresh massive sync deferred includes the engagement drain, which on this
+-- source reads hivemind; so that drain, too, must wait for the range's hivemind wait. After the
+-- batch the deferral record and the staged creation-days must be gone: the drain ran in it.
+--
 -- The other connections must see the fixture, so the setup is committed and undone at the
 -- end; the result is recorded and raised only after the cleanup. dblink connects over the
 -- server's local socket (see tests/ci_alltime_refresh.sql), and is dropped again only if this
@@ -30,6 +37,8 @@ SELECT
     (SELECT array_agg(source) FROM haf_stats_app.content_source_config) AS sources,
     EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'dblink') AS had_dblink;
 CREATE TABLE public.ci118_result (failure TEXT);
+CREATE TABLE public.ci118_saved_deferred AS SELECT * FROM haf_stats_app.deferred_rollup_refreshes;
+CREATE TABLE public.ci118_saved_touched AS SELECT * FROM haf_stats_backend.engagement_touched_days;
 
 CREATE EXTENSION IF NOT EXISTS dblink;
 
@@ -46,12 +55,20 @@ DELETE FROM haf_stats_app.content_source_config;
 INSERT INTO haf_stats_app.content_source_config (source) VALUES ('hivemind');
 UPDATE haf_stats_app.app_status SET last_processed_block = 0;
 
-DO $locks$
+-- One batch in the waiter connection: _start (synchronously, if not NULL), then the range,
+-- which must wait for hivemind holding no hivemind_app lock; once hivemind completes the range,
+-- _after (if not NULL) runs in the same transaction and returns the failure it finds, or NULL.
+-- Records the first failure under _scenario. The waiter's transaction is never committed.
+CREATE FUNCTION pg_temp.ci118_batch(_scenario TEXT, _start TEXT, _after TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $locks$
 DECLARE
     _pid INT;
     _event TEXT;
     _held TEXT;
     _ddl TEXT;
+    _found TEXT;
     _samples INT := 0;
     _deadline TIMESTAMPTZ := clock_timestamp() + INTERVAL '60 seconds';
 BEGIN
@@ -60,9 +77,13 @@ BEGIN
     -- One transaction, as the block driver runs it; the timeout only bounds a broken run.
     PERFORM dblink_exec('ci118_waiter', 'BEGIN');
     PERFORM dblink_exec('ci118_waiter', 'SET LOCAL haf_stats.hivemind_wait_timeout = ''120''');
-    PERFORM dblink_send_query('ci118_waiter', 'SELECT haf_stats_app.process_content_stats(37500001, 37500045)');
 
     BEGIN
+        IF _start IS NOT NULL THEN
+            PERFORM r.v FROM dblink('ci118_waiter', _start) AS r(v TEXT);
+        END IF;
+        PERFORM dblink_send_query('ci118_waiter', 'SELECT haf_stats_app.process_content_stats(37500001, 37500045)');
+
         -- Sample the waiter's locks while it sleeps. It wakes once a second to read hivemind's
         -- progress, so a sample is kept only if it is still asleep after it.
         LOOP
@@ -122,8 +143,16 @@ BEGIN
         END LOOP;
         -- Raises the waiter's error, if it failed.
         PERFORM r.v FROM dblink_get_result('ci118_waiter') AS r(v TEXT);
+        IF _after IS NOT NULL THEN
+            -- The async call's end of results, so the connection takes another query.
+            PERFORM r.v FROM dblink_get_result('ci118_waiter') AS r(v TEXT);
+            SELECT r.v INTO _found FROM dblink('ci118_waiter', _after) AS r(v TEXT);
+            IF _found IS NOT NULL THEN
+                RAISE EXCEPTION '%', _found;
+            END IF;
+        END IF;
     EXCEPTION WHEN OTHERS THEN
-        INSERT INTO public.ci118_result VALUES (SQLERRM);
+        INSERT INTO public.ci118_result VALUES (_scenario || ': ' || SQLERRM);
     END;
 
     -- Stop the waiter if it is still running; its transaction goes with the connection.
@@ -137,7 +166,38 @@ BEGIN
 END
 $locks$;
 
+SELECT pg_temp.ci118_batch('process_content_stats', NULL, NULL);
+
+-- The first batch outside massive sync: block 37500000 processed, the content refreshes recorded
+-- from its day, and a creation-day staged for the engagement drain, as massive sync leaves them;
+-- hivemind again only through block 37500030.
+UPDATE hivemind_app.hive_state SET last_completed_block_num = 37500030;
+UPDATE haf_stats_app.app_status SET last_processed_block = 37500000;
+DELETE FROM haf_stats_app.deferred_rollup_refreshes;
+INSERT INTO haf_stats_app.deferred_rollup_refreshes (processor, dirty_from)
+SELECT 'process_content_stats', b.created_at::DATE FROM hafd.blocks AS b WHERE b.num = 37500000;
+INSERT INTO haf_stats_backend.engagement_touched_days (day)
+SELECT b.created_at::DATE FROM hafd.blocks AS b WHERE b.num = 37500001
+ON CONFLICT (day) DO NOTHING;
+
+SELECT pg_temp.ci118_batch(
+    'the first batch outside massive sync',
+    'SELECT haf_stats_app.prepare_rollup_refreshes(FALSE)::TEXT',
+    $after$
+    SELECT CASE
+        WHEN EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes)
+            THEN 'the batch left deferred refreshes recorded: '
+                 || (SELECT string_agg(d.processor, ', ' ORDER BY d.processor) FROM haf_stats_app.deferred_rollup_refreshes AS d)
+        WHEN EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days)
+            THEN 'the batch did not drain engagement_touched_days'
+    END
+    $after$);
+
 UPDATE haf_stats_app.app_status SET last_processed_block = (SELECT last_processed_block FROM public.ci118_saved);
+DELETE FROM haf_stats_app.deferred_rollup_refreshes;
+INSERT INTO haf_stats_app.deferred_rollup_refreshes SELECT * FROM public.ci118_saved_deferred;
+DELETE FROM haf_stats_backend.engagement_touched_days;
+INSERT INTO haf_stats_backend.engagement_touched_days SELECT * FROM public.ci118_saved_touched;
 DELETE FROM haf_stats_app.content_source_config;
 INSERT INTO haf_stats_app.content_source_config (source)
 SELECT unnest(sources) FROM public.ci118_saved WHERE sources IS NOT NULL;
@@ -154,13 +214,15 @@ $dblink$;
 
 DO $report$
 DECLARE
-    _failure TEXT := (SELECT failure FROM public.ci118_result);
+    _failure TEXT := (SELECT string_agg(failure, '; ') FROM public.ci118_result);
 BEGIN
     DROP TABLE public.ci118_saved;
+    DROP TABLE public.ci118_saved_deferred;
+    DROP TABLE public.ci118_saved_touched;
     DROP TABLE public.ci118_result;
     IF _failure IS NOT NULL THEN
         RAISE EXCEPTION 'hivemind source (#118): %', _failure;
     END IF;
-    RAISE NOTICE 'hivemind source: waiting for hivemind holds no lock on hivemind_app; hive_posts DDL is not blocked; the wait ends without an error once hivemind completes the range';
+    RAISE NOTICE 'hivemind source: waiting for hivemind holds no lock on hivemind_app, in process_content_stats and in the first batch outside massive sync; hive_posts DDL is not blocked; the wait ends without an error once hivemind completes the range, and that batch then runs its deferred engagement drain';
 END
 $report$;

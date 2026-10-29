@@ -83,6 +83,8 @@ db/
                             custom_json ops (owner/admin gated)
   process_witness_blocks.sql
                             ✓ Per-witness blocks produced + scheduled slots missed, per day
+  daily_retention.sql       The retention window of active_users_daily and account_custom_json_daily
+                            (#124), and the in-place conversion of a database that predates it
 
 Dockerfile                  App image (one image, three services, dispatched by verb)
 Dockerfile.rewriter         The public REST surface: nginx + endpoints/rewrite_rules.conf
@@ -170,6 +172,11 @@ direction as compact codes, lets a node with hivemind leave `comment_registry` e
 `network_author_daily` to the window the processor still reads. Measured on a replay at
 block 44.8M that was ~11 GB of avoidable on-disk size (ZFS lz4); re-measure after a replay.
 
+They also predate issue #124, which keeps the per-account rows of `active_users_daily` and
+`account_custom_json_daily` only for a recent window (see
+[Per-account daily rows](#per-account-daily-rows-a-recent-window-only)): from late 2021 the two
+together grow by several hundred thousand rows a day, almost all of them custom_json bots.
+
 They also predate issue #120, which keys `account_custom_json_daily` and
 `network_custom_json_daily` on HAF's `custom_json_type_id` (SMALLINT, `hafd.custom_json_types`)
 instead of the id text: ~13 bytes less per row, in the heap and again in the primary key. The
@@ -215,19 +222,68 @@ scale (see the comment there).
 are refreshed whenever a batch crosses a 1200-block boundary; in massive sync each processor
 records the earliest day it would have refreshed from instead
 (`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
-refresh once from that day, before processing its blocks. `install_app.sh` does the same over a
-context already past massive sync. A sync stopped while still in massive sync (e.g.
+refresh once from that day, before processing its blocks. On the hivemind content source the
+engagement rollup is the exception: its refresh reads hivemind, which a batch may read only after
+it has waited for hivemind (#118), so that batch runs it after the wait instead. `install_app.sh`
+does the same over a context already past massive sync, the engagement refresh only when hivemind
+has reached every processed block. A sync stopped while still in massive sync (e.g.
 `--stop-at-block`) leaves them empty, so the period, monthly and retention endpoints answer
-nothing meaningful, until the first live batch or the call that batch makes:
+nothing meaningful, until the first live batch or the calls that batch makes:
 
 ```sql
 SET ROLE haf_stats_owner;
 SELECT haf_stats_app.prepare_rollup_refreshes(FALSE);
+SELECT haf_stats_app.run_deferred_engagement_refresh();
 ```
 
 On the 1→5M range that one call took about 4 s. CI's `sync` job, `.aidev/run-checks.sh`'s
 sync step and `docker/docker-compose-test.yml` all stop at a block in massive sync and make
-this call before anything reads the rollups.
+these calls before anything reads the rollups.
+
+### Per-account daily rows: a recent window only
+
+`active_users_daily` (one row per account, day and op class) and `account_custom_json_daily` (one
+per account, day and custom_json id) keep their rows only for a recent window
+(`db/daily_retention.sql`, #124). The window is `haf_stats_app.app_config.daily_retention_days`
+(default 35, at least 7) and ends at a month start: the first day kept is the 1st of the month
+that day count back reaches, so between 35 and about 66 days are kept and the month in progress is
+always among them. A day leaves only once everything derived from it is final:
+
+- for `active_users_daily`, its day, week and month in `active_users_period_counts` and its month
+  in `active_users_account_monthly`. During massive sync, where those refreshes are deferred, the
+  prune first restates the periods before the window and moves the deferred record up to it;
+- for `account_custom_json_daily`, its `rc_exact`: a day whose custom_json rows are not all exact
+  while its blocks record RC is filled by `haf_stats_app.backfill_rc_exact` first. Its rows then
+  move to `account_custom_json_monthly`, one row per account, month and id, with the RC each day
+  was priced at then (`rc_exact` where set, else the estimate at that day's rate), so a later rate
+  recalibration does not reprice those months.
+
+The batch that crosses the window's month boundary does the work; every other batch only checks
+it. `haf_stats_app.daily_retention_floor` records the first day each table still holds.
+`active_users_daily` is keyed `(op_class, day, account_id)`, the shape of its one remaining read.
+
+What the endpoints do with it:
+
+- `/network/daily-active-users` reads only `active_users_period_counts`, so it takes one
+  `operation_types` class or `all`; a list of several classes is refused (400), since the union
+  of their accounts cannot be counted from the per-class rows.
+- `/network/top-accounts` `transaction_count`, `/account/{account}/dapp-footprint` and
+  `/account/{account}/rc-footprint` with `group_by=app` or `category` widen a range that starts
+  before the window to whole calendar months (from the 1st of `from_date`'s month, and to the end
+  of `to_date`'s month when that is before the window too). `dapp-footprint` reports the range it
+  summed in `from_date`/`to_date`. Ranges inside the window, and month-aligned ones, answer
+  exactly as before. `rc-footprint` `group_by=op_type` and `/account/{account}/rc-footprint-timeline`
+  read the operations and are never widened.
+- A refresh from genesis (`refresh_active_users_periods('2016-03-24')`) restates only from the
+  first kept day: the rollups are the only record of the periods before it.
+
+Upgrading a node that ran an earlier version converts it in place, in steps that each commit, so
+an interrupted install resumes: the active-user rollups owed before the window are restated a
+month at a time, `active_users_daily` is rebuilt on its new key from its kept rows (dropping
+`idx_aud_opclass_day`), and `account_custom_json_daily`'s older rows are rolled into months a range
+of accounts at a time before the table is replaced by its kept rows. The end state is a fresh
+replay's. `scripts/rebuild_custom_json.sh` rebuilds both custom_json tables and applies the window
+again when its replay is done.
 
 ## Quick Start (Development)
 
@@ -960,7 +1016,7 @@ Served by the **rewriter** (`haf-stats-rewriter`), which maps these clean paths 
 | `GET /account/{account}/rc-footprint` | ✅ Live | process_rc.sql, exact_rc.sql | RC for an account's signed ops (exact where the node records it, see [Exact RC](#exact-rc)), grouped by op type or DApp (`group_by=app` resolves custom_json ids to DApp names via `custom_json_app_registry`); read-time rates (#32/#33) |
 | `GET /account/{account}/rc-footprint-timeline` | ✅ Live | process_rc.sql, exact_rc.sql | Per-account RC (exact where recorded) as a paginated per-OPERATION ledger (timestamp, block_num, op_type, app, custom_json_id, rc_consumed, op_seq, rc_source) -- not a period series like `/network/rc-utilization`; op-type / DApp / category filters, `before_seq` paging |
 | `GET /account/{account}/dapp-footprint` | ✅ Live | process_custom_json.sql | Per-account custom_json activity resolved to DApp names and categories |
-| `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, by op-type filter and granularity |
+| `GET /network/daily-active-users` | ✅ Live | process_active_users.sql | Distinct authoring accounts + operation volume per period, for one op class or all, by granularity |
 | `GET /network/content-volume` | ✅ Live | process_content_stats.sql | Posts/comments created + unique authors per period (create-vs-edit aware), granularity |
 | `GET /network/engagement` | ✅ Live | process_content_stats.sql | Network-wide posts, average votes/comments per post and zero-engagement shares, by period |
 | `GET /network/vote-stats` | ✅ Live | process_content_stats.sql | Network-wide vote activity (up/down/unvotes, self-votes, unique voters), granularity |
@@ -1024,9 +1080,10 @@ per deployment:
 * **`hivemind`** reads the creations hivemind already stores: `hivemind_app.hive_posts` has
   one row per creation, a re-creation after delete included, with its block, depth, parent
   and community. `comment_registry` then stays empty. Content volume, the account content
-  counts, community activity, unique authors, author retention and the engagement post set
-  all come out the same; `post_engagement`'s vote and reply counts still come from the
-  operations.
+  counts, community activity, unique authors and author retention all come out the same.
+  `post_engagement` (4.4 GB at block 67.45M) is not written either: the engagement rollup
+  behind `get_network_engagement` is computed from `hive_posts` and `hive_votes` instead (see
+  "Engagement on the hivemind source" below).
 
 `install_app.sh` decides and records it. With `--content-source=auto` (the default;
 `HAF_STATS_CONTENT_SOURCE` sets it too) a new deployment takes `hivemind` when the
@@ -1035,7 +1092,7 @@ per deployment:
 blocks before the choice existed counts as `internal`. `--content-source=hivemind` or
 `=internal` forces it. The reads are granted by `db/builtin_roles.sql` -- `USAGE` on
 `hivemind_app` and `SELECT` on `hive_posts`, `hive_accounts`, `hive_permlink_data`,
-`hive_communities` and `hive_state`, to `haf_stats_owner` only -- when hivemind is installed
+`hive_communities`, `hive_state` and `hive_votes`, to `haf_stats_owner` only -- when hivemind is installed
 and the installing role may grant them (its owner or a superuser). **A node that installs
 hivemind after haf_stats gets them by re-running `install_app.sh`.**
 
@@ -1098,6 +1155,43 @@ reply whose parent was also deleted and re-created in the same batch
 comments are missing from its counts, and their operations are counted as edits -- where
 the internal source matches hived's `post_count`. `tests/parity/content_vs_hivemind.sql`
 reports `NOT RUN` on such a node, since both sides are then hivemind's.
+
+**Engagement on the hivemind source.** `engagement_period_counts` (the per-day/week/month
+post, vote and reply totals behind `get_network_engagement`) is refreshed for the creation-days a
+batch touched, as on the internal source, but each day is recomputed from hivemind: its posts are
+the `hive_posts` root rows that are the first root creation of their author/permlink, dated by
+that block; a post's replies are the direct replies under any of its root creations, deleted ones
+included; its votes are, per `hive_votes` row, `1 + num_changes`, less one where the vote now
+stands at 0%. The batch stages the touched days from hivemind too (the root posts it created,
+replied to or voted on). The post set, the post days and the reply counts are exactly
+`post_engagement`'s. The vote count is not: `post_engagement` counts vote ops with a non-zero
+weight, and hivemind keeps no per-op history, so a voter who unvoted and voted again counts each
+unvote here. Measured on steem-20 against its `post_engagement` (posts / votes / replies / posts
+with no vote / posts with no reply):
+
+| day | `post_engagement` | hivemind |
+|---|---|---|
+| 2016-09-10 | 1686 / 44630 / 4312 / 34 / 460 | 1686 / 44651 / 4313 / 34 / 459 |
+| 2018-03-15 | 43931 / 619350 / 90867 / 3740 / 18800 | 43931 / 619615 / 90873 / (not measured) / 18800 |
+| 2020-06-10 | 4044 / 235211 / 6746 / 172 / 1631 | 4044 / 235153 / 6758 / 172 / 1629 |
+
+Votes are within 0.05% per day. The reply and zero-reply differences are replies made after
+`post_engagement`'s last processed block, which hivemind already had (on 2020-06-10, 6747
+replies up to the processor's head). Counting distinct voters instead would be 0.2-0.7% low.
+hivemind is never behind the processor, so a refresh may count a vote or reply from a block the
+processor has yet to reach; that block re-stages the day.
+
+A refresh of the 22-23 creation-days a live hour of 2022 touched (84-90k posts) took 0.46-0.50 s
+warm (0.5-1.0 s cold) on steem-20, against 25-28 ms from `post_engagement`; it runs once per
+1200 blocks. Staging the touched days from hivemind costs 0.15 s for a 10,000-block batch, and
+each batch no longer writes `post_engagement`.
+
+An install over a hivemind-sourced deployment that still holds `post_engagement` (one upgraded
+from a release that wrote it, or switched by `rebuild_content_volume.sh`) rebuilds the rollup from
+hivemind and then empties the table, in one transaction, and reports the all-time totals before
+and after (`retire_post_engagement`, step 7c). An internal-source deployment keeps it. Switching
+from hivemind back to internal leaves `post_engagement` without the posts created before the
+switch, so their later votes and replies are not counted; replay to have them.
 
 `network_voter_daily` and `network_author_daily`, the sets the vote and content rollups
 count unique voters and authors from, are read only by the processor, which deletes what it

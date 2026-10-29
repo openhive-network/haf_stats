@@ -59,7 +59,8 @@ LOCK TABLE
     haf_stats_backend.account_cohort_retention,
     haf_stats_backend.author_cohort_retention,
     haf_stats_backend.network_op_daily,
-    haf_stats_backend.network_custom_json_daily
+    haf_stats_backend.network_custom_json_daily,
+    haf_stats_app.app_config
 IN ACCESS SHARE MODE;
 
 DO $watch$

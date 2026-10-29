@@ -38,13 +38,15 @@ SET ROLE haf_stats_owner;
 --                           is NOT additive across batches (an account active in two
 --                           batches on the same day must count once), so we store the
 --                           distinct presence set idempotently and COUNT(DISTINCT
---                           account_id) in the endpoint at the requested grain. Exact
---                           for week/month too. Each row also carries ops — the
---                           account's authored-op count for that day/class — which IS
---                           additive (op_id sets are disjoint across batches), used by
+--                           account_id) in the period refresh below at day, week and
+--                           month grain. Each row also carries ops — the account's
+--                           authored-op count for that day/class — which IS additive
+--                           (op_id sets are disjoint across batches), used by
 --                           get_network_top_accounts' transaction_count leaderboard.
 --                           COUNT(DISTINCT op_id) per account, so an op listing the
 --                           same signer under several roles still counts once for it.
+--                           Kept only for the retention window (db/daily_retention.sql):
+--                           the rows before it are final in the rollups and deleted.
 --   active_user_ops_daily   additive per-(day, op_class) operation counter. operations
 --                           is COUNT(DISTINCT op_id) within a batch (a multisig op is
 --                           one operation, not one-per-signer); op_id ranges are
@@ -54,12 +56,16 @@ SET ROLE haf_stats_owner;
 -- Tables
 -- ---------------------------------------------------------------------------
 
+-- Keyed (op_class, day, account_id): its one read besides the refreshes is
+-- get_network_top_accounts' transaction_count edge days, op_class = -1 AND day BETWEEN, a range
+-- scan of the key. Installs from before #124 have it keyed (day, op_class, account_id) with a
+-- covering idx_aud_opclass_day beside it; db/daily_retention.sql rebuilds those on this key.
 CREATE TABLE IF NOT EXISTS haf_stats_backend.active_users_daily (
     day DATE NOT NULL,
     op_class SMALLINT NOT NULL,
     account_id INT NOT NULL,
     ops INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, op_class, account_id)
+    PRIMARY KEY (op_class, day, account_id)
 );
 
 -- Idempotent upgrade for installs that created the table before ops existed.
@@ -79,31 +85,6 @@ SELECT haf_stats_app.apply_schema_migration(
 );
 
 GRANT SELECT ON haf_stats_backend.active_users_daily TO haf_stats_user;
-
--- Covering index for get_network_top_accounts' transaction_count branch, which scans
--- WHERE op_class = -1 AND day BETWEEN _from AND _to, GROUP BY account_id (#29 item 6).
--- The PK (day, op_class, account_id) leads with day, so that query range-scans every
--- op_class across the window. Leading with op_class (an equality key) + day (the range)
--- and INCLUDE-ing account_id/ops lets the branch satisfy itself with an index-only scan
--- of just the op_class = -1 slice. CONCURRENTLY + INVALID-leftover heal for the same
--- reason as idx_pe_post_day (process_content_stats): install_app.sh loads this file with
--- a plain psql -f (statement autocommit), and active_users_daily is large, so a plain
--- build on an already-populated upgrade would take an ACCESS EXCLUSIVE lock.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_index i
-        JOIN pg_class c ON c.oid = i.indexrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'haf_stats_backend'
-          AND c.relname = 'idx_aud_opclass_day'
-          AND NOT i.indisvalid
-    ) THEN
-        DROP INDEX haf_stats_backend.idx_aud_opclass_day;
-    END IF;
-END $$;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_aud_opclass_day
-ON haf_stats_backend.active_users_daily (op_class, day) INCLUDE (account_id, ops);
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.active_user_ops_daily (
     day DATE NOT NULL,
@@ -144,10 +125,15 @@ GRANT SELECT ON haf_stats_backend.active_users_period_counts TO haf_stats_user;
 -- by [_lo, _hi], exactly (re-aggregates active_users_daily and
 -- active_user_ops_daily). Passing NULL _hi keeps the old full-refresh behavior
 -- from _lo forward for one-time repairs on already-synced nodes. Daily distinct is
--- just COUNT(*) - the (day, op_class, account_id) PK already guarantees one row
+-- just COUNT(*) - the (op_class, day, account_id) PK already guarantees one row
 -- per account per day; week/month need COUNT(DISTINCT account_id). active_accounts
 -- comes from the membership table, operations from the additive op counter, joined
 -- per (period, op_class).
+--
+-- A period that starts before the first day active_users_daily still holds
+-- (daily_retention_floor, db/daily_retention.sql) is never restated: its rows are final
+-- and the members it would be recounted from are gone. So a refresh from genesis restates
+-- from that day on.
 -- ---------------------------------------------------------------------------
 
 -- A previous app version defined this as a 1-argument function. An in-place upgrade runs
@@ -165,6 +151,10 @@ RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    _floor CONSTANT DATE := (
+        SELECT f.kept_from FROM haf_stats_app.daily_retention_floor AS f
+        WHERE f.daily_table = 'active_users_daily'
+    );
     _week_lo DATE := DATE_TRUNC('week', _lo)::DATE;
     _week_hi DATE := CASE
         WHEN _hi IS NULL THEN NULL
@@ -176,6 +166,15 @@ DECLARE
         ELSE (DATE_TRUNC('month', _hi)::DATE + INTERVAL '1 month')::DATE
     END;
 BEGIN
+    -- The first day, week and month starting at or after the floor (GREATEST skips a NULL one).
+    _lo := GREATEST(_lo, _floor);
+    _week_lo := GREATEST(_week_lo,
+        CASE WHEN DATE_TRUNC('week', _floor)::DATE = _floor THEN _floor
+             ELSE (DATE_TRUNC('week', _floor) + INTERVAL '1 week')::DATE END);
+    _month_lo := GREATEST(_month_lo,
+        CASE WHEN DATE_TRUNC('month', _floor)::DATE = _floor THEN _floor
+             ELSE (DATE_TRUNC('month', _floor) + INTERVAL '1 month')::DATE END);
+
     -- day: distinct-per-day == row count of the membership PK
     INSERT INTO haf_stats_backend.active_users_period_counts (period_type, period, op_class, active_accounts, operations)
     SELECT 'day', COALESCE(a.period, o.period), COALESCE(a.op_class, o.op_class), COALESCE(a.acct, 0), COALESCE(o.ops, 0)
@@ -268,7 +267,8 @@ GRANT SELECT ON haf_stats_backend.active_users_account_monthly TO haf_stats_user
 -- Recompute every month touched by [_lo, _hi] exactly from active_users_daily, whole
 -- months from their first day (see refresh_financial_monthly for the identical
 -- rationale). Only op_class -1 is materialised (the sole consumer). REPLACE semantics;
--- NULL _hi restates from _lo forward for a one-time genesis backfill.
+-- NULL _hi restates from _lo forward for a one-time genesis backfill. Never a month before
+-- the first day active_users_daily still holds, as in refresh_active_users_periods.
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_active_users_account_monthly;
 CREATE OR REPLACE FUNCTION haf_stats_app.refresh_active_users_account_monthly(
     _lo DATE,
@@ -278,7 +278,13 @@ RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    _month_lo DATE := DATE_TRUNC('month', _lo)::DATE;
+    _floor CONSTANT DATE := (
+        SELECT f.kept_from FROM haf_stats_app.daily_retention_floor AS f
+        WHERE f.daily_table = 'active_users_daily'
+    );
+    _month_lo DATE := GREATEST(DATE_TRUNC('month', _lo)::DATE,
+        CASE WHEN DATE_TRUNC('month', _floor)::DATE = _floor THEN _floor
+             ELSE (DATE_TRUNC('month', _floor) + INTERVAL '1 month')::DATE END);
 BEGIN
     INSERT INTO haf_stats_backend.active_users_account_monthly (month, op_class, account_id, ops)
     SELECT DATE_TRUNC('month', au.day)::DATE, au.op_class, au.account_id, SUM(au.ops)::BIGINT
@@ -369,7 +375,7 @@ BEGIN
     ins_members AS (
         INSERT INTO haf_stats_backend.active_users_daily AS aud (day, op_class, account_id, ops)
         SELECT day, op_class, account_id, ops FROM membership
-        ON CONFLICT (day, op_class, account_id) DO UPDATE SET
+        ON CONFLICT (op_class, day, account_id) DO UPDATE SET
             ops = aud.ops + EXCLUDED.ops
         RETURNING 1
     ),
@@ -416,7 +422,8 @@ BEGIN
 -- one. Bounding _lo this tightly (vs the old genesis-ward scan) is the optimisation; _hi
 -- just caps the upper end at this batch's last day. Each period is still recomputed exactly
 -- from the membership/counter tables. A one-time full refresh remains available via
--- SELECT haf_stats_app.refresh_active_users_periods(<genesis day>, NULL).
+-- SELECT haf_stats_app.refresh_active_users_periods(<genesis day>, NULL), restating from the
+-- first day active_users_daily still holds (db/daily_retention.sql).
 IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     _refresh_lo_block := GREATEST(((_first_block - 1) / 1200) * 1200, 1);
     SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _refresh_lo_block;
@@ -429,7 +436,7 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         SELECT created_at::DATE INTO _first_day FROM hafd.blocks WHERE num = _first_block;
     END IF;
 
-    -- During massive sync, recorded instead (see defer_rollup_refresh, db/haf_stats_app.sql).
+    -- During massive sync, recorded instead (see defer_rollup_refresh, db/deferred_rollup_refreshes.sql).
     IF NOT haf_stats_app.defer_rollup_refresh('process_active_users', _first_day) THEN
         -- Per-refresh timings: see report_processor_timing (db/process_block_range.sql).
         _timed := current_setting('haf_stats.processor_timings', TRUE) = 'on';

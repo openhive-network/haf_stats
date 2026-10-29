@@ -310,10 +310,10 @@ $shim$;
 
 -- The upgrade branch of the guarded migrations actually ran. (#96)
 --
--- tests/ci_break_schema.sql undid all 16 guarded upgrades before install-again: twelve columns
+-- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: thirteen columns
 -- dropped, rc_estimated put back, account_financial_daily put back in its TEXT
 -- category/direction shape with one row, and both custom_json rollups put back on json_id TEXT
--- with one row each. Without break-schema only one of the 16 migration
+-- with one row each. Without break-schema only one of the 17 migration
 -- statements (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or
 -- a catalog test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
@@ -326,6 +326,7 @@ BEGIN
     FROM (
         VALUES
         ('haf_stats_backend.active_users_daily', 'ops', TRUE),
+        ('haf_stats_app.app_config', 'daily_retention_days', TRUE),
         ('haf_stats_backend.comment_registry', 'community', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', FALSE),
@@ -353,13 +354,13 @@ BEGIN
 
     -- ... and break-schema really did undo them on THIS database: every table it dropped a column
     -- from still carries the dropped attribute. Without this, a lane where break-schema never ran
-    -- would satisfy every assertion above.
+    -- would satisfy every assertion above. Not active_users_daily or account_custom_json_daily:
+    -- install-again rebuilt both on their retention window (#124), checked below.
     SELECT string_agg(t.rel, ', ') INTO _wrong
     FROM (
         VALUES
-        ('haf_stats_backend.active_users_daily'),
+        ('haf_stats_app.app_config'),
         ('haf_stats_backend.comment_registry'),
-        ('haf_stats_backend.account_custom_json_daily'),
         ('haf_stats_backend.network_op_daily'),
         ('haf_stats_backend.network_custom_json_daily'),
         ('haf_stats_backend.account_cohort_retention'),
@@ -394,11 +395,33 @@ BEGIN
     END IF;
 
     -- The custom_json rollups: converted in place, not recreated - break-schema's rows are kept,
-    -- under follow's hafd.custom_json_types id, and the keys and index are on the new column.
-    IF (SELECT string_agg(format('%s/%s/%s=%s', a.account_id, a.day, a.custom_json_type_id, a.op_count), ',')
-        FROM haf_stats_backend.account_custom_json_daily AS a)
-       IS DISTINCT FROM format('900902/2016-03-24/%s=3', (SELECT t.id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = 'follow')) THEN
-        RAISE EXCEPTION 'install: account_custom_json_daily does not hold break-schema''s follow row under follow''s custom_json_type_id';
+    -- under follow's hafd.custom_json_types id, and the keys and index are on the new column. The
+    -- per-account row's day is before the retention window (#124, the installs after seed-repair
+    -- are at block 5000, 2021-03-01, so the daily rows are kept from 2021-01-01 on): it was moved
+    -- to account_custom_json_monthly, and account_custom_json_daily replaced by its kept rows.
+    IF (SELECT string_agg(format('%s/%s/%s=%s', a.account_id, a.month, a.custom_json_type_id, a.op_count), ',')
+        FROM haf_stats_backend.account_custom_json_monthly AS a)
+       IS DISTINCT FROM format('900902/2016-03-01/%s=3', (SELECT t.id FROM hafd.custom_json_types AS t WHERE t.custom_json_id = 'follow'))
+       OR EXISTS (SELECT 1 FROM haf_stats_backend.account_custom_json_daily)
+       OR NOT has_table_privilege('haf_stats_user', 'haf_stats_backend.account_custom_json_daily', 'SELECT') THEN
+        RAISE EXCEPTION 'install: account_custom_json_monthly does not hold break-schema''s follow row under follow''s custom_json_type_id, or account_custom_json_daily still holds it';
+    END IF;
+    IF (SELECT string_agg(f.daily_table || '=' || f.kept_from, ',' ORDER BY f.daily_table) FROM haf_stats_app.daily_retention_floor AS f)
+       IS DISTINCT FROM 'account_custom_json_daily=2021-01-01,active_users_daily=2021-01-01' THEN
+        RAISE EXCEPTION 'install: the retention floors are %, not 2021-01-01 for both daily tables',
+            (SELECT string_agg(f.daily_table || '=' || f.kept_from, ',' ORDER BY f.daily_table) FROM haf_stats_app.daily_retention_floor AS f);
+    END IF;
+
+    -- active_users_daily: re-keyed on (op_class, day, account_id) without idx_aud_opclass_day,
+    -- holding only break-schema's row inside the window.
+    IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint AS c
+        WHERE c.conrelid = 'haf_stats_backend.active_users_daily'::REGCLASS AND c.contype = 'p')
+       IS DISTINCT FROM 'PRIMARY KEY (op_class, day, account_id)'
+       OR to_regclass('haf_stats_backend.idx_aud_opclass_day') IS NOT NULL
+       OR (SELECT string_agg(format('%s/%s/%s', a.account_id, a.day, a.op_class), ',') FROM haf_stats_backend.active_users_daily AS a)
+          IS DISTINCT FROM '900903/2021-02-15/-1'
+       OR NOT has_table_privilege('haf_stats_user', 'haf_stats_backend.active_users_daily', 'SELECT') THEN
+        RAISE EXCEPTION 'install: active_users_daily is not re-keyed on (op_class, day, account_id) with only its row inside the retention window';
     END IF;
     IF (SELECT string_agg(format('%s/%s=%s/%s', n.day, n.custom_json_type_id, n.op_count, n.op_bytes), ',')
         FROM haf_stats_backend.network_custom_json_daily AS n)
@@ -419,7 +442,7 @@ BEGIN
         RAISE EXCEPTION 'install: network_custom_json_daily''s id-leading index is not idx_ncj_custom_json_type_id_day on (custom_json_type_id, day)';
     END IF;
 
-    RAISE NOTICE 'install verified: install-again re-applied all 16 guarded upgrades (12 columns back, rc_estimated gone, account_financial_daily recreated compact and empty, both custom_json rollups converted to custom_json_type_id with their rows)';
+    RAISE NOTICE 'install verified: install-again re-applied all 17 guarded upgrades (13 columns back, rc_estimated gone, account_financial_daily recreated compact and empty, both custom_json rollups converted to custom_json_type_id with their rows) and rebuilt both daily tables on their retention window';
 END
 $upgraded$;
 

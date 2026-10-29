@@ -136,6 +136,25 @@ SELECT haf_stats_app.apply_schema_migration(
 
 GRANT SELECT ON haf_stats_backend.account_custom_json_daily TO haf_stats_user;
 
+-- The same rows at month grain, for the days before the retention window: account_custom_json_daily
+-- keeps only the window, and haf_stats_app.roll_up_account_custom_json (db/daily_retention.sql)
+-- moves each older month here once its rc_exact is final. rc is that month's RC as the endpoints
+-- price a day - rc_exact where the day's row had it, else the estimate at the rate effective that
+-- day - summed over its days when it was rolled up, so a later rate recalibration does not reprice
+-- it. exact_ops is how many of op_count were priced with rc_exact.
+CREATE TABLE IF NOT EXISTS haf_stats_backend.account_custom_json_monthly (
+    account_id INT NOT NULL,
+    month DATE NOT NULL,
+    custom_json_type_id SMALLINT NOT NULL,
+    op_count BIGINT NOT NULL,
+    op_bytes BIGINT NOT NULL,
+    rc NUMERIC NOT NULL,
+    exact_ops BIGINT NOT NULL,
+    PRIMARY KEY (account_id, month, custom_json_type_id)
+);
+
+GRANT SELECT ON haf_stats_backend.account_custom_json_monthly TO haf_stats_user;
+
 -- ---------------------------------------------------------------------------
 -- The batch's custom_json ops with an id, as both custom_json rollups (account_custom_json_rows
 -- below, network_custom_json_rows in process_network_custom_json.sql) group and sum them: day,

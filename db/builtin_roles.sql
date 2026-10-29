@@ -329,5 +329,8 @@ BEGIN
     IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
         GRANT SELECT ON hivemind_app.hive_state TO haf_stats_owner;
     END IF;
+    IF to_regclass('hivemind_app.hive_votes') IS NOT NULL THEN
+        GRANT SELECT ON hivemind_app.hive_votes TO haf_stats_owner;
+    END IF;
 END
 $$;

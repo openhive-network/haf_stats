@@ -21,7 +21,7 @@ refresh runs inside its processor, so its seconds are also part of that processo
 
 During massive sync the processors skip their refreshes and record them instead, and
 haf_stats_app.run_deferred_rollup_refreshes() runs each once afterwards
-(db/haf_stats_app.sql). DEFERRED_LOG is that call's output, with one
+(db/deferred_rollup_refreshes.sql). DEFERRED_LOG is that call's output, with one
 `haf_stats_deferred_refresh_timing {...}` line per refresh it ran, and D its wall time;
 the report then holds each one's seconds as well. They are outside the sync wall time.
 """
@@ -54,6 +54,7 @@ PROCESSORS: tuple[str, ...] = (
     "process_network_ops",
     "process_network_custom_json",
     "process_witness_blocks",
+    "process_daily_retention",
 )
 
 #: Each rollup/period/retention refresh, and the processor it runs inside. A refresh runs

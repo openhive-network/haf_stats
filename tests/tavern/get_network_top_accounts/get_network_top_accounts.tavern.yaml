@@ -63,6 +63,9 @@ stages:
         extra_kwargs:
           pattern_file: "author_rewards_multimonth.pat.json"
 
+  # The replay ends in September 2016, so active_users_daily keeps its days from 2016-08-01 on
+  # (#124): this range, before the window, is widened to whole months, 2016-04-01..2016-06-30,
+  # and answers as that range does (the next stage).
   - name: GET /rpc/get_network_top_accounts transaction-count across months
     request:
       url: "{api_url}/rpc/get_network_top_accounts"
@@ -71,6 +74,24 @@ stages:
         metric: "transaction_count"
         from_date: "2016-04-15"
         to_date: "2016-06-20"
+        limit_count: "5"
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+      verify_response_with:
+        function: validate_response:compare_rest_response_with_pattern
+        extra_kwargs:
+          pattern_file: "transaction_count_multimonth.pat.json"
+
+  - name: GET /rpc/get_network_top_accounts transaction-count over the same whole months
+    request:
+      url: "{api_url}/rpc/get_network_top_accounts"
+      method: GET
+      params:
+        metric: "transaction_count"
+        from_date: "2016-04-01"
+        to_date: "2016-06-30"
         limit_count: "5"
     response:
       status_code: 200

@@ -35,6 +35,7 @@ services:
       - >-
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_setup.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /schema_migration.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /deferred_rollup_refreshes.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_block_range.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /process_account_cohorts.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /cohort_fixture.sql &&
@@ -77,6 +78,8 @@ services:
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_custom_json_batch_equality.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_id_hash_distinct.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -v acj_file=/process_custom_json.sql -v ncj_file=/process_network_custom_json.sql -f /ci_custom_json_type_migration.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /daily_retention.sql &&
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_daily_retention.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /op_type_registry.sql &&
         PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_op_types.sql &&
         sh /ci_content_oracle.sh
@@ -111,10 +114,18 @@ services:
       # #120: the json_id TEXT -> custom_json_type_id upgrade of both custom_json rollups, by
       # loading the two processor files above over tables in the old shape.
       - ../tests/ci_custom_json_type_migration.sql:/ci_custom_json_type_migration.sql:ro
+      # #124: the retention window of the per-account daily rows, and the in-place conversion of a
+      # database from before it (which here re-keys ci_setup.sql's active_users_daily). Its test
+      # runs the real processors, refreshes and endpoints over a synthetic history.
+      - ../db/daily_retention.sql:/daily_retention.sql:ro
+      - ../tests/ci_daily_retention.sql:/ci_daily_retention.sql:ro
       - ../tests/ci_privileges.sql:/ci_privileges.sql:ro
       # The processors' schema-upgrade helper (#96). This lane loads the processor files
       # directly, without db/haf_stats_app.sql, so it needs this one explicitly.
       - ../db/schema_migration.sql:/schema_migration.sql:ro
+      # The massive-sync deferral and the per-batch call that runs it, out of db/haf_stats_app.sql
+      # so that tests/ci_hivemind_wait_locks.sql can run the real batch start (#126).
+      - ../db/deferred_rollup_refreshes.sql:/deferred_rollup_refreshes.sql:ro
       - ../db/process_block_range.sql:/process_block_range.sql:ro
       - ../tests/cohort_fixture.sql:/cohort_fixture.sql:ro
       # prepare_batch_authored_ops' second run through the per-row authority wrapper, which only

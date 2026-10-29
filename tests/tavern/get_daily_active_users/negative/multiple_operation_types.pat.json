@@ -1,0 +1,6 @@
+{
+  "code": "22023",
+  "details": null,
+  "hint": "Ask for one of post, comment, vote, transfer, custom_json, or all: active accounts are counted per category, and a union of categories cannot be derived from those counts",
+  "message": "operation_types names more than one category: post,vote"
+}

@@ -3,10 +3,11 @@
 -- Without this, CI ran one guarded statement out of 14: comment_registry.community's
 -- ADD COLUMN, which every fresh install needs because its CREATE TABLE lacks the column. The other
 -- 13 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
--- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 16 (#44 added three, #120 two);
--- install-again has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
+-- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 17 (#44 added three, #120 two,
+-- #124 one); install-again has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
 --
---  12 dropped columns   active_users_daily.ops, comment_registry.community,
+--  13 dropped columns   active_users_daily.ops, comment_registry.community,
+--                       app_config.daily_retention_days (#124),
 --                       account_custom_json_daily.op_bytes,
 --                       rc_exact on network_op_daily, network_custom_json_daily and
 --                       account_custom_json_daily (#44),
@@ -22,6 +23,13 @@
 --                       json_id-leading index): the upgrade must convert them in place, the row
 --                       kept under follow's hafd.custom_json_types id. Re-created FIRST, so the
 --                       column edits below apply to these tables, as they did to the old shape.
+--                       The follow row's day is before the retention window of the installs
+--                       after seed-repair (db/daily_retention.sql, #124), so install-again also
+--                       moves it to account_custom_json_monthly.
+--   1 re-created table  active_users_daily keyed (day, op_class, account_id) with
+--                       idx_aud_opclass_day, as before #124, holding a row from before the
+--                       retention window and one inside it: install-again must re-key it on
+--                       (op_class, day, account_id), keeping only the second.
 --
 -- Plus two ROLE edges (#88): haf_stats_user is put into hive_applications_group, which is how
 -- testapi's role looked -- an unmerged revision of db/builtin_roles.sql (9a77508) created it
@@ -67,9 +75,22 @@ CREATE TABLE haf_stats_backend.network_custom_json_daily (
 CREATE INDEX idx_ncj_json_id_day ON haf_stats_backend.network_custom_json_daily (json_id, day);
 INSERT INTO haf_stats_backend.network_custom_json_daily (day, json_id, op_count, op_bytes)
 VALUES ('2016-03-24', 'follow', 4, 40);
+DROP TABLE haf_stats_backend.active_users_daily;
+CREATE TABLE haf_stats_backend.active_users_daily (
+    day DATE NOT NULL,
+    op_class SMALLINT NOT NULL,
+    account_id INT NOT NULL,
+    ops INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, op_class, account_id)
+);
+-- Without its INCLUDE of ops: the DROP COLUMN ops below would drop an index that names it.
+CREATE INDEX idx_aud_opclass_day ON haf_stats_backend.active_users_daily (op_class, day) INCLUDE (account_id);
+INSERT INTO haf_stats_backend.active_users_daily (day, op_class, account_id, ops)
+VALUES ('2016-03-24', -1, 900903, 1), ('2021-02-15', -1, 900903, 2);
 RESET ROLE;
 
 ALTER TABLE haf_stats_backend.active_users_daily DROP COLUMN ops;
+ALTER TABLE haf_stats_app.app_config DROP COLUMN daily_retention_days;
 ALTER TABLE haf_stats_backend.comment_registry DROP COLUMN community;
 ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN op_bytes;
 ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN rc_exact;
@@ -111,6 +132,7 @@ BEGIN
     FROM (
         VALUES
         ('haf_stats_backend.active_users_daily', 'ops', FALSE),
+        ('haf_stats_app.app_config', 'daily_retention_days', FALSE),
         ('haf_stats_backend.comment_registry', 'community', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', TRUE),
@@ -149,6 +171,13 @@ BEGIN
        OR to_regclass('haf_stats_backend.idx_ncj_json_id_day') IS NULL THEN
         RAISE EXCEPTION 'break-schema: the custom_json rollups are not back in their json_id TEXT shape with the rows install-again must convert';
     END IF;
+    IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint AS c
+        WHERE c.conrelid = 'haf_stats_backend.active_users_daily'::REGCLASS AND c.contype = 'p')
+       IS DISTINCT FROM 'PRIMARY KEY (day, op_class, account_id)'
+       OR to_regclass('haf_stats_backend.idx_aud_opclass_day') IS NULL
+       OR (SELECT count(*) FROM haf_stats_backend.active_users_daily WHERE account_id = 900903) <> 2 THEN
+        RAISE EXCEPTION 'break-schema: active_users_daily is not back on its (day, op_class, account_id) key with idx_aud_opclass_day and two rows';
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM hafd.custom_json_types WHERE custom_json_id = 'follow') THEN
         RAISE EXCEPTION 'break-schema: hafd.custom_json_types has no follow, so install-again could not convert the rows';
     END IF;
@@ -164,6 +193,6 @@ BEGIN
         RAISE EXCEPTION 'break-schema: haf_stats_user has no direct hive_applications_owner_group edge, so that arm of the revoke goes untested';
     END IF;
 
-    RAISE NOTICE 'break-schema: all 16 guarded upgrades have work to do again (12 columns dropped, rc_estimated back, account_financial_daily in its TEXT shape with one row, both custom_json rollups keyed on json_id TEXT with one row each)';
+    RAISE NOTICE 'break-schema: all 17 guarded upgrades have work to do again (13 columns dropped, rc_estimated back, account_financial_daily in its TEXT shape with one row, both custom_json rollups keyed on json_id TEXT with one row each), and active_users_daily is on its pre-#124 key';
 END;
 $check$;

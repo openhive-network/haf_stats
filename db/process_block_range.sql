@@ -440,8 +440,11 @@ BEGIN
     -- Reads hafd.blocks and the staged producer_missed ops, so it has no ordering dependency on
     -- any processor above it.
     PERFORM haf_stats_app.process_witness_blocks(_first_block, _last_block);
+    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_witness_blocks', _first_block, _last_block, _t, '{producer_missed_operation}', NULL); END IF;
+    -- Last: it can restage this batch's temp tables for an older day (db/daily_retention.sql).
+    PERFORM haf_stats_app.process_daily_retention(_first_block, _last_block);
     IF _timed THEN
-        PERFORM haf_stats_app.report_processor_timing('process_witness_blocks', _first_block, _last_block, _t, '{producer_missed_operation}', NULL);
+        PERFORM haf_stats_app.report_processor_timing('process_daily_retention', _first_block, _last_block, _t, '{}', NULL);
         PERFORM haf_stats_app.report_operation_counts(_first_block, _last_block);
     END IF;
 END;

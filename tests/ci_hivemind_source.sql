@@ -7,8 +7,13 @@
 --      deployment that processed blocks without a record as internal, refuses a switch on one
 --      that has processed blocks unless asked to, and refuses hivemind it cannot read.
 --   2. Equality: the content processors over the same blocks produce the same content volume,
---      account content, community activity, author cohorts and engagement from either source,
---      and the hivemind source writes no comment_registry row.
+--      account content, community activity, author cohorts, touched engagement days and
+--      engagement rollup (engagement_period_counts) from either source, and the hivemind source
+--      writes no comment_registry or post_engagement row. An upgraded hivemind deployment's
+--      post_engagement is emptied once the rollup is rebuilt from hivemind, to the same rows.
+--      Outside a batch, the rollup is computed from hivemind only once hivemind has reached every
+--      processed block: before that, the full rebuild and the deferred drain leave the drain
+--      recorded for the next batch's wait, and run once hivemind is there, to the same rows (#126).
 --   3. The clamp: while hivemind has reached only part of a range, none of it is processed;
 --      once hivemind has reached all of it, it is processed as one range. Waiting first and
 --      reading after is what keeps the wait from holding locks on hivemind's tables (#118;
@@ -111,6 +116,34 @@ $select$;
 -- 2. Equality
 -- ---------------------------------------------------------------------------
 
+-- Votes for the engagement rollup, which the hivemind source reads from hive_votes rather than
+-- from these ops: each hive_votes row below is what hivemind keeps for the ops beside it. bob's
+-- and alice's single votes, carol's vote and later edit (two ops that count), dave's vote and
+-- unvote (one), a vote on a comment (no post counts it), and votes on alice/p4's re-creation and
+-- on grace/g1's first creation (the post it counts for keeps its first day).
+INSERT INTO hafd.operations (id, op_type_id, body_value)
+VALUES
+    (hafd.operation_id(37500011, 2), 0, '{"voter": "bob", "author": "alice", "permlink": "p1", "weight": 10000}'),
+    (hafd.operation_id(37500012, 2), 0, '{"voter": "carol", "author": "alice", "permlink": "p1", "weight": 10000}'),
+    (hafd.operation_id(37500016, 2), 0, '{"voter": "alice", "author": "bob", "permlink": "p2", "weight": 10000}'),
+    (hafd.operation_id(37500020, 2), 0, '{"voter": "bob", "author": "alice", "permlink": "c3", "weight": 10000}'),
+    (hafd.operation_id(37500020, 3), 0, '{"voter": "carol", "author": "alice", "permlink": "p4", "weight": 10000}'),
+    (hafd.operation_id(37500021, 2), 0, '{"voter": "dave", "author": "alice", "permlink": "p1", "weight": 10000}'),
+    (hafd.operation_id(37500022, 2), 0, '{"voter": "carol", "author": "alice", "permlink": "p1", "weight": 5000}'),
+    (hafd.operation_id(37500023, 2), 0, '{"voter": "dave", "author": "alice", "permlink": "p1", "weight": 0}'),
+    (hafd.operation_id(37500036, 2), 0, '{"voter": "erin", "author": "grace", "permlink": "g1", "weight": 10000}');
+
+INSERT INTO hivemind_app.hive_votes
+    (id, post_id, voter_id, author_id, permlink_id, vote_percent, num_changes, block_num)
+VALUES
+    (1, 1,  47003, 47002, 1,  10000, 0, 37500011),   -- bob -> alice/p1
+    (2, 1,  47004, 47002, 1,  5000,  1, 37500022),   -- carol -> alice/p1, edited
+    (3, 5,  47002, 47003, 5,  10000, 0, 37500016),   -- alice -> bob/p2
+    (4, 4,  47003, 47002, 4,  10000, 0, 37500020),   -- bob -> alice/c3 (a comment)
+    (5, 8,  47004, 47002, 7,  10000, 0, 37500020),   -- carol -> alice/p4 (live copy)
+    (6, 1,  47005, 47002, 1,  0,     1, 37500023),   -- dave -> alice/p1, unvoted
+    (7, 15, 47007, 47009, 12, 10000, 0, 37500036);   -- erin -> grace/g1 (first copy)
+
 -- Everything the two runs write for the fixture's accounts (47001-47010) and days.
 CREATE FUNCTION pg_temp.ci_reset_content()
 RETURNS VOID
@@ -123,6 +156,7 @@ AS $fn$
     DELETE FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47010;
     DELETE FROM haf_stats_backend.post_engagement WHERE author_id BETWEEN 47001 AND 47010;
     DELETE FROM haf_stats_backend.engagement_touched_days;
+    DELETE FROM haf_stats_backend.engagement_period_counts WHERE period >= DATE '2019-09-30';
     DELETE FROM haf_stats_backend.author_cohort_members WHERE account_id BETWEEN 47001 AND 47010;
 $fn$;
 
@@ -141,10 +175,13 @@ $fn$;
 
 CREATE TEMP TABLE ci_output (source TEXT NOT NULL, tbl TEXT NOT NULL, row_text TEXT NOT NULL);
 
+-- What the batches wrote, then -- the batches stay inside one 1200-block bucket, so the boundary
+-- refresh never fires -- the engagement rollup the refresh makes of the creation-days they staged.
 CREATE FUNCTION pg_temp.ci_capture(_source TEXT)
 RETURNS VOID
-LANGUAGE sql
+LANGUAGE plpgsql
 AS $fn$
+BEGIN
     INSERT INTO ci_output (source, tbl, row_text)
     SELECT _source, 'network_content_daily', t::TEXT FROM haf_stats_backend.network_content_daily t
     WHERE t.day IN (DATE '2019-10-01', DATE '2019-10-02')
@@ -158,19 +195,25 @@ AS $fn$
     SELECT _source, 'account_community_daily', t::TEXT FROM haf_stats_backend.account_community_daily t
     WHERE t.account_id BETWEEN 47001 AND 47010
     UNION ALL
-    SELECT _source, 'post_engagement', t::TEXT FROM haf_stats_backend.post_engagement t
-    WHERE t.author_id BETWEEN 47001 AND 47010
-    UNION ALL
     SELECT _source, 'engagement_touched_days', t::TEXT FROM haf_stats_backend.engagement_touched_days t
     UNION ALL
     SELECT _source, 'author_cohort_members', t::TEXT FROM haf_stats_backend.author_cohort_members t
     WHERE t.account_id BETWEEN 47001 AND 47010;
+
+    PERFORM haf_stats_app.refresh_engagement_touched();
+    INSERT INTO ci_output (source, tbl, row_text)
+    SELECT _source, 'engagement_period_counts', t::TEXT FROM haf_stats_backend.engagement_period_counts t
+    WHERE t.period >= DATE '2019-09-30';
+END;
 $fn$;
 
 DELETE FROM haf_stats_app.content_source_config;
 SELECT pg_temp.ci_reset_content();
 SELECT pg_temp.ci_run_content();
 SELECT pg_temp.ci_capture('internal');
+-- Kept for the upgrade check below.
+CREATE TEMP TABLE ci_internal_post_engagement AS
+SELECT * FROM haf_stats_backend.post_engagement WHERE author_id BETWEEN 47001 AND 47010;
 
 INSERT INTO haf_stats_app.content_source_config (source) VALUES ('hivemind');
 SELECT pg_temp.ci_reset_content();
@@ -185,7 +228,7 @@ DECLARE
 BEGIN
     -- Non-vacuous: the internal run produced every output this compares.
     FOREACH _tbl IN ARRAY ARRAY['network_content_daily', 'network_author_daily', 'account_content_daily',
-                                'account_community_daily', 'post_engagement', 'engagement_touched_days',
+                                'account_community_daily', 'engagement_touched_days', 'engagement_period_counts',
                                 'author_cohort_members'] LOOP
         IF NOT EXISTS (SELECT 1 FROM ci_output WHERE source = 'internal' AND tbl = _tbl) THEN
             RAISE EXCEPTION 'hivemind source: the internal run wrote no % row for the fixture; the comparison would prove nothing', _tbl;
@@ -196,6 +239,15 @@ BEGIN
                    AND row_text = '(2019-10-01,6,5,1)') THEN
         RAISE EXCEPTION 'hivemind source: the internal run''s 2019-10-01 content volume is not 6 posts, 5 comments, 1 edit: %',
             (SELECT string_agg(row_text, ' ') FROM ci_output WHERE source = 'internal' AND tbl = 'network_content_daily');
+    END IF;
+    -- The engagement every case above adds up to (posts, votes, replies, posts with no vote, posts
+    -- with no reply): 10-01 holds alice/p1 (4 counted votes, 3 replies, frank's f1 among them),
+    -- bob/p2, carol/p3, alice/p4 and erin/p5 (its first day); 10-02 frank/f1 and grace/g1 (2 replies,
+    -- one under each of its creations).
+    SELECT string_agg(row_text, ' ' ORDER BY row_text) INTO _diff
+    FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts';
+    IF _diff IS DISTINCT FROM '(day,2019-10-01,5,6,4,2,3) (day,2019-10-02,2,1,2,1,1) (month,2019-10-01,7,7,6,3,4) (week,2019-09-30,7,7,6,3,4)' THEN
+        RAISE EXCEPTION 'hivemind source: the internal run''s engagement rollup is not the fixture''s: %', _diff;
     END IF;
 
     SELECT string_agg(format('%s %s: %s', d.side, d.tbl, d.row_text), E'\n  ' ORDER BY d.tbl, d.side, d.row_text), COUNT(*)
@@ -216,11 +268,122 @@ BEGIN
     IF EXISTS (SELECT 1 FROM haf_stats_backend.comment_registry WHERE author_id BETWEEN 47001 AND 47010) THEN
         RAISE EXCEPTION 'hivemind source: comment_registry has rows after a hivemind-sourced run; it must stay empty';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM ci_internal_post_engagement) THEN
+        RAISE EXCEPTION 'hivemind source: the internal run wrote no post_engagement row; the check below would prove nothing';
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.post_engagement WHERE author_id BETWEEN 47001 AND 47010) THEN
+        RAISE EXCEPTION 'hivemind source: post_engagement has rows after a hivemind-sourced run; it must stay empty';
+    END IF;
 
-    RAISE NOTICE 'hivemind source: % output rows identical to the internal source (content volume, account content, community activity, author cohorts, engagement); comment_registry untouched',
+    RAISE NOTICE 'hivemind source: % output rows identical to the internal source (content volume, account content, community activity, author cohorts, engagement rollup); comment_registry and post_engagement untouched',
         (SELECT COUNT(*) FROM ci_output WHERE source = 'hivemind');
 END
 $equal$;
+
+-- The upgrade: a hivemind deployment that still holds post_engagement (here, the internal run's
+-- rows) gets the rollup rebuilt from hivemind, to the same rows, and the table emptied. On the
+-- internal source, and while hivemind is not usable, it is left alone. The rollup is spoiled
+-- first, so a rebuild that never ran fails.
+INSERT INTO haf_stats_backend.post_engagement SELECT * FROM ci_internal_post_engagement;
+UPDATE haf_stats_backend.engagement_period_counts SET sum_votes = -1 WHERE period >= DATE '2019-09-30';
+
+DO $retire$
+DECLARE
+    _diff TEXT;
+BEGIN
+    UPDATE haf_stats_app.content_source_config SET source = 'internal';
+    PERFORM haf_stats_app.retire_post_engagement();
+    IF (SELECT COUNT(*) FROM haf_stats_backend.post_engagement WHERE author_id BETWEEN 47001 AND 47010)
+       <> (SELECT COUNT(*) FROM ci_internal_post_engagement) THEN
+        RAISE EXCEPTION 'hivemind source: retire_post_engagement emptied post_engagement on the internal source';
+    END IF;
+
+    -- hivemind behind the processed blocks: kept, without waiting.
+    UPDATE haf_stats_app.content_source_config SET source = 'hivemind';
+    UPDATE hafd.contexts SET current_block_num = 0 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.retire_post_engagement();
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_backend.post_engagement) THEN
+        RAISE EXCEPTION 'hivemind source: retire_post_engagement emptied post_engagement while hivemind was not usable';
+    END IF;
+    IF current_setting('haf_stats.hivemind_wait_timeout', TRUE) IS DISTINCT FROM '' THEN
+        RAISE EXCEPTION 'hivemind source: retire_post_engagement left haf_stats.hivemind_wait_timeout at %',
+            current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+    END IF;
+    UPDATE hafd.contexts SET current_block_num = 37500045 WHERE name = 'hivemind_app';
+
+    PERFORM haf_stats_app.retire_post_engagement();
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.post_engagement) THEN
+        RAISE EXCEPTION 'hivemind source: retire_post_engagement left post_engagement rows on the hivemind source';
+    END IF;
+
+    SELECT string_agg(format('%s: %s', d.side, d.row_text), ', ' ORDER BY d.side, d.row_text) INTO _diff
+    FROM (
+        (SELECT 'expected' AS side, row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts'
+         EXCEPT ALL
+         SELECT 'expected', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30')
+        UNION ALL
+        (SELECT 'got', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30'
+         EXCEPT ALL
+         SELECT 'got', row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts')
+    ) AS d;
+    IF _diff IS NOT NULL THEN
+        RAISE EXCEPTION 'hivemind source: the rollup retire_post_engagement rebuilt differs from the internal source''s: %', _diff;
+    END IF;
+
+    RAISE NOTICE 'hivemind source: retire_post_engagement rebuilt the engagement rollup from hivemind and emptied post_engagement; a no-op on the internal source';
+END
+$retire$;
+
+-- Outside a batch (install_app.sh's empty-rollup backfill and deferred refreshes), with hivemind
+-- behind the processed blocks: nothing is read from it, and the drain stays recorded for the next
+-- batch, which runs it after its hivemind wait. Once hivemind is there, the drain runs.
+DO $install$
+DECLARE
+    _diff TEXT;
+BEGIN
+    UPDATE hafd.contexts SET current_block_num = 0 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.refresh_engagement_full();
+    IF NOT EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait')
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days) THEN
+        RAISE EXCEPTION 'hivemind source: refresh_engagement_full, with hivemind behind, did not leave its days staged and the drain recorded';
+    END IF;
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.engagement_period_counts) THEN
+        RAISE EXCEPTION 'hivemind source: refresh_engagement_full computed the rollup while hivemind was behind the processed blocks';
+    END IF;
+    PERFORM haf_stats_app.run_deferred_engagement_refresh();
+    IF EXISTS (SELECT 1 FROM haf_stats_backend.engagement_period_counts)
+       OR NOT EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait') THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh ran while hivemind was behind the processed blocks';
+    END IF;
+    IF current_setting('haf_stats.hivemind_wait_timeout', TRUE) IS DISTINCT FROM '' THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh left haf_stats.hivemind_wait_timeout at %',
+            current_setting('haf_stats.hivemind_wait_timeout', TRUE);
+    END IF;
+
+    UPDATE hafd.contexts SET current_block_num = 37500045 WHERE name = 'hivemind_app';
+    PERFORM haf_stats_app.run_deferred_engagement_refresh();
+    IF EXISTS (SELECT 1 FROM haf_stats_app.deferred_rollup_refreshes WHERE processor = 'engagement_after_hivemind_wait')
+       OR EXISTS (SELECT 1 FROM haf_stats_backend.engagement_touched_days) THEN
+        RAISE EXCEPTION 'hivemind source: run_deferred_engagement_refresh did not drain once hivemind had reached the processed blocks';
+    END IF;
+
+    SELECT string_agg(format('%s: %s', d.side, d.row_text), ', ' ORDER BY d.side, d.row_text) INTO _diff
+    FROM (
+        (SELECT 'expected' AS side, row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts'
+         EXCEPT ALL
+         SELECT 'expected', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30')
+        UNION ALL
+        (SELECT 'got', t::TEXT FROM haf_stats_backend.engagement_period_counts t WHERE t.period >= DATE '2019-09-30'
+         EXCEPT ALL
+         SELECT 'got', row_text FROM ci_output WHERE source = 'internal' AND tbl = 'engagement_period_counts')
+    ) AS d;
+    IF _diff IS NOT NULL THEN
+        RAISE EXCEPTION 'hivemind source: the rollup the deferred drain computed differs from the internal source''s: %', _diff;
+    END IF;
+
+    RAISE NOTICE 'hivemind source: outside a batch the engagement rollup waits for hivemind to reach the processed blocks, then comes out the same';
+END
+$install$;
 
 -- ---------------------------------------------------------------------------
 -- 3. The clamp. The per-range body is replaced, for this transaction, by one that records the
