@@ -530,8 +530,10 @@ $$;
 -- The code is in class 55, "object not in prerequisite state". psycopg2 has no exception of
 -- its own for 55R23 and raises its class's, OperationalError -- one of the two that
 -- haf_app_driver.py retries: it logs "database connection problem: <this message>", reconnects
--- and calls hive.app_next_iteration again after --retry-delay (5 s). Any other error ends the
--- driver. tests/ci_driver_hivemind_retry.py runs the shipped driver against it.
+-- and calls hive.app_next_iteration again after --retry-delay (5 s). A driver with
+-- RETRY_LATER_SQLSTATE (common-ci-configuration!419) retries 55R23 on the same connection
+-- instead, logging the wait once. Any other error ends the driver.
+-- tests/ci_driver_hivemind_retry.py runs the shipped driver against it.
 DROP FUNCTION IF EXISTS haf_stats_app.require_content_source;
 CREATE OR REPLACE FUNCTION haf_stats_app.require_content_source(_first_block INT, _last_block INT)
 RETURNS VOID

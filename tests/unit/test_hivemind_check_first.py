@@ -1,7 +1,8 @@
 """Both block drivers check hivemind before anything else in the batch runs (#123).
 
 While hivemind is behind, the batch is rolled back and asked for again -- every 5 s under
-haf_app_driver.py, every second in the legacy loop. Anything placed before the check runs
+haf_app_driver.py (1 s doubling to 5 s with common-ci-configuration!419), every second in
+the legacy loop. Anything placed before the check runs
 on every one of those tries and is then thrown away: prepare_rollup_refreshes, outside
 massive sync, can rebuild whole rollups. tests/ci_driver_hivemind_retry.py shows the check
 works; it cannot see where in the procedure it sits, so this pins the order.

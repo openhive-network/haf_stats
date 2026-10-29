@@ -164,7 +164,7 @@ def run_driver(module, stop_after_a_range=False):
     the stub has no application registry to read. By default the second connect -- the
     retry's -- asks the driver to stop, so run() returns once it has reconnected, and so does
     the RETRIES-th try, for a driver that retries on the same connection; with
-    stop_after_a_range it stops once one range has been processed and committed."""
+    stop_after_a_range it also stops once one range has been processed and committed."""
 
     class Probe(module.Driver):
         connects = 0
@@ -185,7 +185,9 @@ def run_driver(module, stop_after_a_range=False):
 
         def iterate(self):
             self.tries += 1
-            if self.tries >= RETRIES and not stop_after_a_range:
+            # also with stop_after_a_range: its range goes through on the first try, and a
+            # regression that kept it "behind" then fails instead of hanging the lane
+            if self.tries >= RETRIES:
                 self.stop_requested = True
             blocks = super().iterate()
             if blocks is not None:
@@ -299,7 +301,9 @@ def main() -> int:
         # 2. The shipped driver retries it.
         module = load_driver()
         before = iterations(cur)
+        started = time.monotonic()
         probe, rc, raised, log = run_driver(module)
+        took = time.monotonic() - started
         print(log, end="")
         check(raised is None and rc == 0,
               f"the driver did not exit on 55R23 (run() returned {rc}, raised {raised!r})")
@@ -308,8 +312,11 @@ def main() -> int:
             print("     (driver with RETRY_LATER_SQLSTATE: retries on the same connection)", flush=True)
             check(probe.connects == 1, f"the driver retried on the same connection (connects: {probe.connects})")
             check(tries == RETRIES, f"{RETRIES} tries before the probe stopped it ({tries})")
-            check(log.count("not ready, retrying") == 1 and f": haf_stats: {behind}" in log,
-                  "the driver logged the wait once, with haf_stats' message")
+            check(log.count("not ready, retrying") == 1
+                  and f"blocks {first}..{last} not ready, retrying: haf_stats: {behind}" in log,
+                  "the driver logged the wait once, naming the range, with haf_stats' message")
+            # --poll-interval 1.0 here: a sleep after each of the tries but the last
+            check(took >= RETRIES - 1, f"the driver slept between tries ({RETRIES} tries in {took:.1f} s)")
             check("database connection problem" not in log and "reconnecting" not in log,
                   "the driver logged no connection problem")
         else:
