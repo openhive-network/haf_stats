@@ -224,7 +224,9 @@ records the earliest day it would have refreshed from instead
 (`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
 refresh once from that day, before processing its blocks. On the hivemind content source the
 engagement rollup is the exception: its refresh reads hivemind, which a batch may read only after
-it has waited for hivemind (#118), so that batch runs it after the wait instead. `install_app.sh`
+process_content_stats' hivemind guard (`wait_for_hivemind`, #118), so that batch runs it after
+the guard instead. The guard normally returns at once, since the block drivers start a batch only
+once hivemind has reached it (#123). `install_app.sh`
 does the same over a context already past massive sync, the engagement refresh only when hivemind
 has reached every processed block. A sync stopped while still in massive sync (e.g.
 `--stop-at-block`) leaves them empty, so the period, monthly and retention endpoints answer

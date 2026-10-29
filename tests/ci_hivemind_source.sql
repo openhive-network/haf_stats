@@ -336,7 +336,7 @@ $retire$;
 
 -- Outside a batch (install_app.sh's empty-rollup backfill and deferred refreshes), with hivemind
 -- behind the processed blocks: nothing is read from it, and the drain stays recorded for the next
--- batch, which runs it after its hivemind wait. Once hivemind is there, the drain runs.
+-- batch, which starts only once hivemind has reached it. Once hivemind is there, the drain runs.
 DO $install$
 DECLARE
     _diff TEXT;

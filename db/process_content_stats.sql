@@ -1161,14 +1161,16 @@ $$;
 -- source waits for it), so a refresh may already include a vote or reply from a block the
 -- processor has yet to reach; that block re-stages the day, so the next refresh restates it.
 --
--- So on the hivemind source a refresh reads hivemind only after a hivemind wait in its own
--- transaction (#118, #126): inside a batch after process_content_stats' wait_for_hivemind, and
--- outside one only once hivemind_unusable_reason() finds hivemind usable through every processed
--- block. Where neither holds -- the deferred drain at the start of a batch
--- (run_deferred_rollup_refreshes, db/deferred_rollup_refreshes.sql), or an install while
+-- So on the hivemind source a refresh reads hivemind only after a hivemind check in its own
+-- transaction (#118, #126): inside a batch after process_content_stats' guard,
+-- wait_for_hivemind, and outside one only once hivemind_unusable_reason() finds hivemind usable
+-- through every processed block. Where that order cannot be kept -- the deferred drain at the
+-- start of a batch (run_deferred_rollup_refreshes, db/deferred_rollup_refreshes.sql), whose
+-- hive_posts locks would be held through the later guard (the block drivers' pre-check, #123,
+-- makes the guard return at once, but it still waits if hivemind goes back), or an install while
 -- hivemind is behind -- the drain is recorded in deferred_rollup_refreshes as
 -- 'engagement_after_hivemind_wait', with the creation-days left staged, and the next batch's
--- process_content_stats runs it after its wait (drain_deferred_engagement_refresh).
+-- process_content_stats runs it after the guard (drain_deferred_engagement_refresh).
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_full;
@@ -1192,7 +1194,8 @@ BEGIN
         WHERE ncd.posts > 0
         ON CONFLICT (day) DO NOTHING;
 
-        -- Not over blocks hivemind has yet to write: left to the next batch, after its wait.
+        -- Not over blocks hivemind has yet to write: left to the next batch, which starts only
+        -- once hivemind has reached it.
         _unusable := haf_stats_app.hivemind_unusable_reason();
         IF _unusable IS NOT NULL THEN
             INSERT INTO haf_stats_app.deferred_rollup_refreshes (processor, dirty_from)
@@ -1200,7 +1203,7 @@ BEGIN
             FROM haf_stats_backend.engagement_touched_days AS t
             HAVING COUNT(*) > 0
             ON CONFLICT (processor) DO NOTHING;
-            RAISE NOTICE 'haf_stats: engagement_period_counts is computed by the next batch, after its hivemind wait: %', _unusable;
+            RAISE NOTICE 'haf_stats: engagement_period_counts is computed by the next batch, once hivemind has reached it: %', _unusable;
             RETURN;
         END IF;
     ELSE
@@ -1273,7 +1276,7 @@ BEGIN
     END IF;
     _unusable := haf_stats_app.hivemind_unusable_reason();
     IF _unusable IS NOT NULL THEN
-        RAISE NOTICE 'haf_stats: the deferred engagement refresh runs on the next batch, after its hivemind wait: %', _unusable;
+        RAISE NOTICE 'haf_stats: the deferred engagement refresh runs on the next batch, once hivemind has reached it: %', _unusable;
         RETURN;
     END IF;
     PERFORM haf_stats_app.drain_deferred_engagement_refresh();
@@ -2179,7 +2182,7 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         -- produced the small LIVE batch that would trigger its drain, leaving the rollup permanently
         -- empty. The massive-sync deferral above is drained by run_deferred_rollup_refreshes on the
         -- first LIVE batch of any size and at install over a context past massive sync -- on the
-        -- hivemind source by that batch after its wait, below; a sync stopped while still in
+        -- hivemind source by that batch after its hivemind guard, below; a sync stopped while still in
         -- massive sync (--stop-at-block) has to call it itself.)
         IF _timed THEN _t := clock_timestamp(); END IF;
         PERFORM haf_stats_app.refresh_engagement_touched();
@@ -2191,8 +2194,9 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     END IF;
 END IF;
 
--- The engagement drain left recorded for after a hivemind wait (see "Rollup refresh" above): this
--- batch has waited, so it runs it now, unless this batch defers its refreshes (massive sync).
+-- The engagement drain left recorded for after a hivemind check (see "Rollup refresh" above): this
+-- batch has passed wait_for_hivemind (normally at once since #123), so it runs it now, unless
+-- this batch defers its refreshes (massive sync).
 -- When the boundary refresh above ran, there is nothing left to drain and this only clears the record.
 IF _hivemind AND current_setting('haf_stats.defer_rollup_refreshes', TRUE) IS DISTINCT FROM 'on' THEN
     PERFORM haf_stats_app.drain_deferred_engagement_refresh();

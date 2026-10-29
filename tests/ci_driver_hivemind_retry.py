@@ -96,10 +96,14 @@ CREATE TYPE public.ci123_stage AS (processing_alarm_threshold INTERVAL);
 CREATE TYPE public.ci123_loop AS (current_stage public.ci123_stage);
 ALTER TABLE hafd.contexts ADD COLUMN loop public.ci123_loop;
 """
-# The columns the hivemind source reads (prepare_batch_creations, hivemind_usable_through).
+# The columns the hivemind source reads: every batch (prepare_batch_creations,
+# stage_engagement_days_from_hivemind, hivemind_usable_through), and a batch that crosses a
+# 1200-block boundary or drains a deferral (refresh_engagement_days_from_hivemind: hive_votes,
+# root_id), so the test does not depend on where the seeded position puts its ranges.
 HIVEMIND_TABLES = {
-    "hive_posts": "id BIGINT, author_id INT, permlink_id BIGINT, parent_id BIGINT, depth SMALLINT, "
-                  "block_num_created INT, community_id INT",
+    "hive_posts": "id BIGINT, author_id INT, permlink_id BIGINT, parent_id BIGINT, root_id BIGINT, "
+                  "depth SMALLINT, block_num_created INT, community_id INT",
+    "hive_votes": "post_id BIGINT, num_changes INT, vote_percent INT",
     "hive_accounts": "id INT, name TEXT",
     "hive_permlink_data": "id BIGINT, permlink TEXT",
     "hive_communities": "id INT, name TEXT",
