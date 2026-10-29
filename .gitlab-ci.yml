@@ -1749,7 +1749,7 @@ install-test:
     fi
   - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
     # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> break-schema -> install-again -> lock-holder + install-under-lock
-    # -> verify -> uninstall -> verify-gone), so waiting on it gates the whole lane.
+    # -> verify -> driver-retry -> uninstall -> verify-gone), so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
   - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
   after_script:
@@ -1781,6 +1781,7 @@ install-test:
   - docker compose -f docker/docker-compose-ci-install.yml logs install-under-lock
     || true
   - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs driver-retry || true
   - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
   - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true
   - docker compose -f docker/docker-compose-ci-install.yml down -v || true

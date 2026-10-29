@@ -25,9 +25,13 @@
 --   * communities are derived here from raw custom_json operations into
 --     haf_stats_backend.community_registry (db/process_community_registry.sql);
 --   * outside tests/, hivemind_app is read only by the hivemind content source
---     (db/process_content_stats.sql), when a deployment selects it. That source waits
---     for hivemind itself, and only for content stats (wait_for_hivemind); a declared
---     dependency would hold back every processor instead. Under tests/, the parity
+--     (db/process_content_stats.sql), when a deployment selects it. That source checks
+--     hivemind itself before each batch and retries the batch later while hivemind is
+--     behind (require_content_source, #123). That holds the whole batch back, as a
+--     dependency would, but it also caps at hive_state.last_completed_block_num and
+--     requires the block_num_created index, where the dependency limit reads only
+--     hivemind's completed_block_num() (its position less any in-flight massive batch),
+--     and it applies only on the hivemind source. Under tests/, the parity
 --     oracle reads it with dynamic SQL so it degrades when hivemind is absent.
 --
 -- Declaring the dependency anyway would clamp every delivered range to hivemind's

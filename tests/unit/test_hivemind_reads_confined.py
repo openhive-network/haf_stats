@@ -1,9 +1,10 @@
 """Only the hivemind content source may read hivemind's tables (#118).
 
-On the hivemind source, process_content_stats waits for hivemind inside the block
-driver's transaction, and it waits BEFORE reading any hivemind table so that the wait
-holds no lock hivemind's massive sync needs (tests/ci_hivemind_wait_locks.sql checks that
-against the real functions). That holds only while nothing else in the iteration reads
+On the hivemind source, process_content_stats can wait for hivemind inside the block
+driver's transaction (the drivers check first since #123, so in the block path it returns
+at once, but it remains the guard), and it waits BEFORE reading any hivemind table so that
+a wait holds no lock hivemind's massive sync needs (tests/ci_hivemind_wait_locks.sql checks
+that against the real functions). That holds only while nothing else in the iteration reads
 hivemind_app: a processor that ran before process_content_stats and read, say,
 hivemind_app.hive_communities would hold its lock through the wait again.
 

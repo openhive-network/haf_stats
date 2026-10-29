@@ -356,6 +356,27 @@ services:
     depends_on:
       verify:
         condition: service_completed_successfully
+      driver-retry:
+        condition: service_completed_successfully
+
+  # #123: while hivemind is behind a range, the installed process_blocks raises 55R23 at once,
+  # the haf_app_driver.py this image ships rolls the range back and retries it, and the legacy
+  # main() loop retries it outside a transaction. The only lane with both the installed app and
+  # the shipped driver; the stub has no block streaming, so the script stands in
+  # hive.app_next_iteration for its own duration and undoes everything it set up.
+  driver-retry:
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
+    command: ["python3", "/ci_driver_hivemind_retry.py"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+    volumes:
+      - ../tests/ci_driver_hivemind_retry.py:/ci_driver_hivemind_retry.py:ro
+    depends_on:
+      verify:
+        condition: service_completed_successfully
 
   # uninstall_app.sh runs scripts/uninstall_verify.sql itself and reports survivors, but it
   # is permissive by design -- it pushes past errors the way upstream teardowns do. So

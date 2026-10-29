@@ -22,6 +22,8 @@
 --      (here bounded by haf_stats.hivemind_wait_timeout into an error). hivemind's completion
 --      marker and a missing block_num_created index hold it back too; an error reading the
 --      marker is raised, not taken for "no marker".
+--   5. The block drivers' check (#123): while hivemind is behind a range, require_content_source
+--      raises 55R23 at once and hivemind_behind says how far hivemind is usable; neither waits.
 --
 -- One transaction, rolled back: the processors' output, the source record, hivemind's context
 -- row, its index and hive_state are this file's alone.
@@ -334,7 +336,7 @@ $retire$;
 
 -- Outside a batch (install_app.sh's empty-rollup backfill and deferred refreshes), with hivemind
 -- behind the processed blocks: nothing is read from it, and the drain stays recorded for the next
--- batch, which runs it after its hivemind wait. Once hivemind is there, the drain runs.
+-- batch, which starts only once hivemind has reached it. Once hivemind is there, the drain runs.
 DO $install$
 DECLARE
     _diff TEXT;
@@ -519,5 +521,91 @@ BEGIN
     RAISE NOTICE 'hivemind source: wait verified (behind -> waits, completion marker and missing index hold it back, a hive_state read error and no context -> errors)';
 END
 $wait$;
+
+-- ---------------------------------------------------------------------------
+-- 5. The block drivers' check (#123): require_content_source, which process_blocks calls
+--    first, and hivemind_behind, which main() calls. Neither waits: while hivemind is behind
+--    the range they report it at once -- require_content_source as SQLSTATE 55R23, the code
+--    haf_app_driver.py retries (tests/ci_driver_hivemind_retry.py) -- and once hivemind has
+--    reached it they let it through. The timeout is long, so a check that waited would be
+--    seen taking seconds and then raising the wait's own error.
+-- ---------------------------------------------------------------------------
+
+DO $gate$
+DECLARE
+    _started TIMESTAMPTZ;
+    _state TEXT;
+    _message TEXT;
+BEGIN
+    SET LOCAL haf_stats.hivemind_wait_timeout = '30';
+
+    -- The internal source never reads hivemind, so it is never behind -- even with no hivemind
+    -- context at all (section 4 deleted it).
+    DELETE FROM haf_stats_app.content_source_config;
+    INSERT INTO haf_stats_app.content_source_config (source) VALUES ('internal');
+    IF haf_stats_app.hivemind_behind(37500045) IS NOT NULL THEN
+        RAISE EXCEPTION 'hivemind check: the internal source reported hivemind behind (%)', haf_stats_app.hivemind_behind(37500045);
+    END IF;
+    PERFORM haf_stats_app.require_content_source(37500001, 37500045);
+
+    -- hivemind's context at the range's end, its completion marker at 37500030.
+    DELETE FROM haf_stats_app.content_source_config;
+    INSERT INTO haf_stats_app.content_source_config (source) VALUES ('hivemind');
+    INSERT INTO hafd.contexts (name, current_block_num, irreversible_block)
+    VALUES ('hivemind_app', 37500045, 37500045);
+    CREATE INDEX ci_hive_posts_block_num_created ON hivemind_app.hive_posts (block_num_created);
+    UPDATE hivemind_app.hive_state SET last_completed_block_num = 37500030;
+
+    _started := clock_timestamp();
+    BEGIN
+        PERFORM haf_stats_app.require_content_source(37500001, 37500045);
+        _state := 'none';
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS _state = RETURNED_SQLSTATE, _message = MESSAGE_TEXT;
+    END;
+    IF _state IS DISTINCT FROM '55R23'
+       OR _message NOT LIKE '%hivemind has not reached block 37500045 (usable through 37500030); blocks 37500001..37500045 are left for a retry%' THEN
+        RAISE EXCEPTION 'hivemind check: hivemind behind the range must raise 55R23 naming the range and 37500030, got % (%)', _state, _message;
+    END IF;
+    IF clock_timestamp() - _started > INTERVAL '2 seconds' THEN
+        RAISE EXCEPTION 'hivemind check: require_content_source took % to report hivemind behind; it must not wait', clock_timestamp() - _started;
+    END IF;
+    IF haf_stats_app.hivemind_behind(37500045) IS DISTINCT FROM 37500030 THEN
+        RAISE EXCEPTION 'hivemind check: hivemind_behind(37500045) must be 37500030, got %', haf_stats_app.hivemind_behind(37500045);
+    END IF;
+
+    -- Without the block_num_created index nothing is usable.
+    DROP INDEX hivemind_app.ci_hive_posts_block_num_created;
+    IF haf_stats_app.hivemind_behind(37500001) IS DISTINCT FROM 0 THEN
+        RAISE EXCEPTION 'hivemind check: without the block_num_created index hivemind_behind(37500001) must be 0, got %', haf_stats_app.hivemind_behind(37500001);
+    END IF;
+    CREATE INDEX ci_hive_posts_block_num_created ON hivemind_app.hive_posts (block_num_created);
+
+    -- One block short is still behind; the range's last block is through, from both.
+    UPDATE hivemind_app.hive_state SET last_completed_block_num = 37500044;
+    IF haf_stats_app.hivemind_behind(37500045) IS DISTINCT FROM 37500044 THEN
+        RAISE EXCEPTION 'hivemind check: hivemind one block short must be behind at 37500044, got %', haf_stats_app.hivemind_behind(37500045);
+    END IF;
+    UPDATE hivemind_app.hive_state SET last_completed_block_num = 37500045;
+    IF haf_stats_app.hivemind_behind(37500045) IS NOT NULL THEN
+        RAISE EXCEPTION 'hivemind check: hivemind at the range''s end still reported behind (%)', haf_stats_app.hivemind_behind(37500045);
+    END IF;
+    PERFORM haf_stats_app.require_content_source(37500001, 37500045);
+
+    -- No hivemind context is a configuration error, not something to retry: not 55R23.
+    DELETE FROM hafd.contexts WHERE name = 'hivemind_app';
+    BEGIN
+        PERFORM haf_stats_app.require_content_source(37500001, 37500045);
+        _state := 'none';
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS _state = RETURNED_SQLSTATE, _message = MESSAGE_TEXT;
+    END;
+    IF _state IS DISTINCT FROM 'P0001' OR _message NOT LIKE '%no hivemind_app context%' THEN
+        RAISE EXCEPTION 'hivemind check: no hivemind context must raise P0001 "no hivemind_app context", got % (%)', _state, _message;
+    END IF;
+
+    RAISE NOTICE 'hivemind source: block-driver check verified (internal -> through; behind -> 55R23 at once; missing index -> 0; reached -> through; no context -> P0001)';
+END
+$gate$;
 
 ROLLBACK;
