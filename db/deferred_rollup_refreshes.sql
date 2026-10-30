@@ -22,10 +22,11 @@ SET ROLE haf_stats_owner;
 --     lower bound to the last processed day out of tables that are complete for those days;
 --   * refresh_engagement_touched drains engagement_touched_days, which keeps accumulating
 --     the touched creation-days while the drain is deferred. On the hivemind content source
---     that drain reads hivemind, which this batch may read only after its hivemind wait in
---     process_content_stats (#118): so there it is left recorded as
---     'engagement_after_hivemind_wait' (db/process_content_stats.sql, "Rollup refresh"), and
---     the batch's process_content_stats runs it after the wait;
+--     that drain reads hivemind, which this batch may read only after process_content_stats'
+--     hivemind guard, wait_for_hivemind (#118; the block drivers' pre-check, #123, runs before
+--     this, but a read here would still come before the guard): so there it is left recorded
+--     as 'engagement_after_hivemind_wait' (db/process_content_stats.sql, "Rollup refresh"),
+--     and the batch's process_content_stats runs it after the guard;
 --   * cohort retention reads only the member flags and its _as_of. A flag stops changing
 --     180 days after the member's creation, and a cohort leaves the per-batch refresh's
 --     window a month after that, so a cohort that has left it was last refreshed with every
@@ -92,7 +93,7 @@ $$;
 -- Runs every recorded refresh once, from its recorded day up to the last processed block,
 -- and clears the record in the same transaction. A no-op when nothing is recorded. Reads no
 -- hivemind table: on the hivemind source the engagement drain is recorded for after the
--- batch's hivemind wait instead (see the section header), and that record is left alone here.
+-- batch's hivemind guard instead (see the section header), and that record is left alone here.
 DROP FUNCTION IF EXISTS haf_stats_app.run_deferred_rollup_refreshes;
 CREATE OR REPLACE FUNCTION haf_stats_app.run_deferred_rollup_refreshes()
 RETURNS VOID
@@ -220,7 +221,7 @@ $$;
 -- batch's transaction. During MASSIVE_PROCESSING it makes this batch's processors record
 -- their rollup refreshes instead of running them; on any other stage it first runs the
 -- refreshes recorded so far (a no-op once they have run), all but the engagement drain on
--- the hivemind source, which this batch's process_content_stats runs after its wait.
+-- the hivemind source, which this batch's process_content_stats runs after its hivemind guard.
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_rollup_refreshes;
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_rollup_refreshes(
     _massive BOOLEAN

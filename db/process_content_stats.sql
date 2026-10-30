@@ -447,24 +447,121 @@ BEGIN
 END;
 $$;
 
--- Waits until the hivemind source may read through _block, and returns the highest block it
--- may read. process_content_stats calls it with a batch's last block before reading anything
--- from hivemind; scripts/rebuild_content_volume.sh calls it once as a pre-check.
---
--- It reads hafd.contexts, the catalog and hive_state, releasing hive_state's lock before it
--- sleeps, so a caller that has not read hivemind's tables yet holds no lock on any of them
--- while this waits (#118).
+-- The highest block the hivemind source may read now. Never waits.
 --
 -- hivemind's context head (hafd.contexts.current_block_num), capped by its own completion marker
 -- (hive_state.last_completed_block_num) where it has one: in massive sync hivemind advances its
 -- head before that batch's rows are written. While hive_posts has no valid index leading with
 -- block_num_created -- hivemind drops it for its own massive sync -- the read would be a full
--- scan of hive_posts per batch, so that reads as "not there yet" as well.
+-- scan of hive_posts per batch, so that reads as 0, "nothing yet".
+--
+-- It reads hafd.contexts, the catalog and hive_state, and releases hive_state's lock before it
+-- returns, so it leaves its caller holding no lock on any hivemind table (#118).
+DROP FUNCTION IF EXISTS haf_stats_app.hivemind_usable_through;
+CREATE OR REPLACE FUNCTION haf_stats_app.hivemind_usable_through()
+RETURNS INT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    _head INT;
+    _completed INT;
+BEGIN
+    SELECT c.current_block_num INTO _head FROM hafd.contexts AS c WHERE c.name = 'hivemind_app';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'haf_stats: the content source is hivemind, but hafd.contexts shows haf_stats_owner no hivemind_app context'
+            USING HINT = 'hivemind is not installed as a HAF app here, or haf_stats_owner lost hive_applications_group (row-level security hides the row). See README, "Content source".';
+    END IF;
+
+    IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
+        -- Read in a subtransaction that is then rolled back on purpose: that releases the
+        -- lock the read took on hive_state (#118). _completed keeps its value; plpgsql
+        -- variables are not rolled back.
+        BEGIN
+            SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
+            RAISE EXCEPTION USING ERRCODE = 'ZH118';
+        EXCEPTION WHEN SQLSTATE 'ZH118' THEN
+            NULL;
+        END;
+        _head := LEAST(_head, COALESCE(_completed, _head));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index AS i
+        JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+        WHERE i.indrelid = to_regclass('hivemind_app.hive_posts')
+          AND a.attname = 'block_num_created'
+          AND i.indisvalid
+          AND i.indisready
+    ) THEN
+        _head := 0;
+    END IF;
+
+    RETURN _head;
+END;
+$$;
+
+-- NULL when a batch ending at _last_block can read its content source now: always on the
+-- internal source, and on hivemind once hivemind_usable_through() has reached _last_block.
+-- Otherwise how far hivemind is usable. Never waits.
+DROP FUNCTION IF EXISTS haf_stats_app.hivemind_behind;
+CREATE OR REPLACE FUNCTION haf_stats_app.hivemind_behind(_last_block INT)
+RETURNS INT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    _usable INT;
+BEGIN
+    IF haf_stats_app.content_source() <> 'hivemind' THEN
+        RETURN NULL;
+    END IF;
+    _usable := haf_stats_app.hivemind_usable_through();
+    RETURN CASE WHEN _usable < _last_block THEN _usable END;
+END;
+$$;
+
+-- The block driver's gate (#123): process_blocks calls it first, before any processor runs.
+-- While hivemind has not reached the delivered range it raises SQLSTATE 55R23, so the driver
+-- rolls the range back and asks for it again later, instead of the batch sleeping inside the
+-- driver's transaction for as long as hivemind takes.
+--
+-- The code is in class 55, "object not in prerequisite state". psycopg2 has no exception of
+-- its own for 55R23 and raises its class's, OperationalError -- one of the two that
+-- haf_app_driver.py retries: it logs "database connection problem: <this message>", reconnects
+-- and calls hive.app_next_iteration again after --retry-delay (5 s). A driver with
+-- RETRY_LATER_SQLSTATE (common-ci-configuration!419) retries 55R23 on the same connection
+-- instead, logging the wait when it starts and every 10 minutes. Any other error ends the driver.
+-- tests/ci_driver_hivemind_retry.py runs the shipped driver against it.
+DROP FUNCTION IF EXISTS haf_stats_app.require_content_source;
+CREATE OR REPLACE FUNCTION haf_stats_app.require_content_source(_first_block INT, _last_block INT)
+RETURNS VOID
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    _usable CONSTANT INT := haf_stats_app.hivemind_behind(_last_block);
+BEGIN
+    IF _usable IS NOT NULL THEN
+        RAISE EXCEPTION 'haf_stats: hivemind has not reached block % (usable through %); blocks %..% are left for a retry', _last_block, _usable, _first_block, _last_block
+            USING ERRCODE = '55R23',
+                  HINT = 'Expected while hivemind catches up: the block driver rolls the range back and retries it. See README, "Content source".';
+    END IF;
+END;
+$$;
+
+-- Waits until the hivemind source may read through _block, and returns the highest block it
+-- may read. scripts/rebuild_content_volume.sh calls it once as a pre-check, and
+-- process_content_stats with a batch's last block before reading anything from hivemind.
+-- Both block drivers check first (require_content_source, main()), so in the block path it
+-- normally returns at once. It still waits, inside the batch's transaction, if hivemind goes
+-- back between that check and this call -- a fork, or a restart into massive sync that drops
+-- the block_num_created index.
 --
 -- Waits, never falls back: a batch processed from the other source would mix the two (see the
 -- section header). haf_stats.hivemind_wait_timeout (seconds) turns a wait longer than that into
--- an error; unset, it waits as long as hivemind takes. One call is one wait, so the timeout
--- bounds the wait for a whole batch. Each pass is a fresh statement, so it
+-- an error; unset, it waits as long as hivemind takes. Each pass is a fresh statement, so it
 -- sees what hivemind has committed since (READ COMMITTED, as both block drivers run).
 DROP FUNCTION IF EXISTS haf_stats_app.wait_for_hivemind;
 CREATE OR REPLACE FUNCTION haf_stats_app.wait_for_hivemind(_block INT)
@@ -476,41 +573,10 @@ DECLARE
     _timeout CONSTANT NUMERIC := NULLIF(current_setting('haf_stats.hivemind_wait_timeout', TRUE), '')::NUMERIC;
     _started CONSTANT TIMESTAMPTZ := clock_timestamp();
     _head INT;
-    _completed INT;
     _waiting BOOLEAN := FALSE;
 BEGIN
     LOOP
-        SELECT c.current_block_num INTO _head FROM hafd.contexts AS c WHERE c.name = 'hivemind_app';
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'haf_stats: the content source is hivemind, but hafd.contexts shows haf_stats_owner no hivemind_app context'
-                USING HINT = 'hivemind is not installed as a HAF app here, or haf_stats_owner lost hive_applications_group (row-level security hides the row). See README, "Content source".';
-        END IF;
-
-        IF to_regclass('hivemind_app.hive_state') IS NOT NULL THEN
-            -- Read in a subtransaction that is then rolled back on purpose: that releases the
-            -- lock the read took on hive_state, so none is held through the sleep below (#118).
-            -- _completed keeps its value; plpgsql variables are not rolled back.
-            BEGIN
-                SELECT MAX(s.last_completed_block_num) INTO _completed FROM hivemind_app.hive_state AS s;
-                RAISE EXCEPTION USING ERRCODE = 'ZH118';
-            EXCEPTION WHEN SQLSTATE 'ZH118' THEN
-                NULL;
-            END;
-            _head := LEAST(_head, COALESCE(_completed, _head));
-        END IF;
-
-        IF NOT EXISTS (
-            SELECT 1
-            FROM pg_index AS i
-            JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
-            WHERE i.indrelid = to_regclass('hivemind_app.hive_posts')
-              AND a.attname = 'block_num_created'
-              AND i.indisvalid
-              AND i.indisready
-        ) THEN
-            _head := 0;
-        END IF;
-
+        _head := haf_stats_app.hivemind_usable_through();
         EXIT WHEN _head >= _block;
 
         IF _timeout IS NOT NULL AND clock_timestamp() - _started >= make_interval(secs => _timeout) THEN
@@ -1097,14 +1163,16 @@ $$;
 -- source waits for it), so a refresh may already include a vote or reply from a block the
 -- processor has yet to reach; that block re-stages the day, so the next refresh restates it.
 --
--- So on the hivemind source a refresh reads hivemind only after a hivemind wait in its own
--- transaction (#118, #126): inside a batch after process_content_stats' wait_for_hivemind, and
--- outside one only once hivemind_unusable_reason() finds hivemind usable through every processed
--- block. Where neither holds -- the deferred drain at the start of a batch
--- (run_deferred_rollup_refreshes, db/deferred_rollup_refreshes.sql), or an install while
+-- So on the hivemind source a refresh reads hivemind only after a hivemind check in its own
+-- transaction (#118, #126): inside a batch after process_content_stats' guard,
+-- wait_for_hivemind, and outside one only once hivemind_unusable_reason() finds hivemind usable
+-- through every processed block. Where that order cannot be kept -- the deferred drain at the
+-- start of a batch (run_deferred_rollup_refreshes, db/deferred_rollup_refreshes.sql), whose
+-- hive_posts locks would be held through the later guard (the block drivers' pre-check, #123,
+-- makes the guard return at once, but it still waits if hivemind goes back), or an install while
 -- hivemind is behind -- the drain is recorded in deferred_rollup_refreshes as
 -- 'engagement_after_hivemind_wait', with the creation-days left staged, and the next batch's
--- process_content_stats runs it after its wait (drain_deferred_engagement_refresh).
+-- process_content_stats runs it after the guard (drain_deferred_engagement_refresh).
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.refresh_engagement_full;
@@ -1128,7 +1196,8 @@ BEGIN
         WHERE ncd.posts > 0
         ON CONFLICT (day) DO NOTHING;
 
-        -- Not over blocks hivemind has yet to write: left to the next batch, after its wait.
+        -- Not over blocks hivemind has yet to write: left to the next batch, which starts only
+        -- once hivemind has reached it.
         _unusable := haf_stats_app.hivemind_unusable_reason();
         IF _unusable IS NOT NULL THEN
             INSERT INTO haf_stats_app.deferred_rollup_refreshes (processor, dirty_from)
@@ -1136,7 +1205,7 @@ BEGIN
             FROM haf_stats_backend.engagement_touched_days AS t
             HAVING COUNT(*) > 0
             ON CONFLICT (processor) DO NOTHING;
-            RAISE NOTICE 'haf_stats: engagement_period_counts is computed by the next batch, after its hivemind wait: %', _unusable;
+            RAISE NOTICE 'haf_stats: engagement_period_counts is computed by the next batch, once hivemind has reached it: %', _unusable;
             RETURN;
         END IF;
     ELSE
@@ -1209,7 +1278,7 @@ BEGIN
     END IF;
     _unusable := haf_stats_app.hivemind_unusable_reason();
     IF _unusable IS NOT NULL THEN
-        RAISE NOTICE 'haf_stats: the deferred engagement refresh runs on the next batch, after its hivemind wait: %', _unusable;
+        RAISE NOTICE 'haf_stats: the deferred engagement refresh runs on the next batch, once hivemind has reached it: %', _unusable;
         RETURN;
     END IF;
     PERFORM haf_stats_app.drain_deferred_engagement_refresh();
@@ -1560,8 +1629,12 @@ END IF;
 -- whole range waits until hivemind has reached its last block (wait_for_hivemind), and only
 -- then reads hivemind's tables; never past it, and never from the other source.
 --
--- Wait first, read after, never the other way round (#118). The wait sleeps inside the block
--- driver's transaction, which keeps every lock it has taken until it commits. hivemind drops
+-- Both block drivers check that first and retry the range later rather than wait here (#123),
+-- so this wait normally returns at once. It stays as the guard for hivemind going back after
+-- that check (see wait_for_hivemind).
+--
+-- Wait first, read after, never the other way round (#118). A wait here sleeps inside the
+-- caller's transaction, which keeps every lock it has taken until it commits. hivemind drops
 -- hive_posts' foreign keys (ACCESS EXCLUSIVE, no lock_timeout) whenever it enters massive
 -- sync -- 101 or more blocks behind -- and its indexes as well at 2,000,000 or more. That is
 -- when this waits for it: a lock on hive_posts held through the wait would leave the two
@@ -2111,7 +2184,7 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
         -- produced the small LIVE batch that would trigger its drain, leaving the rollup permanently
         -- empty. The massive-sync deferral above is drained by run_deferred_rollup_refreshes on the
         -- first LIVE batch of any size and at install over a context past massive sync -- on the
-        -- hivemind source by that batch after its wait, below; a sync stopped while still in
+        -- hivemind source by that batch after its hivemind guard, below; a sync stopped while still in
         -- massive sync (--stop-at-block) has to call it itself.)
         IF _timed THEN _t := clock_timestamp(); END IF;
         PERFORM haf_stats_app.refresh_engagement_touched();
@@ -2123,8 +2196,9 @@ IF (_last_block / 1200) <> ((_first_block - 1) / 1200) THEN
     END IF;
 END IF;
 
--- The engagement drain left recorded for after a hivemind wait (see "Rollup refresh" above): this
--- batch has waited, so it runs it now, unless this batch defers its refreshes (massive sync).
+-- The engagement drain left recorded for after a hivemind check (see "Rollup refresh" above): this
+-- batch has passed wait_for_hivemind (normally at once since #123), so it runs it now, unless
+-- this batch defers its refreshes (massive sync).
 -- When the boundary refresh above ran, there is nothing left to drain and this only clears the record.
 IF _hivemind AND current_setting('haf_stats.defer_rollup_refreshes', TRUE) IS DISTINCT FROM 'on' THEN
     PERFORM haf_stats_app.drain_deferred_engagement_refresh();

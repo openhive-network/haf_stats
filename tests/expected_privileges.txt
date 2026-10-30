@@ -24,7 +24,9 @@ function haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false 
 function haf_stats_app.expected_op_type_names() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.finalize_active_users_before(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.get_required_authorities_safe(_body jsonb) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.hivemind_behind(_last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.hivemind_unusable_reason() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.hivemind_usable_through() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.is_community_name(_name text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.main(IN _context hafd.context_name) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.max_interaction_ops() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -78,6 +80,7 @@ function haf_stats_app.rekey_active_users_daily(_keep date) | owner=haf_stats_ow
 function haf_stats_app.report_deferred_refresh_timing(_step text, _dirty_from date, _as_of timestamp without time zone, _started timestamp with time zone) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_operation_counts(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.report_processor_timing(_step text, _first_block integer, _last_block integer, _started timestamp with time zone, _reads text[], _within text) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.require_content_source(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.resolve_community_batch() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.resolve_dapp(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.resolve_dapp_category(_json_id text) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE

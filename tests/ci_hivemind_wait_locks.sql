@@ -1,8 +1,11 @@
 -- While the hivemind content source waits for hivemind, it must hold no lock on hivemind's
 -- tables, and it must stop waiting once hivemind has caught up. (#118)
 --
--- The wait (wait_for_hivemind) sleeps inside the block driver's transaction. Any lock that
--- transaction took on a hivemind table before the wait is held through the sleep. hivemind
+-- The wait (wait_for_hivemind) sleeps inside the block driver's transaction. Since #123 the
+-- drivers check hivemind before the batch and retry it later, so the block path reaches this
+-- wait only when hivemind goes back after that check (tests/ci_driver_hivemind_retry.py covers
+-- the check). Any lock that transaction took on a hivemind table before the wait is held
+-- through the sleep. hivemind
 -- drops hive_posts' foreign keys (ACCESS EXCLUSIVE, no lock_timeout) whenever it enters
 -- massive sync, which is exactly when haf_stats waits for it, so such a lock means both wait
 -- on each other forever, and every hive_posts reader (hivemind's API included) queues behind

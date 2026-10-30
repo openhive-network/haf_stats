@@ -224,7 +224,9 @@ records the earliest day it would have refreshed from instead
 (`haf_stats_app.deferred_rollup_refreshes`), and the first batch outside massive sync runs each
 refresh once from that day, before processing its blocks. On the hivemind content source the
 engagement rollup is the exception: its refresh reads hivemind, which a batch may read only after
-it has waited for hivemind (#118), so that batch runs it after the wait instead. `install_app.sh`
+process_content_stats' hivemind guard (`wait_for_hivemind`, #118), so that batch runs it after
+the guard instead. The guard normally returns at once, since the block drivers start a batch only
+once hivemind has reached it (#123). `install_app.sh`
 does the same over a context already past massive sync, the engagement refresh only when hivemind
 has reached every processed block. A sync stopped while still in massive sync (e.g.
 `--stop-at-block`) leaves them empty, so the period, monthly and retention endpoints answer
@@ -1102,22 +1104,51 @@ deployment that has processed blocks is refused at install; do it with
 `HAF_STATS_CONTENT_SOURCE=<source> ./scripts/rebuild_content_volume.sh` (processor stopped)
 or a replay.
 
-On the hivemind source the processor never reads past hivemind: each content-stats batch
-ends at or below hivemind's context block (`hafd.contexts.current_block_num`, capped by its
-`hive_state.last_completed_block_num`), and while hivemind is behind -- or has dropped the
-`hive_posts` `block_num_created` index for its own massive sync -- the processor waits for
-it rather than falling back. A haf_stats replay alongside a hivemind replay therefore moves
-at hivemind's pace. `haf_stats.hivemind_wait_timeout` (seconds, a session setting on the
-processor's connection) turns a longer wait into an error; unset, it waits.
+On the hivemind source the processor never reads past hivemind: a batch is processed only
+once hivemind has reached its last block (`hafd.contexts.current_block_num`, capped by its
+`hive_state.last_completed_block_num`). While hivemind is behind -- or has dropped the
+`hive_posts` `block_num_created` index for its own massive sync -- the processor retries
+the batch later rather than falling back. A haf_stats replay alongside a hivemind replay
+therefore moves at hivemind's pace.
 
-A batch waits until hivemind has reached all of it before it reads any of hivemind's
-tables, so a waiting processor holds no lock on them. hivemind drops `hive_posts`' foreign
-keys (`ALTER TABLE ... DROP CONSTRAINT`, an ACCESS EXCLUSIVE lock) whenever it falls back
-into massive sync -- 101 or more blocks behind, as after about five minutes of downtime --
-and its indexes as well at 2,000,000 or more. A lock held through the wait would leave the
-two blocked on each other, with hivemind's API queued behind them
-([#118](https://gitlab.syncad.com/hive/haf_stats/-/issues/118)). The timeout above bounds
-the wait for a whole batch.
+The processor checks this before it runs anything, and while hivemind is behind it rolls
+the batch back and asks HAF for it again, so nothing stays open while it waits
+([#123](https://gitlab.syncad.com/hive/haf_stats/-/issues/123)): no transaction ID (nothing
+written), no lock on hivemind's tables or on haf_stats' own HAF context row, and a restarted
+processor does not queue behind the old one.
+
+* Under `haf_app_driver.py` the batch raises SQLSTATE `55R23`, which the driver retries. It
+  logs `database connection problem: haf_stats: hivemind has not reached block N (usable
+  through M); blocks A..B are left for a retry` with the HINT and CONTEXT lines PostgreSQL
+  adds, then `reconnecting in 5.0s` and its connect banner, and tries again every 5 seconds
+  (its `--retry-delay`). That repeats for as long as hivemind is behind. The "connection
+  problem" wording is the driver's and cannot be changed from here. A driver with
+  [common-ci-configuration!419](https://gitlab.syncad.com/hive/common-ci-configuration/-/merge_requests/419)
+  retries `55R23` on the same connection instead, after 1 s doubling up to 5 s (its
+  `--poll-interval` and `--retry-delay`), logging `blocks A..B not ready, retrying: <the
+  message>` once, `blocks A..B still not ready after Ns: <the message>` every 10 minutes, and
+  `range ready after Ns` when the batch goes through.
+* The legacy `CALL main()` loop logs one `waiting for hivemind` notice, retries every
+  second, and logs again when processing resumes.
+
+Either way the block-processing healthcheck turns unhealthy once the wait passes
+`HAF_STATS_HEALTHCHECK_MAX_AGE_SECONDS` (300 s), as it did when the wait was inside the
+batch: after the first retry no HAF heartbeat is committed, since it is written in the
+transaction that is rolled back. For the same reason a wait longer than HAF's dead-app
+timeout (4 hours, its `dead_app_contexts_auto_detach` cron job) gets the haf_stats context
+detached; HAF attaches it again in the first iteration that commits once hivemind has
+caught up (in the LIVE stage, as it always does).
+
+hivemind drops `hive_posts`' foreign keys (`ALTER TABLE ... DROP CONSTRAINT`, an ACCESS
+EXCLUSIVE lock) whenever it falls back into massive sync -- 101 or more blocks behind, as
+after about five minutes of downtime -- and its indexes as well at 2,000,000 or more. A
+lock held through a wait would leave the two blocked on each other, with hivemind's API
+queued behind them ([#118](https://gitlab.syncad.com/hive/haf_stats/-/issues/118)).
+`haf_stats_app.wait_for_hivemind` waits that way, reading no hivemind table first. The
+content-stats step still calls it as a guard, in case hivemind goes back after the batch's
+check (a fork, or a restart into massive sync that drops the index); otherwise it returns
+at once there. `haf_stats.hivemind_wait_timeout` (seconds, a session setting) bounds it, and
+`rebuild_content_volume.sh` runs it as a pre-check with a timeout of 0.
 
 This adds little delay: hivemind advances its completion marker only per live block and at
 the end of its own massive sync, so while it catches up there was never a partial range to
