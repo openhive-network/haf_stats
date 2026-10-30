@@ -16,7 +16,9 @@ project adds to its CI lane runs here too), and runs each one as a local process
   - an app-image service (`image: ${HAF_STATS_IMAGE...}`) runs
     docker/docker_entrypoint.sh with its command, as the app image's ENTRYPOINT does,
     over /app (the runtime image's /app -> /tmp/aidev-app) holding the db/,
-    endpoints/ and scripts/ it mounts (the tree's own when it mounts none).
+    endpoints/ and scripts/ it mounts (the tree's own when it mounts none), with
+    /opt/venv off PATH: its python3 is the system one with psycopg2, as the app
+    image's is (common-ci-configuration/psql has no venv).
   - `postgrest` runs the postgrest binary with the service's environment.
   - `rewriter` (built from Dockerfile.rewriter) runs openresty over the tree's
     docker/haf_stats_nginx.conf.template and endpoints/rewrite_rules.conf, rendered
@@ -51,6 +53,7 @@ LANE_TIMEOUT = 600  # CI's `timeout 600 docker compose ... wait`
 REWRITER_PORTS = {"80": "18080", "81": "18081"}
 POSTGREST_PORT = "3000"
 APP_LINK = Path("/tmp/aidev-app")
+TEST_VENV_BIN = "/opt/venv/bin"
 LOG_TAIL_LINES = 80
 CONTROL = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -133,6 +136,8 @@ class Service:
             if value in self.lane.local_hosts:
                 value = "127.0.0.1"
             env[key] = value
+        if "HAF_STATS_IMAGE" in str(self.spec.get("image", "")):
+            env["PATH"] = os.pathsep.join(d for d in env.get("PATH", "").split(os.pathsep) if d != TEST_VENV_BIN)
         return env
 
     def command(self) -> list[str]:

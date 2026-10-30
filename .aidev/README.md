@@ -42,7 +42,9 @@ no docker daemon, so each service runs as a process in the runtime container (th
 `postgres` service is the stack's). Container paths of bind mounts are rewritten to
 the tree's files, also inside mounted shell scripts; services that run the app image
 run `docker/docker_entrypoint.sh` over `/app` (a link the runtime image points at the
-`db/`, `endpoints/` and `scripts/` the service mounts, else the tree's); the rewriter
+`db/`, `endpoints/` and `scripts/` the service mounts, else the tree's) with
+`/opt/venv` off `PATH`, so their `python3` is the system one with `psycopg2`, as in the
+app image (`tests/ci_driver_hivemind_retry.py` imports it); the rewriter
 is openresty over the tree's `docker/haf_stats_nginx.conf.template` and
 `endpoints/rewrite_rules.conf`, rendered as `docker/rewriter_entrypoint.sh` renders
 them, on ports 18080/18081 instead of 80/81. A compose service shape the driver does
