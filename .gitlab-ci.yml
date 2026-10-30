@@ -151,6 +151,11 @@ include:
   - '/templates/haf_app_testing.gitlab-ci.yml'
   - '/templates/source_change_detection.gitlab-ci.yml'
 
+# Untagged jobs run only on a run_untagged runner, and the fleet has none left.
+# A job's own tags: replaces this list.
+default:
+  tags: [public-runner-docker]
+
 # =============================================================================
 # DETECT
 # =============================================================================
