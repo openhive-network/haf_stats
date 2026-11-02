@@ -476,13 +476,16 @@ privileges_against_expected() {
     fi | diff -u - "$actual"
 }
 
-# reinstall's checks, in order; reinstall.xml has one case per check that ran.
+# reinstall's checks, in order; reinstall.xml has one case per check, failing "not
+# reached" for each one an earlier failure stopped. A run stopped before the first
+# check records none, and the step fails as itself.
 reinstall_checks=(privileges-first second-install block-unchanged schema-unchanged privileges-second)
 
 reinstall_test() {
     local sub="$out/reinstall-cases.tsv" rc=0
     : > "$sub"
     reinstall_checks_run "$sub" || rc=1
+    [ ! -s "$sub" ] || reinstall_unreached "$sub"
     python3 .aidev/junit_cases.py "$out/reinstall.xml" reinstall "$sub" || return 1
     return "$rc"
 }
@@ -491,6 +494,15 @@ reinstall_test() {
 check() {
     record "$1" "$2" "$3" 0 "$out/reinstall.log"
     return "$3"
+}
+
+# So a step that stopped early cannot pass by the quarantine of the checks that ran.
+reinstall_unreached() {  # CASES_FILE
+    local c
+    for c in "${reinstall_checks[@]}"; do
+        awk -F'\t' -v c="$c" '$2 == c { found = 1 } END { exit !found }' "$1" ||
+            printf 'case\t%s\tfail\t0\tnot reached: reinstall stopped before it\t%s\n' "$c" "$out/reinstall.log" >> "$1"
+    done
 }
 
 reinstall_checks_run() {  # CASES_FILE
