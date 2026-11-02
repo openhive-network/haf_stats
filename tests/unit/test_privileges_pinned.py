@@ -157,13 +157,95 @@ def _install_order() -> list:
                   key=lambda f: order[f.relative_to(ROOT).as_posix()])
 
 
-def _install_sh_sql() -> str:
-    """install_app.sh with its shell comments, then SQL comments, removed: the SQL it inlines
-    (psql_cmd -c "..."), so a commented-out GRANT inside an inline block is not replayed.
-    The shell's double quotes delimit that SQL; left in, the literal-aware SQL stripper reads
-    them as quoted identifiers and keeps every comment inside."""
-    shell = "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
-    return _strip_comments(shell.replace('"', " "))
+# A psql invocation in command position. Prose that merely mentions psql (a log line, a
+# comment) is not one; a shell comment line is skipped where it is matched.
+PSQL_CALL = re.compile(r"(?:^[ \t]*|\$\(|[;&|][ \t]*|\b(?:if|then|do|else)[ \t]+)psql(?:_cmd)?\b", re.MULTILINE)
+SHELL_WORD = re.compile(r"""(?:[^\s"'<>;|&()]+|"(?:[^"\\]|\\.)*"|'[^']*')+""")
+HEREDOC = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2""")
+_END = "__end_of_extracted_sql__"
+
+
+def _dq_body(shell: str, i: int) -> tuple[str, int]:
+    """The bash double-quoted string opening at shell[i], unescaped, and the index past it."""
+    out, j = [], i + 1
+    while j < len(shell):
+        c = shell[j]
+        if c == "\\" and shell[j + 1:j + 2] in ('"', "\\", "$", "`"):
+            out.append(shell[j + 1])
+            j += 2
+        elif c == '"':
+            return "".join(out), j + 1
+        else:
+            out.append(c)
+            j += 1
+    raise AssertionError(f"line {shell.count(chr(10), 0, i) + 1}: unterminated double-quoted psql argument")
+
+
+def _heredoc_body(shell: str, at: int, strip_tabs: bool, tag: str) -> str:
+    start = shell.find("\n", at) + 1
+    lines: list[str] = []
+    for line in shell[start:].splitlines():
+        if (line.lstrip("\t") if strip_tabs else line) == tag:
+            return "\n".join(lines)
+        lines.append(line)
+    raise AssertionError(f"line {shell.count(chr(10), 0, at) + 1}: heredoc <<{tag} is never closed")
+
+
+def _left_open(sql: str) -> bool:
+    """Whether the SQL lexer ends sql inside a literal, quoted identifier, $tag$ string or
+    block comment. Probed through _strip_comments alone: a -- comment appended after it is
+    kept only from inside a string, and a bare word is blanked only inside a comment."""
+    return _END in _strip_comments(f"{sql}\n--{_END}") or _END not in _strip_comments(f"{sql}\n{_END}")
+
+
+def install_sh_sql_bodies(shell: str) -> list[tuple[int, str]]:
+    """(line, SQL) for every psql call in shell text: its -c "..." argument or its heredoc.
+
+    Only these reach the SQL lexer. Run over the whole script, a shell apostrophe
+    (log "can't wait") opened a literal that hid, or revived, the comments after it. A call
+    with neither form, or a body the lexer ends inside a literal or comment, fails.
+    """
+    bodies = []
+    for m in PSQL_CALL.finditer(shell):
+        line_no = shell.count("\n", 0, m.start()) + 1
+        line_start = shell.rfind("\n", 0, m.start()) + 1
+        if shell[line_start:m.start()].lstrip().startswith("#"):
+            continue
+        found, i = [], m.end()
+        while True:
+            while i < len(shell) and shell[i] in " \t":
+                i += 1
+            if (h := HEREDOC.match(shell, i)):
+                found.append(_heredoc_body(shell, i, h.group(1) == "-", h.group(3)))
+                i = h.end()
+            elif (w := SHELL_WORD.match(shell, i)):
+                if re.fullmatch(r"-[A-Za-z]*c", w.group(0)):
+                    i = w.end()
+                    while i < len(shell) and shell[i] in " \t":
+                        i += 1
+                    assert shell[i:i + 1] == '"', f"line {line_no}: psql -c argument is not a double-quoted string"
+                    body, i = _dq_body(shell, i)
+                    found.append(body)
+                else:
+                    i = w.end()
+            else:
+                break
+        assert len(found) == 1, f"line {line_no}: a psql call with {len(found)} SQL bodies (-c \"...\" or a heredoc); expected one"
+        assert not _left_open(found[0]), (
+            f"line {line_no}: the SQL lexer ends this psql body inside a literal or comment -- "
+            f"everything after the opening is invisible to it")
+        bodies.append((line_no, found[0]))
+    return bodies
+
+
+def install_sh_statements(shell: str) -> tuple[list[Stmt], list[str]]:
+    """parse() over each SQL body install_app.sh inlines, comments stripped per body."""
+    stmts, unparsed = [], []
+    for line_no, sql in install_sh_sql_bodies(shell):
+        s, u = parse(_strip_comments(sql), f"scripts/install_app.sh:{line_no}")
+        stmts += s
+        unparsed += [f"scripts/install_app.sh:{line_no}: {x}" for x in u]
+    return stmts, unparsed
 
 
 def source_statements() -> tuple[list[Stmt], list[str]]:
@@ -173,9 +255,9 @@ def source_statements() -> tuple[list[Stmt], list[str]]:
         s, u = parse(_strip_comments(f.read_text(encoding="utf-8")), rel)
         stmts += s
         unparsed += [f"{rel}: {x}" for x in u]
-    s, u = parse(_install_sh_sql(), "scripts/install_app.sh")
+    s, u = install_sh_statements(INSTALL_SH.read_text(encoding="utf-8"))
     stmts += s
-    unparsed += [f"scripts/install_app.sh: {x}" for x in u]
+    unparsed += u
     return stmts, unparsed
 
 
@@ -369,3 +451,62 @@ def test_inconsistent_sources_fail(sql, needle) -> None:
 def test_an_unparseable_statement_is_reported_not_skipped(sql) -> None:
     _, unparsed = parse(sql, "fixture.sql")
     assert unparsed, sql
+
+
+# --------------------------------------------------------------------------- install_app.sh's inline SQL
+
+def _install_sh_with(block: str) -> str:
+    """install_app.sh with block inserted directly before step 7's grants."""
+    shell = INSTALL_SH.read_text(encoding="utf-8")
+    at = shell.index("\n# 7. ") + 1
+    return shell[:at] + block + "\n" + shell[at:]
+
+
+def test_the_step_7_grants_are_extracted_as_sql() -> None:
+    bodies = [sql for _, sql in install_sh_sql_bodies(INSTALL_SH.read_text(encoding="utf-8"))]
+    assert any("ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_endpoints" in b for b in bodies)
+    assert not any("log " in b or "run_sql_file" in b for b in bodies), "shell text reached the SQL lexer"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'log "can\'t wait"',
+        # The reviewed mutation: an apostrophe earlier in the shell must not revive a REVOKE
+        # commented out inside an inline block.
+        'log "can\'t wait"\npsql_cmd -c "\n    -- REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\n    SELECT 1;\n"',
+        "log \"can't wait\"\npsql_cmd <<'SQL'\n    /* REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user; */\n"
+        "    -- GRANT INSERT ON haf_stats_backend.app_config TO haf_stats_user;\n    SELECT 1;\nSQL",
+        # A shell comment is not a psql call, whatever it quotes.
+        "# psql_cmd -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
+    ],
+)
+def test_shell_text_and_commented_sql_do_not_change_the_parsed_statements(block: str) -> None:
+    assert install_sh_statements(_install_sh_with(block)) == install_sh_statements(INSTALL_SH.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'log "can\'t wait"\npsql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;"',
+        'x="$(psql_cmd -Atq -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user")"',
+        "psql_cmd -v v=\"${V}\" <<'SQL'\n    REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\nSQL",
+    ],
+)
+def test_live_inline_sql_is_parsed(block: str) -> None:
+    stmts, _ = install_sh_statements(_install_sh_with(block))
+    assert [(s.verb, s.obj, s.roles) for s in stmts] == [("REVOKE", "haf_stats_backend.app_config", ("haf_stats_user",))]
+
+
+@pytest.mark.parametrize(
+    "block, needle",
+    [
+        ('psql_cmd -c "SELECT \'unterminated;"', "inside a literal or comment"),
+        ("psql_cmd <<'SQL'\n    /* never closed\nSQL", "inside a literal or comment"),
+        ('psql_cmd -f "${SCRIPT_DIR}/x.sql"', "0 SQL bodies"),
+        ("psql_cmd <<'SQL'\n    SELECT 1;\n", "never closed"),
+    ],
+)
+def test_unreadable_inline_sql_fails_loudly(block: str, needle: str) -> None:
+    with pytest.raises(AssertionError, match=needle):
+        install_sh_sql_bodies(_install_sh_with(block))
