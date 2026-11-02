@@ -159,9 +159,11 @@ def _install_order() -> list:
 
 def _install_sh_sql() -> str:
     """install_app.sh with its shell comments, then SQL comments, removed: the SQL it inlines
-    (psql_cmd -c "..."), so a commented-out GRANT inside an inline block is not replayed."""
+    (psql_cmd -c "..."), so a commented-out GRANT inside an inline block is not replayed.
+    The shell's double quotes delimit that SQL; left in, the literal-aware SQL stripper reads
+    them as quoted identifiers and keeps every comment inside."""
     shell = "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
-    return _strip_comments(shell)
+    return _strip_comments(shell.replace('"', " "))
 
 
 def source_statements() -> tuple[list[Stmt], list[str]]:
