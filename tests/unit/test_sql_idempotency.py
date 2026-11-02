@@ -38,6 +38,7 @@ silently not checking it. A blind spot that reports nothing is worse than no tes
 
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 
@@ -66,7 +67,18 @@ DROP_FN = re.compile(
 STABLE_SIGNATURE_MARKER = "-- idempotency: stable signature"
 
 # On-disk SQL files install_app.sh deliberately does not run, each with the reason.
-NOT_INSTALLED: dict[str, str] = {}
+NOT_INSTALLED: dict[str, str] = {
+    "docker/block-processing-healthcheck.sql": "read-only probe run by the container healthcheck",
+    "scripts/uninstall_verify.sql": "run by uninstall_app.sh after the schemas are dropped",
+}
+# `.sql` tokens in install_app.sh's code that name a file without building a path to it
+# (log text, RAISE messages, SQL comments in a heredoc), each with where it appears.
+INSTALLER_PROSE_SQL: dict[str, str] = {
+    "db/haf_stats_app.sql": "a log message on the non-forking context check",
+    "process_*.sql": "an SQL comment in the snapshot-refresh cron heredoc",
+    "db/process_*.sql": "a RAISE NOTICE when cron scheduling is skipped",
+    "db/builtin_roles.sql": "a RAISE EXCEPTION in the sync_status() privilege check",
+}
 # Referenced by install_app.sh but produced at build time, so absent from a checkout.
 GENERATED_SQL = {"db/version.sql": "written by the Docker build; guarded by [ -f ]"}
 # Ratchet on the installer-derived list (generated files excluded). A change that
@@ -112,17 +124,32 @@ MULTIWORD_TYPES = sorted(
 
 
 # A path the installer builds from a shell expansion: `${SCRIPT_DIR}/../db/x.sql`,
-# `"${SCRIPT_DIR}"/../db/x_*.sql`, `$(dirname "$0")/../db/x.sql`, `${DB_DIR}/x.sql`.
-# Anchored on the expansion rather than on the literal `${SCRIPT_DIR}/`, which each of
-# those other spellings bypassed with a non-idempotent file and the suite green. A bare
-# `db/x.sql` in a log message or SQL string is prose, not a path, and is not matched.
-_INSTALLER_SQL_PATH = re.compile(r"""(?<=[})"']/)((?:\.\./)*[A-Za-z0-9_.*-]+(?:/[A-Za-z0-9_.*-]+)*\.sql)\b""")
+# `"${SCRIPT_DIR}"/../db/x_*.sql`, `$(dirname "$0")/../db/x.sql`, `${DB_DIR}/x.sql`,
+# `$SCRIPT_DIR/../db/x.sql`. Anchored on the expansion rather than on the literal
+# `${SCRIPT_DIR}/`, which each of those other spellings bypassed with a non-idempotent
+# file and the suite green. A bare `db/x.sql` -- prose, or a path relative to a `cd` --
+# is not matched; test_every_sql_token_in_the_installer_is_accounted_for catches it.
+_INSTALLER_SQL_PATH = re.compile(
+    r"""(?:[})"']|\$[A-Za-z_][A-Za-z0-9_]*)/((?:\.\./)*[A-Za-z0-9_.*-]+(?:/[A-Za-z0-9_.*-]+)*\.sql)\b""")
+# Any `.sql` word in shell code, path or prose.
+_INSTALLER_SQL_TOKEN = re.compile(r"[A-Za-z0-9_.*/-]*\.sql\b")
+
+
+def _installer_code(script: str) -> str:
+    """A shell script without its `#` comment lines, line structure kept."""
+    return "\n".join("" if l.lstrip().startswith("#") else l for l in script.splitlines())
 
 
 def _installer_sql_paths(script: str) -> list[str]:
     """Every SQL path a shell script builds, outside its `#` comment lines."""
-    code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
-    return sorted(set(_INSTALLER_SQL_PATH.findall(code)))
+    return sorted(set(_INSTALLER_SQL_PATH.findall(_installer_code(script))))
+
+
+def _unextracted_sql_tokens(script: str) -> list[str]:
+    """`.sql` words in a shell script's code that are not a path the extractor reads."""
+    code = _installer_code(script)
+    built = {m.end(1) for m in _INSTALLER_SQL_PATH.finditer(code)}
+    return [m.group(0) for m in _INSTALLER_SQL_TOKEN.finditer(code) if m.end() not in built]
 
 
 def _resolve_installer_path(rel: str) -> list[Path]:
@@ -154,21 +181,27 @@ def _installed_sql_files() -> list[Path]:
 _DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 
 
-def _lex_comments(text: str) -> tuple[str, str | None]:
-    """`text` with comments blanked, plus the construct left open at end of input (or None).
+def _lex_sql(text: str) -> tuple[str, str | None, tuple[tuple[int, int], ...]]:
+    """`text` with comments blanked, the construct left open at end of input (or None),
+    and the (start, end) span of every top-level $tag$ string, tags included.
 
     Length- and line-preserving: every comment character becomes a space (newlines
     kept), so offsets in the result are offsets in the source.
 
-    Literal-aware, as PostgreSQL's lexer is: `/*` or `--` inside '...', E'...', "..." or
-    a $tag$ string does not open a comment. Without this one `'/*'` in a string blanked
+    Literal-aware, as PostgreSQL's lexer is: `/*`, `--` or `$$` inside '...', E'...',
+    "..." or a $tag$ string opens nothing. Without this one `'/*'` in a string blanked
     the rest of endpoint_schema.sql and every check on it passed on zero statements.
+    The $tag$ spans come from this same pass for the same reason: a second scanner that
+    re-found them without string state paired the `$$` in `SELECT '$$';` with the next
+    real function body, swapping code and bodies so that no definition was checked.
 
     A $tag$ body is usually PL/pgSQL, whose comments must go too, so it is lexed the same
     way -- unless that leaves something open (a plain string like $d$it's$d$, or Python
     in a plpython3u body), in which case it is kept verbatim, which is what it is.
     """
-    out, i, depth, n = [], 0, 0, len(text)
+    out: list[str] = []
+    spans: list[tuple[int, int]] = []
+    i, depth, n = 0, 0, len(text)
 
     def blank(s: str) -> str:
         return "".join("\n" if c == "\n" else " " for c in s)
@@ -202,7 +235,8 @@ def _lex_comments(text: str) -> tuple[str, str | None]:
             j = i + 1
             while True:
                 if j >= n:
-                    return "".join(out) + text[i:], "string literal" if c == "'" else "quoted identifier"
+                    left_open = "string literal" if c == "'" else "quoted identifier"
+                    return "".join(out) + text[i:], left_open, tuple(spans)
                 if escapes and text[j] == "\\":
                     j += 2
                 elif text[j] == c:
@@ -219,15 +253,26 @@ def _lex_comments(text: str) -> tuple[str, str | None]:
             tag = m.group(0)
             close = text.find(tag, m.end())
             if close == -1:
-                return "".join(out) + text[i:], f"{tag} string"
+                return "".join(out) + text[i:], f"{tag} string", tuple(spans)
             body = text[m.end():close]
-            lexed, left_open = _lex_comments(body)
-            out.append(tag + (body if left_open else lexed) + tag)
+            lexed, body_open, _ = _lex_sql(body)
+            out.append(tag + (body if body_open else lexed) + tag)
+            spans.append((i, close + len(tag)))
             i = close + len(tag)
         else:
             out.append(c)
             i += 1
-    return "".join(out), ("block comment" if depth else None)
+    return "".join(out), ("block comment" if depth else None), tuple(spans)
+
+
+# Every check reads the same few files; lex each once. Nested bodies call _lex_sql
+# directly, so they do not evict the files.
+_lexed = functools.lru_cache(maxsize=8)(_lex_sql)
+
+
+def _lex_comments(text: str) -> tuple[str, str | None]:
+    """`text` with comments blanked, plus the construct left open at end of input (or None)."""
+    return _lexed(text)[:2]
 
 
 def _strip_comments(text: str) -> str:
@@ -241,6 +286,51 @@ def _strip_comments(text: str) -> str:
     return _lex_comments(text)[0]
 
 
+def _dollar_quoted_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """(start, end) of every top-level $tag$ string in `text`, as PostgreSQL lexes them."""
+    return _lexed(text)[2]
+
+
+def _code_text(text: str) -> str:
+    """`text` with comments AND $tag$ strings blanked, keeping offsets and line structure.
+
+    Statements inside a function body are NOT executed by the installer -- they run when
+    the function is called. Scanning them made this test flag a CREATE INDEX on an
+    ON COMMIT DROP temp table inside a function, which is correct code.
+    """
+    stripped, _, spans = _lexed(text)
+    out, prev = [], 0
+    for start, end in spans:
+        out += [stripped[prev:start], "".join("\n" if c == "\n" else " " for c in stripped[start:end])]
+        prev = end
+    return "".join(out) + stripped[prev:]
+
+
+# The word before a top-level $tag$ string, wherever one appears in an installed file:
+# a function body (AS) or an anonymous block (DO).
+_DOLLAR_STRING_OPENERS = ("AS", "DO")
+
+
+def _misplaced_dollar_strings(raw: str) -> list[str]:
+    """Blanked $tag$ strings that do not follow a word in _DOLLAR_STRING_OPENERS.
+
+    A length canary cannot see a lexer that mistakes code for a body: swapping the two
+    keeps about as much text. But a swap opens a "body" after `END;` or inside a quote,
+    which this does see.
+    """
+    text = _code_text(raw)
+    misplaced = []
+    for start, _ in _dollar_quoted_spans(raw):
+        end = start
+        while end and text[end - 1].isspace():
+            end -= 1
+        m = re.search(r"\w+$", text[max(0, end - 64):end])
+        word = m.group(0) if m else ""
+        if word.upper() not in _DOLLAR_STRING_OPENERS:
+            misplaced.append(f"line {raw.count(chr(10), 0, start) + 1}: {raw[start:start + 40]!r}")
+    return misplaced
+
+
 def _sql_code(path: Path) -> tuple[str, str]:
     """(raw text, text with comments and function bodies blanked) for an installed file.
 
@@ -248,35 +338,11 @@ def _sql_code(path: Path) -> tuple[str, str]:
     code at all, and every check below would pass on what remained.
     """
     raw = path.read_text(encoding="utf-8")
-    stripped, left_open = _lex_comments(raw)
+    left_open = _lexed(raw)[1]
     assert left_open is None, (
         f"{path.name}: an unterminated {left_open} -- everything after it is invisible to "
         f"this scanner. Either the file is broken or the lexer here misreads it.")
-    return raw, _strip_function_bodies(stripped)
-
-
-def _strip_function_bodies(text: str) -> str:
-    """Blank out $tag$ ... $tag$ bodies, keeping line structure.
-
-    Statements inside a function body are NOT executed by the installer -- they run when
-    the function is called. Scanning them made this test flag a CREATE INDEX on an
-    ON COMMIT DROP temp table inside a function, which is correct code.
-    """
-    out, i, n = [], 0, len(text)
-    while i < n:
-        m = re.compile(r"\$([a-zA-Z_][a-zA-Z0-9_]*)?\$").match(text, i)
-        if m:
-            close = text.find(m.group(0), m.end())
-            if close == -1:
-                out.append(text[i:])
-                break
-            body = text[i:close + len(m.group(0))]
-            out.append("".join("\n" if c == "\n" else " " for c in body))
-            i = close + len(m.group(0))
-        else:
-            out.append(text[i])
-            i += 1
-    return "".join(out)
+    return raw, _code_text(raw)
 
 
 def _split_args(arglist: str) -> list[str]:
@@ -578,6 +644,18 @@ def test_the_comment_stripper_did_not_swallow_the_file(path: Path) -> None:
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_every_blanked_body_is_where_a_body_goes(path: Path) -> None:
+    """The canary for the text the checks actually read: every $tag$ string blanked from
+    it must open where PostgreSQL takes a body. One that does not means code was blanked
+    as a body, and the checks would pass on whatever was left."""
+    misplaced = _misplaced_dollar_strings(path.read_text(encoding="utf-8"))
+    assert not misplaced, (
+        f"{path.name}: $tag$ strings blanked as bodies that do not follow "
+        f"{' or '.join(_DOLLAR_STRING_OPENERS)}: {misplaced}. Either the lexer misreads "
+        f"the file, or a new place for a dollar string belongs in _DOLLAR_STRING_OPENERS.")
+
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
 def test_the_parser_recognises_every_function_definition(path: Path) -> None:
     """A definition the patterns miss is not merely unmatched -- it is UNCHECKED, and the
     file then passes with zero findings. This turns every parser blind spot into a loud
@@ -641,6 +719,21 @@ def test_the_regression_that_prompted_this_file_is_covered() -> None:
         "without it every re-install aborts (#60)")
 
 
+def test_the_legacy_vote_periods_overload_is_dropped_by_its_own_signature() -> None:
+    """install_app.sh calls refresh_network_vote_periods with ONE argument. The 2-arg
+    CREATE OR REPLACE leaves a legacy 1-arg overload in place, and the call is then
+    ambiguous. Any DROP of the name satisfies the generic coverage check; only the DROP
+    of exactly (DATE), before the CREATE, removes that overload."""
+    text = _code_text((ROOT / "db" / "process_content_stats.sql").read_text(encoding="utf-8"))
+    name = "haf_stats_app.refresh_network_vote_periods"
+    creates = [pos for n, _, pos in _signatures(CREATE_OR_REPLACE_FN, text) if n == name]
+    assert creates, f"{name} is no longer created in process_content_stats.sql"
+    assert any(n == name and t == ("date",) and pos < creates[0]
+               for n, t, pos in _signatures(DROP_FN, text)), (
+        f"process_content_stats.sql must DROP FUNCTION IF EXISTS {name}(DATE) before "
+        f"creating the 2-arg form, or install_app.sh's 1-arg call is ambiguous")
+
+
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
 def test_every_create_statement_is_one_the_scanner_checks(path: Path) -> None:
     """The object-kind counterpart of the function guard: a CREATE the line-anchored
@@ -680,12 +773,33 @@ def test_every_sql_path_the_installer_builds_resolves() -> None:
         f"and therefore does not check. Extend _resolve_installer_path.")
 
 
+def test_every_sql_token_in_the_installer_is_accounted_for() -> None:
+    """Every `.sql` word in install_app.sh's code is a path the extractor reads, or prose
+    named in INSTALLER_PROSE_SQL. A file run through a spelling the extractor does not
+    read -- relative to a `cd`, say -- fails here instead of going unscanned."""
+    tokens = _unextracted_sql_tokens(INSTALL_SH.read_text(encoding="utf-8"))
+    unknown = sorted(set(tokens) - set(INSTALLER_PROSE_SQL))
+    assert not unknown, (
+        f"install_app.sh names {unknown}, which the extractor does not read as a path, so "
+        f"a file run that way is not scanned. Root the path in ${{SCRIPT_DIR}}, or, if it "
+        f"is prose, add it to INSTALLER_PROSE_SQL.")
+    stale = sorted(set(INSTALLER_PROSE_SQL) - set(tokens))
+    assert not stale, f"INSTALLER_PROSE_SQL entries install_app.sh no longer contains: {stale}"
+
+
+def _on_disk_sql_files(root: Path) -> set[str]:
+    """Root-relative .sql files at any depth, outside tests/ and dot-directories."""
+    return {p.relative_to(root).as_posix() for p in root.glob("**/*.sql")
+            if p.relative_to(root).parts[0] != "tests"
+            and not any(part.startswith(".") for part in p.relative_to(root).parts)}
+
+
 def test_every_sql_file_on_disk_is_installed_or_named_as_not_installed() -> None:
     """The other direction: a file install_app.sh runs in a spelling the extractor misses
-    shows up here as on disk but not installed."""
+    shows up here as on disk but not installed. Recursive, so a file under a new
+    directory (sql/, db/sub/) is not outside the comparison."""
     installed = {p.relative_to(ROOT).as_posix() for p in _INSTALLED}
-    on_disk = {p.relative_to(ROOT).as_posix()
-               for d in ("db", "endpoints") for p in (ROOT / d).glob("*.sql")} - set(GENERATED_SQL)
+    on_disk = _on_disk_sql_files(ROOT) - set(GENERATED_SQL)
     assert on_disk - installed == set(NOT_INSTALLED), (
         f"on disk but not found in install_app.sh: {sorted(on_disk - installed - set(NOT_INSTALLED))}; "
         f"NOT_INSTALLED entries that are installed or gone: "
@@ -864,7 +978,7 @@ def test_identifiers_fold_case_only_when_unquoted(name, expected) -> None:
      "CREATE FUNCTION s.f(a integer) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;", 0),
 ])
 def test_plain_creates_are_paired_by_name_and_signature(sql, problems) -> None:
-    assert len(_unpaired_plain_creates(_strip_function_bodies(_strip_comments(sql)))) == problems
+    assert len(_unpaired_plain_creates(_code_text(sql))) == problems
 
 
 _COR = "CREATE OR REPLACE FUNCTION s.f(a DATE, b DATE) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;"
@@ -883,13 +997,13 @@ _COR = "CREATE OR REPLACE FUNCTION s.f(a DATE, b DATE) RETURNS int AS $$ SELECT 
     ("/* " + STABLE_SIGNATURE_MARKER[3:] + " */\n" + _COR, ["s.f(date, date)"]),
 ])
 def test_create_or_replace_needs_a_drop_of_its_name_or_a_marker(sql, uncovered) -> None:
-    plain, covered, got = _function_coverage(sql, _strip_function_bodies(_strip_comments(sql)))
+    plain, covered, got = _function_coverage(sql, _code_text(sql))
     assert (plain, covered, got) == (0, 1 - len(uncovered), uncovered)
 
 
 def test_the_function_guard_reads_the_raw_text() -> None:
     raw = "SELECT 1; CREATE FUNCTION s.f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;"
-    assert len(_unparsed_function_definitions(raw, _strip_function_bodies(_strip_comments(raw)))) == 1
+    assert len(_unparsed_function_definitions(raw, _code_text(raw))) == 1
     commented = "-- CREATE FUNCTION s.f() is gone\nSELECT 1;"
     assert _unparsed_function_definitions(commented, _strip_comments(commented)) == []
 
@@ -936,6 +1050,10 @@ def test_every_create_kind_is_one_the_scanner_checks(sql, unchecked) -> None:
     ('for f in "${SCRIPT_DIR}"/../db/new_*.sql; do run_sql_file "$f"; done', "../db/new_*.sql"),
     ('run_sql_file "${SCRIPT_DIR}/../db/new-thing.sql"', "../db/new-thing.sql"),
     ('run_sql_file "$(dirname "$0")/../db/a.sql"', "../db/a.sql"),
+    ('run_sql_file "$SCRIPT_DIR/../db/a.sql"', "../db/a.sql"),
+    ('run_sql_file $SCRIPT_DIR/../sql/a.sql', "../sql/a.sql"),
+    ('run_sql_file "${SCRIPT_DIR}/../db/sub/a.sql"', "../db/sub/a.sql"),
+    ('run_sql_file "${SCRIPT_DIR}/b.sql"', "b.sql"),
 ])
 def test_the_installer_path_extractor_reads_every_spelling(line, path) -> None:
     assert _installer_sql_paths(line) == [path]
@@ -946,3 +1064,72 @@ def test_installer_prose_and_comments_are_not_paths() -> None:
               'log "see db/haf_stats_app.sql"\n'
               "RAISE NOTICE 'per the db/process_*.sql headers';")
     assert _installer_sql_paths(script) == []
+
+
+@pytest.mark.parametrize("script", [
+    'cd "${SCRIPT_DIR}/.." && run_sql_file db/new.sql',
+    'cd "${SCRIPT_DIR}/.." && run_sql_file "sql/new.sql"',
+    'pushd scripts; run_sql_file ./new.sql',
+])
+def test_an_installer_path_relative_to_a_cd_is_not_accounted_for(script: str) -> None:
+    assert _installer_sql_paths(script) == []
+    assert set(_unextracted_sql_tokens(script)) - set(INSTALLER_PROSE_SQL)
+
+
+def test_the_on_disk_side_sees_nested_directories(tmp_path: Path) -> None:
+    for rel in ("db/a.sql", "db/sub/b.sql", "sql/c.sql", "scripts/d.sql",
+                "tests/e.sql", ".aidev/f.sql"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("SELECT 1;", encoding="utf-8")
+    assert _on_disk_sql_files(tmp_path) == {"db/a.sql", "db/sub/b.sql", "sql/c.sql", "scripts/d.sql"}
+
+
+# --- mutations the checks above must catch -----------------------------------------
+
+_ENDPOINTS = ROOT / "endpoints" / "endpoint_schema.sql"
+
+
+def _findings(raw: str) -> list[str]:
+    """What the per-file checks report for one file's text."""
+    text = _code_text(raw)
+    return (_unparsed_function_definitions(raw, text) + _function_coverage(raw, text)[2]
+            + _unpaired_plain_creates(text) + _misplaced_dollar_strings(raw))
+
+
+@pytest.mark.parametrize("literal", [
+    "SELECT '$$';",
+    "COMMENT ON SCHEMA haf_stats_endpoints IS 'price in $$';",
+    "SELECT E'it\\'s $$';",
+    'SELECT 1 AS "$$";',
+])
+def test_a_dollar_pair_inside_a_literal_does_not_hide_a_missing_drop(literal: str) -> None:
+    """A `$$` inside a literal once paired with the next real function body, blanking
+    every definition after it. Deleting a DROP below it must still be reported: the
+    first, the one the mutation review deleted, and the last."""
+    raw = _ENDPOINTS.read_text(encoding="utf-8")
+    assert _findings(raw) == []
+    drops = [m.group(0) for m in re.finditer(r"(?m)^DROP FUNCTION IF EXISTS [^;]+;\n", raw)]
+    assert len(drops) == len(_signatures(DROP_FN, _code_text(raw)))
+    sample = [drops[0], "DROP FUNCTION IF EXISTS haf_stats_endpoints.root;\n", drops[-1]]
+    survived = [d.strip() for d in sample
+                if not _findings(literal + "\n" + raw.replace(d, "", 1))]
+    assert not survived, f"deleting these with {literal!r} on top went unreported: {survived}"
+
+
+def test_dollar_bodies_with_quotes_and_escape_strings_stay_bodies() -> None:
+    sql = ("SELECT E'it\\'s $$ -- not a tag';\n"
+           "DROP FUNCTION IF EXISTS s.f;\n"
+           "CREATE OR REPLACE FUNCTION s.f() RETURNS text AS $$\n"
+           "  SELECT 'it''s' || E'\\'' || '$' || $q$DROP FUNCTION IF EXISTS s.g;$q$;\n"
+           "$$ LANGUAGE sql;\n")
+    text = _code_text(sql)
+    assert [n for n, _, _ in _signatures(DROP_FN, text)] == ["s.f"]
+    assert _findings(sql) == []
+    assert _findings(sql.replace("DROP FUNCTION IF EXISTS s.f;\n", "")) == ["s.f()"]
+
+
+def test_a_body_blanked_out_of_place_is_reported() -> None:
+    """A dollar string blanked where no body goes -- the shape a body/code swap leaves."""
+    assert _misplaced_dollar_strings("SELECT $$x$$;") == ["line 1: '$$x$$;'"]
+    assert _misplaced_dollar_strings("DO $$ BEGIN END $$;\nCREATE FUNCTION s.f() RETURNS int "
+                                     "AS $b$ SELECT 1 $b$ LANGUAGE sql;") == []
