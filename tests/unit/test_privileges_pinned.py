@@ -47,7 +47,19 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.unit.test_sql_idempotency import INSTALL_SH, ROOT, _installed_sql_files, _strip_comments
+from tests.unit.test_sql_idempotency import (
+    _COMMENT,
+    _HEREDOC_BODY,
+    _LITERAL,
+    HEREDOC,
+    INSTALL_SH,
+    ROOT,
+    _blanked,
+    _installed_sql_files,
+    _line,
+    _shell_lex,
+    _strip_comments,
+)
 
 EXPECTED = ROOT / "tests" / "expected_privileges.txt"
 SCHEMAS = ("haf_stats_app", "haf_stats_backend", "haf_stats_endpoints")
@@ -171,101 +183,8 @@ PSQL_CALL = re.compile(
     re.MULTILINE,
 )
 PSQL_WORD = re.compile(r"\bpsql\w*")
-SHELL_WORD = re.compile(r"""(?:[^\s"'<>;|&()]+|"(?:[^"\\]|\\.)*"|'[^']*')+""")
-HEREDOC = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2""")
+SHELL_WORD = re.compile(r"""(?:\$'(?:[^'\\]|\\.)*'|(?:[^\s"'<>;|&()$]|\$(?!'))+|"(?:[^"\\]|\\.)*"|'[^']*')+""")
 _END = "__end_of_extracted_sql__"
-_CODE, _COMMENT, _LITERAL, _HEREDOC_BODY = range(4)
-
-
-def _line(text: str, at: int) -> int:
-    return text.count("\n", 0, at) + 1
-
-
-def _shell_lex(shell: str) -> tuple[bytearray, dict[int, tuple[int, int]]]:
-    """What each character of shell is (_CODE, _COMMENT, _LITERAL, _HEREDOC_BODY), and the
-    (start, end) of every heredoc body keyed by the offset of its <<.
-
-    Enough of bash for install_app.sh: quotes, $( ) nested in double quotes, word-initial
-    # comments and heredocs. A string, $( or heredoc left open fails."""
-    kind = bytearray(len(shell))
-    bodies: dict[int, tuple[int, int]] = {}
-    stack = ["cmd"]  # "cmd" at the top, "sub" in $( ) or ( ), "dq" in a double-quoted string
-    pending: list[tuple[int, bool, str]] = []
-    i, n = 0, len(shell)
-    while i < n:
-        c, top = shell[i], stack[-1]
-        if top == "dq":
-            if shell.startswith("$(", i):
-                stack.append("sub")
-                i += 2
-                continue
-            step = 2 if c == "\\" else 1
-            for k in range(i, min(i + step, n)):
-                kind[k] = _LITERAL
-            if c == '"':
-                stack.pop()
-            i += step
-            continue
-        if c == "\\":
-            i += 2
-        elif c == "#" and (i == 0 or shell[i - 1] in " \t\n;&|()"):
-            e = shell.find("\n", i)
-            e = n if e < 0 else e
-            kind[i:e] = bytes([_COMMENT]) * (e - i)
-            i = e
-        elif c == "'":
-            e = shell.find("'", i + 1)
-            if e < 0:
-                raise AssertionError(f"line {_line(shell, i)}: unterminated single-quoted shell string")
-            kind[i:e + 1] = bytes([_LITERAL]) * (e + 1 - i)
-            i = e + 1
-        elif c == '"':
-            kind[i] = _LITERAL
-            stack.append("dq")
-            i += 1
-        elif shell.startswith("$(", i) or c == "(":
-            stack.append("sub")
-            i += 2 if c == "$" else 1
-        elif c == ")":
-            if top == "sub":  # at the top level, a bare ) closes a case pattern
-                stack.pop()
-            i += 1
-        elif shell.startswith("<<<", i):
-            i += 3
-        elif (h := HEREDOC.match(shell, i)):
-            pending.append((i, h.group(1) == "-", h.group(3)))
-            i = h.end()
-        elif c == "\n" and pending:
-            at = i + 1
-            for op, strip_tabs, tag in pending:
-                start = at
-                while True:
-                    e = shell.find("\n", at)
-                    e = n if e < 0 else e
-                    line = shell[at:e]
-                    if (line.lstrip("\t") if strip_tabs else line) == tag:
-                        break
-                    if e == n:
-                        raise AssertionError(f"line {_line(shell, op)}: heredoc <<{tag} is never closed")
-                    at = e + 1
-                kind[start:at] = bytes([_HEREDOC_BODY]) * (at - start)
-                bodies[op] = (start, at)
-                at = e + 1
-            pending = []
-            i = at - 1
-        else:
-            i += 1
-    if pending:
-        op, _, tag = pending[0]
-        raise AssertionError(f"line {_line(shell, op)}: heredoc <<{tag} is never closed")
-    if stack != ["cmd"]:
-        raise AssertionError(f"shell text ends inside an open {'double-quoted string' if stack[-1] == 'dq' else '$( or ('}")
-    return kind, bodies
-
-
-def _blanked(text: str, kind: bytearray, blank: set[int]) -> str:
-    """text with every character of a kind in blank turned to a space, newlines kept."""
-    return "".join(" " if kind[k] in blank and ch != "\n" else ch for k, ch in enumerate(text))
 
 
 def _dq_body(shell: str, i: int) -> tuple[str, int]:
@@ -599,6 +518,9 @@ def test_the_step_7_grants_are_extracted_as_sql() -> None:
         'true  # psql_cmd -c "GRANT INSERT ON haf_stats_backend.app_config TO haf_stats_user;"',
         # Nor is prose in a quoted string.
         'log "psql_cmd output: grant SELECT to haf_stats_user on haf_stats_backend if needed"',
+        # ANSI-C quoting: \' does not close the string.
+        "log $'can\\'t wait'",
+        "log $'can\\'t wait # psql_cmd -c \"' # psql_cmd -c \"",
     ],
 )
 def test_shell_text_and_commented_sql_do_not_change_the_parsed_statements(block: str) -> None:
@@ -615,6 +537,7 @@ def test_shell_text_and_commented_sql_do_not_change_the_parsed_statements(block:
         'if false; then :\nelif psql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;"; then :\nfi',
         "PGOPTIONS='-c statement_timeout=0' psql_cmd -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
         '! psql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;" || die',
+        "psql_cmd -v note=$'can\\'t' -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
     ],
 )
 def test_live_inline_sql_is_parsed(block: str) -> None:
@@ -634,6 +557,12 @@ def test_live_inline_sql_is_parsed(block: str) -> None:
 def test_unreadable_inline_sql_fails_loudly(block: str, needle: str) -> None:
     with pytest.raises(AssertionError, match=needle):
         install_sh_sql_bodies(_install_sh_with(block))
+
+
+def test_an_unterminated_ansi_c_string_fails_loudly() -> None:
+    shell = INSTALL_SH.read_text(encoding="utf-8") + "\nlog $'can\\'t wait\n"
+    with pytest.raises(AssertionError, match=re.escape("unterminated $'...' shell string")):
+        install_sh_sql_bodies(shell)
 
 
 def _install_sh_findings(shell: str) -> list[str]:
@@ -658,6 +587,7 @@ def test_install_sh_alone_has_no_findings() -> None:
         f'! psql_cmd -c "{GRANT}" || die',
         f'GRANT_SQL="{GRANT}"; psql_cmd -c "$GRANT_SQL"',
         f"GRANT_SQL=\"$(cat <<'SQL'\n    {GRANT}\nSQL\n)\"\npsql_cmd -c \"$GRANT_SQL\"",
+        f"log $'can\\'t'\npsql_cmd -c \"{GRANT}\"",
     ],
 )
 def test_a_live_grant_in_any_shell_form_is_reported(block: str) -> None:

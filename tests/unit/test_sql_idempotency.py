@@ -135,13 +135,117 @@ _INSTALLER_SQL_PATH = re.compile(
 _INSTALLER_SQL_TOKEN = re.compile(r"[A-Za-z0-9_.*/-]*\.sql\b")
 
 
+HEREDOC = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2""")
+_CODE, _COMMENT, _LITERAL, _HEREDOC_BODY = range(4)
+
+
+def _line(text: str, at: int) -> int:
+    return text.count("\n", 0, at) + 1
+
+
+def _shell_lex(shell: str) -> tuple[bytearray, dict[int, tuple[int, int]]]:
+    """What each character of shell is (_CODE, _COMMENT, _LITERAL, _HEREDOC_BODY), and the
+    (start, end) of every heredoc body keyed by the offset of its <<.
+
+    Enough of bash for install_app.sh: quotes (ANSI-C $'...' included), $( ) nested in
+    double quotes, word-initial # comments and heredocs. A string, $( or heredoc left open fails."""
+    kind = bytearray(len(shell))
+    bodies: dict[int, tuple[int, int]] = {}
+    stack = ["cmd"]  # "cmd" at the top, "sub" in $( ) or ( ), "dq" in a double-quoted string
+    pending: list[tuple[int, bool, str]] = []
+    i, n = 0, len(shell)
+    while i < n:
+        c, top = shell[i], stack[-1]
+        if top == "dq":
+            if shell.startswith("$(", i):
+                stack.append("sub")
+                i += 2
+                continue
+            step = 2 if c == "\\" else 1
+            for k in range(i, min(i + step, n)):
+                kind[k] = _LITERAL
+            if c == '"':
+                stack.pop()
+            i += step
+            continue
+        if c == "\\":
+            i += 2
+        elif c == "#" and (i == 0 or shell[i - 1] in " \t\n;&|()"):
+            e = shell.find("\n", i)
+            e = n if e < 0 else e
+            kind[i:e] = bytes([_COMMENT]) * (e - i)
+            i = e
+        elif shell.startswith("$'", i):
+            e = i + 2
+            while e < n and shell[e] != "'":
+                e += 2 if shell[e] == "\\" else 1
+            if e >= n:
+                raise AssertionError(f"line {_line(shell, i)}: unterminated $'...' shell string")
+            kind[i:e + 1] = bytes([_LITERAL]) * (e + 1 - i)
+            i = e + 1
+        elif c == "'":
+            e = shell.find("'", i + 1)
+            if e < 0:
+                raise AssertionError(f"line {_line(shell, i)}: unterminated single-quoted shell string")
+            kind[i:e + 1] = bytes([_LITERAL]) * (e + 1 - i)
+            i = e + 1
+        elif c == '"':
+            kind[i] = _LITERAL
+            stack.append("dq")
+            i += 1
+        elif shell.startswith("$(", i) or c == "(":
+            stack.append("sub")
+            i += 2 if c == "$" else 1
+        elif c == ")":
+            if top == "sub":  # at the top level, a bare ) closes a case pattern
+                stack.pop()
+            i += 1
+        elif shell.startswith("<<<", i):
+            i += 3
+        elif (h := HEREDOC.match(shell, i)):
+            pending.append((i, h.group(1) == "-", h.group(3)))
+            i = h.end()
+        elif c == "\n" and pending:
+            at = i + 1
+            for op, strip_tabs, tag in pending:
+                start = at
+                while True:
+                    e = shell.find("\n", at)
+                    e = n if e < 0 else e
+                    line = shell[at:e]
+                    if (line.lstrip("\t") if strip_tabs else line) == tag:
+                        break
+                    if e == n:
+                        raise AssertionError(f"line {_line(shell, op)}: heredoc <<{tag} is never closed")
+                    at = e + 1
+                kind[start:at] = bytes([_HEREDOC_BODY]) * (at - start)
+                bodies[op] = (start, at)
+                at = e + 1
+            pending = []
+            i = at - 1
+        else:
+            i += 1
+    if pending:
+        op, _, tag = pending[0]
+        raise AssertionError(f"line {_line(shell, op)}: heredoc <<{tag} is never closed")
+    if stack != ["cmd"]:
+        raise AssertionError(f"shell text ends inside an open {'double-quoted string' if stack[-1] == 'dq' else '$( or ('}")
+    return kind, bodies
+
+
+def _blanked(text: str, kind: bytearray, blank: set[int]) -> str:
+    """text with every character of a kind in blank turned to a space, newlines kept."""
+    return "".join(" " if kind[k] in blank and ch != "\n" else ch for k, ch in enumerate(text))
+
+
 def _installer_code(script: str) -> str:
-    """A shell script without its `#` comment lines, line structure kept."""
-    return "\n".join("" if l.lstrip().startswith("#") else l for l in script.splitlines())
+    """A shell script with its `#` comments blanked -- whole-line and trailing alike --
+    and everything else, quoted strings and heredoc bodies included, kept in place."""
+    return _blanked(script, _shell_lex(script)[0], {_COMMENT})
 
 
 def _installer_sql_paths(script: str) -> list[str]:
-    """Every SQL path a shell script builds, outside its `#` comment lines."""
+    """Every SQL path a shell script builds, outside its `#` comments."""
     return sorted(set(_INSTALLER_SQL_PATH.findall(_installer_code(script))))
 
 
@@ -307,8 +411,8 @@ def _code_text(text: str) -> str:
 
 
 # The word before a top-level $tag$ string, wherever one appears in an installed file:
-# a function body (AS) or an anonymous block (DO).
-_DOLLAR_STRING_OPENERS = ("AS", "DO")
+# a function body (AS), an anonymous block (DO) or a COMMENT ON ... IS text (IS).
+_DOLLAR_STRING_OPENERS = ("AS", "DO", "IS")
 
 
 def _misplaced_dollar_strings(raw: str) -> list[str]:
@@ -1076,6 +1180,22 @@ def test_an_installer_path_relative_to_a_cd_is_not_accounted_for(script: str) ->
     assert set(_unextracted_sql_tokens(script)) - set(INSTALLER_PROSE_SQL)
 
 
+def test_a_trailing_shell_comment_is_not_an_installer_reference() -> None:
+    script = INSTALL_SH.read_text(encoding="utf-8")
+    at = script.index("\nrun_sql_file") + 1
+    at = script.index("\n", at)
+    commented = script[:at] + '  # see foo.sql, run_sql_file "${SCRIPT_DIR}/../db/foo.sql"' + script[at:]
+    assert _unextracted_sql_tokens(commented) == _unextracted_sql_tokens(script)
+    assert _installer_sql_paths(commented) == _installer_sql_paths(script)
+    assert _unextracted_sql_tokens('psql_cmd -f "$x"  # see foo.sql') == []
+
+
+def test_a_hash_inside_a_quoted_string_is_not_a_comment() -> None:
+    assert _unextracted_sql_tokens('log "issue #1: see foo.sql"') == ["foo.sql"]
+    assert _unextracted_sql_tokens("log 'issue #1: see foo.sql'") == ["foo.sql"]
+    assert _unextracted_sql_tokens("log $'issue\\'s #1: see foo.sql'") == ["foo.sql"]
+
+
 def test_the_on_disk_side_sees_nested_directories(tmp_path: Path) -> None:
     for rel in ("db/a.sql", "db/sub/b.sql", "sql/c.sql", "scripts/d.sql",
                 "tests/e.sql", ".aidev/f.sql"):
@@ -1131,5 +1251,14 @@ def test_dollar_bodies_with_quotes_and_escape_strings_stay_bodies() -> None:
 def test_a_body_blanked_out_of_place_is_reported() -> None:
     """A dollar string blanked where no body goes -- the shape a body/code swap leaves."""
     assert _misplaced_dollar_strings("SELECT $$x$$;") == ["line 1: '$$x$$;'"]
+    assert _misplaced_dollar_strings("COMMENT ON TABLE t IS 'x';\nSELECT $c$x$c$;") == ["line 2: '$c$x$c$;'"]
+
+
+def test_a_comment_on_text_in_a_dollar_string_is_where_a_body_goes() -> None:
+    sql = ("COMMENT ON TABLE t IS $c$text$c$;\n"
+           "DROP FUNCTION IF EXISTS s.f;\n"
+           "CREATE OR REPLACE FUNCTION s.f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;\n")
+    assert _findings(sql) == []
+    assert _findings(sql.replace("DROP FUNCTION IF EXISTS s.f;\n", "")) == ["s.f()"]
     assert _misplaced_dollar_strings("DO $$ BEGIN END $$;\nCREATE FUNCTION s.f() RETURNS int "
                                      "AS $b$ SELECT 1 $b$ LANGUAGE sql;") == []
