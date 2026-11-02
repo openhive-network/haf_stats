@@ -70,3 +70,29 @@ def test_tavern_failure_without_per_test_failures_fails_the_service_case(tmp_pat
     assert failure is not None
     assert failure.get("message") == "exit 4"
     assert ET.parse(out / "endpoint.xml").getroot().get("failures") == "1"
+
+
+def test_tavern_report_left_by_an_earlier_run_is_not_counted(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "tavern.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" tests="2">'
+        '<testcase classname="tavern_tests.test_api" name="test_ok"/>'
+        '<testcase classname="tavern_tests.test_api" name="test_broken"><failure message="old"/></testcase>'
+        '</testsuite></testsuites>\n')
+    tests = tmp_path / "tavern_tests"
+    tests.mkdir()
+    # The run dies before it writes a report of its own.
+    (tests / "conftest.py").write_text("import os\nos._exit(9)\n")
+    (tests / "test_api.py").write_text("def test_ok():\n    pass\n")
+
+    result, out = run_lane(tmp_path, "tavern_tests")
+
+    assert result.returncode == 1, result.stderr
+    case = tavern_case(out)
+    assert case.find("skipped") is None
+    failure = case.find("failure")
+    assert failure is not None
+    assert failure.get("message") == "exit 9"
+    assert ET.parse(out / "endpoint.xml").getroot().get("failures") == "1"
+    assert not (out / "tavern.xml").exists()

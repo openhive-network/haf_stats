@@ -316,6 +316,9 @@ class Lane:
         return ["pytest", "-p", "no:cacheprovider", f"--junitxml={junit}", "-o", "junit_family=xunit1"] + args
 
     def run(self) -> int:
+        # Only a report this run writes may be judged: a tavern run that dies before
+        # writing one must not be read through an earlier run's.
+        (self.out / TAVERN_JUNIT).unlink(missing_ok=True)
         deadline = time.monotonic() + LANE_TIMEOUT
         target = self.services[self.wait]
         try:
