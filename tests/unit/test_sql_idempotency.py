@@ -566,7 +566,7 @@ _INSTALLED = _installed_sql_files()
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_the_comment_stripper_did_not_swallow_the_file(path: Path):
+def test_the_comment_stripper_did_not_swallow_the_file(path: Path) -> None:
     """A stripper that mistakes a literal for a comment opener makes real code invisible,
     and every check below then passes on nothing. _sql_code fails on a construct left
     open at end of file; this catches one that closes far too late. The floor is well
@@ -578,7 +578,7 @@ def test_the_comment_stripper_did_not_swallow_the_file(path: Path):
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_the_parser_recognises_every_function_definition(path: Path):
+def test_the_parser_recognises_every_function_definition(path: Path) -> None:
     """A definition the patterns miss is not merely unmatched -- it is UNCHECKED, and the
     file then passes with zero findings. This turns every parser blind spot into a loud
     failure instead of a silent pass, which is the single guard the first version most
@@ -592,7 +592,7 @@ def test_the_parser_recognises_every_function_definition(path: Path):
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_every_function_definition_is_checked(path: Path):
+def test_every_function_definition_is_checked(path: Path) -> None:
     """Every definition is either a plain CREATE (paired by signature below) or a
     CREATE OR REPLACE with a DROP of its name before it or a stable-signature marker.
 
@@ -611,7 +611,7 @@ def test_every_function_definition_is_checked(path: Path):
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
+def test_every_created_function_is_dropped_with_its_own_signature(path: Path) -> None:
     """A plain CREATE FUNCTION/PROCEDURE needs a DROP for the signature it creates, and
     the DROP must come FIRST.
 
@@ -627,7 +627,7 @@ def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
     )
 
 
-def test_the_regression_that_prompted_this_file_is_covered():
+def test_the_regression_that_prompted_this_file_is_covered() -> None:
     """Pins the specific signature AND that it is still created, so a future edit has to
     keep the pair in step. (The generic test above subsumes the first half; this one
     names what to look at.)"""
@@ -642,7 +642,7 @@ def test_the_regression_that_prompted_this_file_is_covered():
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_every_create_statement_is_one_the_scanner_checks(path: Path):
+def test_every_create_statement_is_one_the_scanner_checks(path: Path) -> None:
     """The object-kind counterpart of the function guard: a CREATE the line-anchored
     patterns cannot see, or of a kind they do not check, fails here instead of passing."""
     unchecked = _unchecked_creates(_sql_code(path)[1])
@@ -652,7 +652,7 @@ def test_every_create_statement_is_one_the_scanner_checks(path: Path):
 
 
 @pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
-def test_other_object_types_are_created_idempotently(path: Path):
+def test_other_object_types_are_created_idempotently(path: Path) -> None:
     """CREATE TYPE/TABLE/SCHEMA/INDEX/VIEW/SEQUENCE/TRIGGER/POLICY/EXTENSION/DOMAIN/...
 
     CREATE TYPE and CREATE DOMAIN have NO `IF NOT EXISTS` form at all, so they *require*
@@ -670,7 +670,7 @@ def _repo_relative(rel: str) -> str:
     return (base / rel).resolve().relative_to(ROOT).as_posix()
 
 
-def test_every_sql_path_the_installer_builds_resolves():
+def test_every_sql_path_the_installer_builds_resolves() -> None:
     """A path the extractor finds but cannot resolve is a file it does not scan -- a
     `${DB_DIR}/x.sql` spelling, say. Only build-time generated files may be absent."""
     unresolved = [rel for rel in _installer_sql_paths(INSTALL_SH.read_text(encoding="utf-8"))
@@ -680,7 +680,7 @@ def test_every_sql_path_the_installer_builds_resolves():
         f"and therefore does not check. Extend _resolve_installer_path.")
 
 
-def test_every_sql_file_on_disk_is_installed_or_named_as_not_installed():
+def test_every_sql_file_on_disk_is_installed_or_named_as_not_installed() -> None:
     """The other direction: a file install_app.sh runs in a spelling the extractor misses
     shows up here as on disk but not installed."""
     installed = {p.relative_to(ROOT).as_posix() for p in _INSTALLED}
@@ -692,14 +692,14 @@ def test_every_sql_file_on_disk_is_installed_or_named_as_not_installed():
         f"{sorted(set(NOT_INSTALLED) - (on_disk - installed))}")
 
 
-def test_the_installed_file_count_is_pinned():
+def test_the_installed_file_count_is_pinned() -> None:
     count = len([p for p in _INSTALLED if p.relative_to(ROOT).as_posix() not in GENERATED_SQL])
     assert count == INSTALLED_SQL_FILE_COUNT, (
         f"install_app.sh now yields {count} SQL files, not {INSTALLED_SQL_FILE_COUNT}. If a "
         f"file was added or removed on purpose, update INSTALLED_SQL_FILE_COUNT.")
 
 
-def test_the_installed_file_list_includes_the_endpoints_schema():
+def test_the_installed_file_list_includes_the_endpoints_schema() -> None:
     """Derived from install_app.sh, so it cannot drift from the installer. The first
     version globbed db/*.sql and therefore never scanned the largest installed file."""
     names = {p.name for p in _INSTALLED}
@@ -794,11 +794,11 @@ def test_the_installed_file_list_includes_the_endpoints_schema():
         ("a$b INT", ("integer",)),
     ],
 )
-def test_the_signature_parser(arglist, expected):
+def test_the_signature_parser(arglist, expected) -> None:
     assert _signature_of(arglist) == expected
 
 
-def test_block_comments_are_stripped():
+def test_block_comments_are_stripped() -> None:
     """A DROP written as prose inside /* */ must not count as a statement."""
     text = "/* we used to\nDROP FUNCTION IF EXISTS s.f(INT);\nbut no longer */\nSELECT 1;"
     assert "DROP FUNCTION" not in _strip_comments(text)
@@ -814,14 +814,14 @@ def test_block_comments_are_stripped():
         "SELECT 'it''s /*';\nDROP FUNCTION IF EXISTS s.f;",
     ],
 )
-def test_comment_openers_inside_literals_do_not_hide_code(sql):
+def test_comment_openers_inside_literals_do_not_hide_code(sql) -> None:
     stripped, left_open = _lex_comments(sql)
     assert left_open is None
     assert len(stripped) == len(sql)
     assert [n for n, _, _ in _signatures(DROP_FN, stripped)] == ["s.f"]
 
 
-def test_comments_inside_a_function_body_are_stripped_but_a_plain_string_body_is_kept():
+def test_comments_inside_a_function_body_are_stripped_but_a_plain_string_body_is_kept() -> None:
     code = "DO $$ BEGIN -- DROP FUNCTION IF EXISTS s.f;\nEND $$;"
     assert "DROP" not in _strip_comments(code)
     prose = "COMMENT ON TABLE t IS $c$it's -- kept$c$;"
@@ -833,7 +833,7 @@ def test_comments_inside_a_function_body_are_stripped_but_a_plain_string_body_is
     ("SELECT 'never closed;\nDROP FUNCTION IF EXISTS s.f;", "string literal"),
     ("DO $body$ BEGIN END;", "$body$ string"),
 ])
-def test_an_unterminated_construct_is_reported(sql, construct):
+def test_an_unterminated_construct_is_reported(sql, construct) -> None:
     assert _lex_comments(sql)[1] == construct
 
 
@@ -842,7 +842,7 @@ def test_an_unterminated_construct_is_reported(sql, construct):
     ('"haf_stats_app"."Assert_Op_Types"', "haf_stats_app.Assert_Op_Types"),
     ('"haf_stats_app".f', "haf_stats_app.f"),
 ])
-def test_identifiers_fold_case_only_when_unquoted(name, expected):
+def test_identifiers_fold_case_only_when_unquoted(name, expected) -> None:
     assert _identifier(name) == expected
 
 
@@ -863,7 +863,7 @@ def test_identifiers_fold_case_only_when_unquoted(name, expected):
     ("DROP FUNCTION IF EXISTS s.f;\n"
      "CREATE FUNCTION s.f(a integer) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;", 0),
 ])
-def test_plain_creates_are_paired_by_name_and_signature(sql, problems):
+def test_plain_creates_are_paired_by_name_and_signature(sql, problems) -> None:
     assert len(_unpaired_plain_creates(_strip_function_bodies(_strip_comments(sql)))) == problems
 
 
@@ -882,12 +882,12 @@ _COR = "CREATE OR REPLACE FUNCTION s.f(a DATE, b DATE) RETURNS int AS $$ SELECT 
     (STABLE_SIGNATURE_MARKER + "\nSELECT 1;\n" + _COR, ["s.f(date, date)"]),
     ("/* " + STABLE_SIGNATURE_MARKER[3:] + " */\n" + _COR, ["s.f(date, date)"]),
 ])
-def test_create_or_replace_needs_a_drop_of_its_name_or_a_marker(sql, uncovered):
+def test_create_or_replace_needs_a_drop_of_its_name_or_a_marker(sql, uncovered) -> None:
     plain, covered, got = _function_coverage(sql, _strip_function_bodies(_strip_comments(sql)))
     assert (plain, covered, got) == (0, 1 - len(uncovered), uncovered)
 
 
-def test_the_function_guard_reads_the_raw_text():
+def test_the_function_guard_reads_the_raw_text() -> None:
     raw = "SELECT 1; CREATE FUNCTION s.f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;"
     assert len(_unparsed_function_definitions(raw, _strip_function_bodies(_strip_comments(raw)))) == 1
     commented = "-- CREATE FUNCTION s.f() is gone\nSELECT 1;"
@@ -899,7 +899,7 @@ def test_the_function_guard_reads_the_raw_text():
     ("CREATE UNIQUE INDEX CONCURRENTLY foo ON t(a);", "foo"),
     ("CREATE INDEX foo ON t(a);", "foo"),
 ])
-def test_the_index_pattern_names_unique_and_concurrent_indexes(sql, name):
+def test_the_index_pattern_names_unique_and_concurrent_indexes(sql, name) -> None:
     assert [m.group(1) for m in _object_pattern("INDEX").finditer(sql)] == [name]
 
 
@@ -914,7 +914,7 @@ def test_the_index_pattern_names_unique_and_concurrent_indexes(sql, name):
     ("DROP DOMAIN IF EXISTS s.d;\nCREATE DOMAIN s.d AS int;", []),
     ("CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int);", [("AGGREGATE", "s.a")]),
 ])
-def test_object_creation_needs_if_not_exists_or_a_drop(sql, problems):
+def test_object_creation_needs_if_not_exists_or_a_drop(sql, problems) -> None:
     assert _non_idempotent_objects(sql) == problems
 
 
@@ -926,7 +926,7 @@ def test_object_creation_needs_if_not_exists_or_a_drop(sql, problems):
     ("CREATE TABLE IF NOT EXISTS s.t (a int);\nCREATE OR REPLACE VIEW s.v AS SELECT 1;", []),
     ("GRANT CREATE ON SCHEMA s TO r;", []),
 ])
-def test_every_create_kind_is_one_the_scanner_checks(sql, unchecked):
+def test_every_create_kind_is_one_the_scanner_checks(sql, unchecked) -> None:
     assert _unchecked_creates(sql) == unchecked
 
 
@@ -937,11 +937,11 @@ def test_every_create_kind_is_one_the_scanner_checks(sql, unchecked):
     ('run_sql_file "${SCRIPT_DIR}/../db/new-thing.sql"', "../db/new-thing.sql"),
     ('run_sql_file "$(dirname "$0")/../db/a.sql"', "../db/a.sql"),
 ])
-def test_the_installer_path_extractor_reads_every_spelling(line, path):
+def test_the_installer_path_extractor_reads_every_spelling(line, path) -> None:
     assert _installer_sql_paths(line) == [path]
 
 
-def test_installer_prose_and_comments_are_not_paths():
+def test_installer_prose_and_comments_are_not_paths() -> None:
     script = ('# run_sql_file "${SCRIPT_DIR}/../db/a.sql"\n'
               'log "see db/haf_stats_app.sql"\n'
               "RAISE NOTICE 'per the db/process_*.sql headers';")

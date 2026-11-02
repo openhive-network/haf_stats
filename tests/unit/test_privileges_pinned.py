@@ -259,19 +259,19 @@ def _expected_lines() -> list[str]:
 
 # --------------------------------------------------------------------------- the real check
 
-def test_every_source_grant_and_revoke_is_reflected_in_the_committed_list():
+def test_every_source_grant_and_revoke_is_reflected_in_the_committed_list() -> None:
     stmts, _ = source_statements()
     assert len(stmts) >= 25, f"only {len(stmts)} statements parsed; the parser or the file list broke"
     errors = check(stmts, read_listing(_expected_lines()))
     assert not errors, "\n".join(errors)
 
 
-def test_every_haf_stats_grant_or_revoke_in_the_sources_is_parsed():
+def test_every_haf_stats_grant_or_revoke_in_the_sources_is_parsed() -> None:
     _, unparsed = source_statements()
     assert not unparsed, "GRANT/REVOKE statements the parser could not read:\n" + "\n".join(unparsed)
 
 
-def test_files_replay_in_installer_order():
+def test_files_replay_in_installer_order() -> None:
     """db/haf_stats_app.sql is named in a comment above db/builtin_roles.sql's run line; the
     order must come from the run lines, where builtin_roles.sql runs first."""
     names = [f.name for f in _install_order()]
@@ -279,13 +279,13 @@ def test_files_replay_in_installer_order():
     assert names[-1] == "endpoint_schema.sql"
 
 
-def test_the_committed_list_is_sorted_and_unique():
+def test_the_committed_list_is_sorted_and_unique() -> None:
     lines = _expected_lines()
     assert lines == sorted(lines, key=lambda s: s.encode()), "tests/expected_privileges.txt must be in C (byte) order"
     assert len(lines) == len(set(lines)), "tests/expected_privileges.txt has duplicate lines"
 
 
-def test_function_names_are_not_overloaded():
+def test_function_names_are_not_overloaded() -> None:
     names = [l.split("(")[0] for l in _expected_lines() if l.startswith("function ")]
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert not dupes, f"overloaded functions {dupes}: test_privileges_pinned matches by name only; tighten it"
@@ -327,7 +327,7 @@ def _run(sql: str) -> list[str]:
         "RAISE NOTICE 'grant SELECT to haf_stats_user on whichever haf_stats_backend table applies';",
     ],
 )
-def test_consistent_sources_pass(sql):
+def test_consistent_sources_pass(sql) -> None:
     assert _run(sql) == []
 
 
@@ -349,7 +349,7 @@ def test_consistent_sources_pass(sql):
         ("GRANT EXECUTE ON FUNCTION haf_stats_app.gone() TO haf_stats_user;", "does not list"),
     ],
 )
-def test_inconsistent_sources_fail(sql, needle):
+def test_inconsistent_sources_fail(sql, needle) -> None:
     errors = _run(sql)
     assert any(needle in e for e in errors), errors
 
@@ -366,6 +366,6 @@ def test_inconsistent_sources_fail(sql, needle):
         "EXECUTE 'GRANT INSERT ON ' || 'haf_stats_backend.t' || ' TO haf_stats_user';",
     ],
 )
-def test_an_unparseable_statement_is_reported_not_skipped(sql):
+def test_an_unparseable_statement_is_reported_not_skipped(sql) -> None:
     _, unparsed = parse(sql, "fixture.sql")
     assert unparsed, sql
