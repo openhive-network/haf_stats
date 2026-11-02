@@ -70,6 +70,9 @@
 #                  `haf` container of docker-compose-test.yml (left up by
 #                  run_tests.sh --keep), over its local socket as haf_admin.
 #
+# Each guard has a name (--list-guards prints them in order); --guard=NAME, repeated,
+# runs only those guards (in the order above). Without it every guard runs.
+#
 # Run from the repo root. Exits non-zero if any guard fails.
 # =============================================================================
 set -euo pipefail
@@ -85,6 +88,9 @@ PG_HOST=""
 PG_PORT="5432"
 PG_USER="haf_admin"
 PG_DB="haf_block_log"
+GUARDS=(parity hived-snapshot content-volume-rebuild community-vs-hivemind interactions-cap
+  witness-blocks-rebuild context-vs-app-status content-vs-hivemind authored-ops-signers)
+SELECTED=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -92,10 +98,16 @@ for arg in "$@"; do
     --port=*) require_flag_value "$arg"; PG_PORT="${arg#*=}" ;;
     --user=*) require_flag_value "$arg"; PG_USER="${arg#*=}" ;;
     --database=*) require_flag_value "$arg"; PG_DB="${arg#*=}" ;;
+    --guard=*)
+      require_flag_value "$arg"
+      [[ " ${GUARDS[*]} " == *" ${arg#*=} "* ]] || { echo "ERROR: unknown guard: ${arg#*=} (--list-guards names them)"; exit 1; }
+      SELECTED+=("${arg#*=}") ;;
+    --list-guards) printf '%s\n' "${GUARDS[@]}"; exit 0 ;;
     --help|-h)
-      echo "Usage: $0 [--host=H [--port=P] [--user=U] [--database=D]]"
+      echo "Usage: $0 [--host=H [--port=P] [--user=U] [--database=D]] [--guard=NAME]... | --list-guards"
       echo "  no args        run against docker-compose-test.yml's haf container (local)"
       echo "  --host=H ...    run over TCP against H:P as user U (CI)"
+      echo "  --guard=NAME    run only the named guard(s); --list-guards prints every name"
       exit 0 ;;
     *) echo "ERROR: unknown option: $arg"; exit 1 ;;
   esac
@@ -116,52 +128,78 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "===== Guard 1/9: parity (independent in-DB re-derivation) ====="
-run_sql_file tests/parity/mainnet_metrics_parity.sql
+selected() {
+  [ ${#SELECTED[@]} -eq 0 ] || [[ " ${SELECTED[*]} " == *" $1 "* ]]
+}
 
-echo "===== Guard 2/9: regression (vs external hived snapshot) ====="
-if [[ "$MODE" == "tcp" ]]; then
-  # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
-  bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}" --database="${PG_DB}"
-else
-  # No host-side TCP into the local haf image — drive psql inside the container.
-  "${COMPOSE[@]}" cp tests/regression/sql/00_schema.sql haf:/tmp/reg_00.sql
-  "${COMPOSE[@]}" cp tests/regression/sql/02_compare.sql haf:/tmp/reg_02.sql
-  # Render the committed hived fixture into INSERT statements (needs python3 on the host).
-  python3 tests/regression/load_expected_metrics.py tests/regression/account_metrics_dump.json.gz > /tmp/reg_load.sql
-  "${COMPOSE[@]}" cp /tmp/reg_load.sql haf:/tmp/reg_load.sql
-  PSQL_IN_HAF() { "${COMPOSE[@]}" exec -T haf psql -U haf_admin -d haf_block_log -v ON_ERROR_STOP=on "$@"; }
-  PSQL_IN_HAF -f /tmp/reg_00.sql
-  PSQL_IN_HAF -f /tmp/reg_load.sql
-  PSQL_IN_HAF -f /tmp/reg_02.sql
-  PSQL_IN_HAF -c "SELECT haf_stats_test.compare_account_metrics();"
-  PSQL_IN_HAF -c "SELECT account, field, expected, actual FROM haf_stats_test.differing_metrics ORDER BY 1,2;"
-  DIFF=$(PSQL_IN_HAF -tAc "SELECT COUNT(*) FROM haf_stats_test.differing_metrics;" | tr -d '[:space:]')
-  if [ "${DIFF}" != "0" ]; then
-    echo "REGRESSION FAILED: ${DIFF} field(s) differ from the hived snapshot"
-    exit 1
+if selected parity; then
+  echo "===== Guard 1/9: parity (independent in-DB re-derivation) ====="
+  run_sql_file tests/parity/mainnet_metrics_parity.sql
+fi
+
+if selected hived-snapshot; then
+  echo "===== Guard 2/9: regression (vs external hived snapshot) ====="
+  if [[ "$MODE" == "tcp" ]]; then
+    # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
+    bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}" --database="${PG_DB}"
+  else
+    # No host-side TCP into the local haf image — drive psql inside the container.
+    "${COMPOSE[@]}" cp tests/regression/sql/00_schema.sql haf:/tmp/reg_00.sql
+    "${COMPOSE[@]}" cp tests/regression/sql/02_compare.sql haf:/tmp/reg_02.sql
+    # Render the committed hived fixture into INSERT statements (needs python3 on the host).
+    python3 tests/regression/load_expected_metrics.py tests/regression/account_metrics_dump.json.gz > /tmp/reg_load.sql
+    "${COMPOSE[@]}" cp /tmp/reg_load.sql haf:/tmp/reg_load.sql
+    PSQL_IN_HAF() { "${COMPOSE[@]}" exec -T haf psql -U haf_admin -d haf_block_log -v ON_ERROR_STOP=on "$@"; }
+    PSQL_IN_HAF -f /tmp/reg_00.sql
+    PSQL_IN_HAF -f /tmp/reg_load.sql
+    PSQL_IN_HAF -f /tmp/reg_02.sql
+    PSQL_IN_HAF -c "SELECT haf_stats_test.compare_account_metrics();"
+    PSQL_IN_HAF -c "SELECT account, field, expected, actual FROM haf_stats_test.differing_metrics ORDER BY 1,2;"
+    DIFF=$(PSQL_IN_HAF -tAc "SELECT COUNT(*) FROM haf_stats_test.differing_metrics;" | tr -d '[:space:]')
+    if [ "${DIFF}" != "0" ]; then
+      echo "REGRESSION FAILED: ${DIFF} field(s) differ from the hived snapshot"
+      exit 1
+    fi
   fi
 fi
 
-echo "===== Guard 3/9: content-volume rebuild consistency (issue #42) ====="
-run_sql_file tests/parity/content_volume_rebuild_consistency.sql
+if selected content-volume-rebuild; then
+  echo "===== Guard 3/9: content-volume rebuild consistency (issue #42) ====="
+  run_sql_file tests/parity/content_volume_rebuild_consistency.sql
+fi
 
-echo "===== Guard 4/9: community derivation vs hivemind (issue #47) ====="
-run_sql_file tests/parity/community_vs_hivemind.sql
+if selected community-vs-hivemind; then
+  echo "===== Guard 4/9: community derivation vs hivemind (issue #47) ====="
+  run_sql_file tests/parity/community_vs_hivemind.sql
+fi
 
-echo "===== Guard 5/9: interactions op-ceiling guard (issue #48) ====="
-run_sql_file tests/parity/interactions_cap.sql
+if selected interactions-cap; then
+  echo "===== Guard 5/9: interactions op-ceiling guard (issue #48) ====="
+  run_sql_file tests/parity/interactions_cap.sql
+fi
 
-echo "===== Guard 6/9: witness blocks rebuild consistency (issue #54) ====="
-run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
+if selected witness-blocks-rebuild; then
+  echo "===== Guard 6/9: witness blocks rebuild consistency (issue #54) ====="
+  run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
+fi
 
-echo "===== Guard 7/9: HAF context vs app_status parity (issue #55) ====="
-run_sql_file tests/parity/context_vs_app_status.sql
+if selected context-vs-app-status; then
+  echo "===== Guard 7/9: HAF context vs app_status parity (issue #55) ====="
+  run_sql_file tests/parity/context_vs_app_status.sql
+fi
 
-echo "===== Guard 8/9: post/comment counts vs hivemind (issues #42, #45, #63) ====="
-run_sql_file tests/parity/content_vs_hivemind.sql
+if selected content-vs-hivemind; then
+  echo "===== Guard 8/9: post/comment counts vs hivemind (issues #42, #45, #63) ====="
+  run_sql_file tests/parity/content_vs_hivemind.sql
+fi
 
-echo "===== Guard 9/9: authored-ops signers vs hive.get_required_authorities (issue #112) ====="
-run_sql_file tests/parity/authored_ops_signers.sql
+if selected authored-ops-signers; then
+  echo "===== Guard 9/9: authored-ops signers vs hive.get_required_authorities (issue #112) ====="
+  run_sql_file tests/parity/authored_ops_signers.sql
+fi
 
+if [ ${#SELECTED[@]} -gt 0 ]; then
+  echo "===== Selected correctness guards PASSED (${SELECTED[*]}) ====="
+  exit 0
+fi
 echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle + authored-ops signers) ====="
