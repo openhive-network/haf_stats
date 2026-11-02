@@ -96,3 +96,25 @@ def test_tavern_report_left_by_an_earlier_run_is_not_counted(tmp_path: Path) -> 
     assert failure.get("message") == "exit 9"
     assert ET.parse(out / "endpoint.xml").getroot().get("failures") == "1"
     assert not (out / "tavern.xml").exists()
+
+
+def test_suite_report_left_by_an_earlier_run_is_not_counted(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "endpoint.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<testsuite name="endpoint" tests="1" failures="1" errors="0" skipped="0">\n'
+        '<testcase classname="endpoint" name="tavern"><failure message="old"/></testcase>\n'
+        '</testsuite>\n')
+    compose = tmp_path / "compose.yml"
+    # The lane exits before it writes a report of its own: it has no runner for this image.
+    compose.write_text('services:\n  worker:\n    image: "alpine:3"\n    command: "true"\n')
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(compose), "worker", str(out), "endpoint"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=TIMEOUT,
+    )
+
+    assert result.returncode == 1, result.stderr
+    assert "worker: no local runner for image 'alpine:3'" in result.stderr
+    assert not (out / "endpoint.xml").exists()
