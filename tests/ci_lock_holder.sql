@@ -15,9 +15,8 @@
 -- db/process_top_accounts_alltime.sql after every file that calls apply_schema_migration, and that
 -- file drops and recreates haf_stats_app.refresh_top_accounts_alltime(), so the function's OID
 -- changes exactly when the install is past the last migration (tests/unit/test_ddl_lock_guard.py
--- pins that ordering). An earlier version sampled pg_stat_activity instead; an install under lock
--- runs in well under a second, so four polls a second could miss it entirely and fail the lane
--- for nothing.
+-- pins that ordering). Sampling pg_stat_activity would not do: an install under lock runs in well
+-- under a second, so four polls a second could miss it entirely and fail the lane for nothing.
 --
 -- It fails if a reader-blocking request appears, or if the marker has not changed by the deadline
 -- (no install ran, or it is stuck). It cannot pass while an install is still stuck, because a

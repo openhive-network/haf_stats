@@ -93,7 +93,7 @@ services:
     # all: row-level security admits only hive_applications_group, and
     # db/builtin_roles.sql keeps the API role out of it (#88). The NOINHERIT flag is not the
     # mechanism -- builtin_roles.sql grants SELECT on hafd directly, and sets that flag only
-    # where it creates the role. (An earlier revision gave the mechanism as NOINHERIT.)
+    # where it creates the role.
     # Harmless for SELECT 1, fatal for any real check.
     #
     # start_period covers a first run against a fresh HAF, which replays in MASSIVE
@@ -102,10 +102,8 @@ services:
     # SELECT 1 check and is NOT a considered number for the new one: Docker >= 25 ends the
     # start period at the first success, so it does not in fact cover a whole replay. Left
     # alone because tuning it without a measured MASSIVE batch duration would be
-    # guessing twice. NOTE: haf-stats-api's depends_on was relaxed from service_healthy
-    # to service_started in the same change -- an earlier revision of this comment
-    # claimed "nothing yet consumes this service's health", which was false fifteen
-    # lines below its own text.
+    # guessing twice. haf-stats-api's depends_on below is service_started, not
+    # service_healthy, because of this; its comment gives the detail.
     healthcheck:
       test: ["CMD", "/app/block-processing-healthcheck.sh"]
       interval: 60s
