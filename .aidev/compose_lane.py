@@ -30,7 +30,8 @@ project adds to its CI lane runs here too), and runs each one as a local process
 Bind mounts at container paths are served by rewriting those paths in commands,
 environment values and mounted shell scripts; host names of the services run here
 resolve to 127.0.0.1. Each service's output goes to OUT_DIR/<service>.log; one junit
-case per service goes to OUT_DIR/<SUITE>.xml (tavern's own report beside it).
+case per service goes to OUT_DIR/<SUITE>.xml (tavern's own report beside it; a failed
+tavern case is skipped when that report records the failures per test).
 Exit 0 iff WAIT_SERVICE exited 0.
 """
 from __future__ import annotations
@@ -48,12 +49,15 @@ from xml.sax.saxutils import escape, quoteattr
 
 import yaml
 
+from junit_cases import recorded_failures
+
 STACK_SERVICES = {"postgres"}
 LANE_TIMEOUT = 600  # CI's `timeout 600 docker compose ... wait`
 REWRITER_PORTS = {"80": "18080", "81": "18081"}
 POSTGREST_PORT = "3000"
 APP_LINK = Path("/tmp/aidev-app")
 TEST_VENV_BIN = "/opt/venv/bin"
+TAVERN_JUNIT = "tavern.xml"
 LOG_TAIL_LINES = 80
 CONTROL = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -308,7 +312,7 @@ class Lane:
         text = cmd if isinstance(cmd, str) else " ".join(cmd or [])
         pytest_part = text[text.index("pytest "):].strip().rstrip('"').strip()
         args = shlex.split(svc.rewrite(pytest_part))[1:]
-        junit = self.out / "tavern.xml"
+        junit = self.out / TAVERN_JUNIT
         return ["pytest", "-p", "no:cacheprovider", f"--junitxml={junit}", "-o", "junit_family=xunit1"] + args
 
     def run(self) -> int:
@@ -379,6 +383,13 @@ class Lane:
                 cases.append(head + "</testcase>")
             else:
                 msg = "never finished" if svc.rc is None else f"exit {svc.rc}"
+                # Failures tavern.xml records per test are reported there, under each
+                # test's own id, as .aidev/junit_cases.py does for a step.
+                failed = recorded_failures(str(self.out / TAVERN_JUNIT)) if svc.name == "tavern" else 0
+                if failed:
+                    msg = f"{msg}: {failed} failing test(s) reported per test in {TAVERN_JUNIT}"
+                    cases.append(f'{head}<skipped message={quoteattr(msg)}/></testcase>')
+                    continue
                 cases.append(f'{head}<failure message={quoteattr(msg)}>{escape(tail(svc.logfile))}</failure></testcase>')
         failures = sum("<failure" in c for c in cases)
         skipped = sum("<skipped" in c for c in cases)

@@ -33,7 +33,8 @@ def log_tail(path: str) -> str:
     return "\n".join(lines[-LOG_TAIL_LINES:])
 
 
-def _recorded_failures(path: str) -> int:
+def recorded_failures(path: str) -> int:
+    """Failing or erroring testcases with both classname and name in the junit at PATH (0 if absent or unparsable)."""
     if not path or not os.path.isfile(path):
         return 0
     try:
@@ -58,7 +59,7 @@ def main(junit: str, suite: str, cases_file: str) -> None:
             _, name, status, seconds, message, log = fields[:6]
             tests_junits = [path for path in fields[6:] if path]
             if status == "fail":
-                failed = sum(_recorded_failures(path) for path in tests_junits)
+                failed = sum(recorded_failures(path) for path in tests_junits)
                 if failed:
                     status = "skip"
                     where = ", ".join(os.path.relpath(path, os.path.dirname(junit) or ".") for path in tests_junits)
