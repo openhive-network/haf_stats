@@ -54,9 +54,24 @@ CREATE_FN = re.compile(
 CREATE_OR_REPLACE_FN = re.compile(
     r"(?i)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:FUNCTION|PROCEDURE)\s+([a-z0-9_\".]+)\s*\(",
     re.MULTILINE)
+# The argument list is optional: endpoints/endpoint_schema.sql and most of db/ write
+# `DROP FUNCTION IF EXISTS s.f;`, which drops the sole overload of that name and errors
+# loudly if there are several. Requiring `(` made the parser see 1 of 26 endpoint DROPs.
 DROP_FN = re.compile(
-    r"(?i)^[ \t]*DROP\s+(?:FUNCTION|PROCEDURE)\s+IF\s+EXISTS\s+([a-z0-9_\".]+)\s*\(",
+    r"(?i)^[ \t]*DROP\s+(?:FUNCTION|PROCEDURE)\s+IF\s+EXISTS\s+([a-z0-9_\".]+)\s*\(?",
     re.MULTILINE)
+
+# A CREATE OR REPLACE whose signature genuinely never changes may opt out of needing a
+# preceding DROP by carrying this marker in the comment block directly above it.
+STABLE_SIGNATURE_MARKER = "-- idempotency: stable signature"
+
+# On-disk SQL files install_app.sh deliberately does not run, each with the reason.
+NOT_INSTALLED: dict[str, str] = {}
+# Referenced by install_app.sh but produced at build time, so absent from a checkout.
+GENERATED_SQL = {"db/version.sql": "written by the Docker build; guarded by [ -f ]"}
+# Ratchet on the installer-derived list (generated files excluded). A change that
+# makes the extractor see fewer files has to edit this number, in review.
+INSTALLED_SQL_FILE_COUNT = 27
 
 # PostgreSQL spells the same type several ways; a DROP and a CREATE may disagree on
 # spelling while naming the same signature. Normalising avoids false alarms without
@@ -83,8 +98,8 @@ TYPE_ALIASES = {
 }
 
 # Types whose canonical name is several words. These must be recognised BEFORE the
-# "a leading identifier is the parameter name" heuristic, which cannot tell
-# `v DOUBLE PRECISION` from `DOUBLE PRECISION` and silently kept `precision`.
+# "a leading identifier is the parameter name" heuristic, which takes DOUBLE in a bare
+# `DOUBLE PRECISION` for a parameter name and silently keeps `precision`.
 # Longest first, so TIMESTAMP WITH TIME ZONE wins over TIMESTAMP.
 MULTIWORD_TYPES = sorted(
     (
@@ -96,53 +111,148 @@ MULTIWORD_TYPES = sorted(
 )
 
 
+# A path the installer builds from a shell expansion: `${SCRIPT_DIR}/../db/x.sql`,
+# `"${SCRIPT_DIR}"/../db/x_*.sql`, `$(dirname "$0")/../db/x.sql`, `${DB_DIR}/x.sql`.
+# Anchored on the expansion rather than on the literal `${SCRIPT_DIR}/`, which each of
+# those other spellings bypassed with a non-idempotent file and the suite green. A bare
+# `db/x.sql` in a log message or SQL string is prose, not a path, and is not matched.
+_INSTALLER_SQL_PATH = re.compile(r"""(?<=[})"']/)((?:\.\./)*[A-Za-z0-9_.*-]+(?:/[A-Za-z0-9_.*-]+)*\.sql)\b""")
+
+
+def _installer_sql_paths(script: str) -> list[str]:
+    """Every SQL path a shell script builds, outside its `#` comment lines."""
+    code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
+    return sorted(set(_INSTALLER_SQL_PATH.findall(code)))
+
+
+def _resolve_installer_path(rel: str) -> list[Path]:
+    """The files an installer path names: a `../` path is relative to scripts/ (every
+    expansion install_app.sh roots paths in is its own directory); anything else is
+    tried against the repository root, then scripts/. Globs expand. [] if unresolved."""
+    bases = (ROOT / "scripts",) if rel.startswith("../") else (ROOT, ROOT / "scripts")
+    for base in bases:
+        hits = sorted(p.resolve() for p in base.glob(rel) if p.is_file()) if "*" in rel \
+            else [p for p in [(base / rel).resolve()] if p.is_file()]
+        if hits:
+            return hits
+    return []
+
+
 def _installed_sql_files() -> list[Path]:
     """The files install_app.sh actually executes.
 
     Derived from the script rather than globbed, so the scanner cannot drift from the
     installer -- which is exactly how endpoints/endpoint_schema.sql went unscanned while
-    being the largest file installed.
+    being the largest file installed. The tests at the end of this file cross-check the
+    result against the files on disk, so an installer spelling the extractor misses is a
+    failure rather than a file silently left unscanned.
     """
-    body = INSTALL_SH.read_text(encoding="utf-8")
-    rel = set(re.findall(r'\$\{SCRIPT_DIR\}/\.\./([A-Za-z0-9_/]+\.sql)', body))
-    rel |= set(re.findall(r'\$\{SCRIPT_DIR\}/([A-Za-z0-9_/]+\.sql)', body))
-    files = []
-    for r in sorted(rel):
-        for base in (ROOT, ROOT / "scripts"):
-            p = (base / r).resolve()
-            if p.is_file():
-                files.append(p)
-                break
-    assert files, "no installed .sql files found; the install_app.sh parser needs updating"
-    # version.sql is generated at build time and is legitimately absent from a checkout.
-    return files
+    script = INSTALL_SH.read_text(encoding="utf-8")
+    return sorted({p for rel in _installer_sql_paths(script) for p in _resolve_installer_path(rel)})
+
+
+_DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _lex_comments(text: str) -> tuple[str, str | None]:
+    """`text` with comments blanked, plus the construct left open at end of input (or None).
+
+    Length- and line-preserving: every comment character becomes a space (newlines
+    kept), so offsets in the result are offsets in the source.
+
+    Literal-aware, as PostgreSQL's lexer is: `/*` or `--` inside '...', E'...', "..." or
+    a $tag$ string does not open a comment. Without this one `'/*'` in a string blanked
+    the rest of endpoint_schema.sql and every check on it passed on zero statements.
+
+    A $tag$ body is usually PL/pgSQL, whose comments must go too, so it is lexed the same
+    way -- unless that leaves something open (a plain string like $d$it's$d$, or Python
+    in a plpython3u body), in which case it is kept verbatim, which is what it is.
+    """
+    out, i, depth, n = [], 0, 0, len(text)
+
+    def blank(s: str) -> str:
+        return "".join("\n" if c == "\n" else " " for c in s)
+
+    while i < n:
+        c = text[i]
+        if depth:
+            if text.startswith("/*", i):
+                depth += 1
+                out.append("  ")
+                i += 2
+            elif text.startswith("*/", i):
+                depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append(blank(c))
+                i += 1
+        elif text.startswith("/*", i):
+            depth = 1
+            out.append("  ")
+            i += 2
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            out.append(" " * (j - i))
+            i = j
+        elif c in "'\"":
+            escapes = c == "'" and i > 0 and text[i - 1] in "eE" \
+                and not (i > 1 and (text[i - 2].isalnum() or text[i - 2] in "_$"))
+            j = i + 1
+            while True:
+                if j >= n:
+                    return "".join(out) + text[i:], "string literal" if c == "'" else "quoted identifier"
+                if escapes and text[j] == "\\":
+                    j += 2
+                elif text[j] == c:
+                    if text.startswith(c, j + 1):
+                        j += 2
+                    else:
+                        break
+                else:
+                    j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif c == "$" and (m := _DOLLAR_TAG.match(text, i)) \
+                and not (i and (text[i - 1].isalnum() or text[i - 1] in "_$")):
+            tag = m.group(0)
+            close = text.find(tag, m.end())
+            if close == -1:
+                return "".join(out) + text[i:], f"{tag} string"
+            body = text[m.end():close]
+            lexed, left_open = _lex_comments(body)
+            out.append(tag + (body if left_open else lexed) + tag)
+            i = close + len(tag)
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), ("block comment" if depth else None)
 
 
 def _strip_comments(text: str) -> str:
-    """Remove /* ... */ (nesting-aware, as PostgreSQL nests them) and -- to end of line.
+    """Blank out /* ... */ (nesting-aware, as PostgreSQL nests them) and -- to end of line,
+    leaving string literals, quoted identifiers and $tag$ strings intact.
 
     Line-only stripping was not enough: a DROP written as PROSE inside a block comment
     satisfied the assertion, which is the same "asserting against the documentation
     instead of the code" trap this suite has hit before.
     """
-    out, i, depth, n = [], 0, 0, len(text)
-    while i < n:
-        if text.startswith("/*", i):
-            depth += 1
-            i += 2
-        elif text.startswith("*/", i) and depth:
-            depth -= 1
-            i += 2
-        elif depth:
-            out.append("\n" if text[i] == "\n" else " ")
-            i += 1
-        elif text.startswith("--", i):
-            j = text.find("\n", i)
-            i = n if j == -1 else j
-        else:
-            out.append(text[i])
-            i += 1
-    return "".join(out)
+    return _lex_comments(text)[0]
+
+
+def _sql_code(path: Path) -> tuple[str, str]:
+    """(raw text, text with comments and function bodies blanked) for an installed file.
+
+    Fails if the lexer ends inside a comment or literal: from that point on it saw no
+    code at all, and every check below would pass on what remained.
+    """
+    raw = path.read_text(encoding="utf-8")
+    stripped, left_open = _lex_comments(raw)
+    assert left_open is None, (
+        f"{path.name}: an unterminated {left_open} -- everything after it is invisible to "
+        f"this scanner. Either the file is broken or the lexer here misreads it.")
+    return raw, _strip_function_bodies(stripped)
 
 
 def _strip_function_bodies(text: str) -> str:
@@ -249,7 +359,7 @@ def _arg_type(arg: str) -> str:
         # Still resolved through TYPE_ALIASES: `char varying` is a real spelling whose
         # canonical name is `character varying`, and the heuristic below would strip
         # CHAR as if it were the parameter name and leave the non-type `varying`.
-        if low == mw or low.endswith(" " + mw):
+        if low == mw:
             return TYPE_ALIASES.get(mw, mw) + suffix
 
     # A leading identifier is the parameter NAME only if something follows it.
@@ -258,30 +368,12 @@ def _arg_type(arg: str) -> str:
     # non-type `"from_date" text`. (#73 ended up using paren-less DROPs, which carry no
     # argument list at all, so it is the file's existing quoted-parameter style -- not
     # #73 -- that this has to parse.)
+    # `$` is legal after an identifier's first character, and "" escapes a quote.
     parts = a.split()
-    if len(parts) > 1 and re.fullmatch(r'[a-z_][a-z0-9_]*|"[^"]*"', parts[0], re.I):
+    if len(parts) > 1 and re.fullmatch(r'[a-z_][a-z0-9_$]*|"(?:[^"]|"")*"', parts[0], re.I):
         a = " ".join(parts[1:])
     a = a.strip().lower()
     return TYPE_ALIASES.get(a, a) + suffix
-
-
-# Not every object kind has an IF NOT EXISTS form. Offering it for TRIGGER, POLICY,
-# VIEW or TYPE prescribes invalid SQL -- the same defect as the DROP UNIQUE INDEX
-# message this file used to emit.
-_REMEDIES = {
-    "TYPE": "CREATE TYPE has no IF NOT EXISTS form: DROP TYPE IF EXISTS it first.",
-    "VIEW": "Use CREATE OR REPLACE VIEW, or DROP VIEW IF EXISTS it first "
-            "(there is no CREATE VIEW IF NOT EXISTS).",
-    "MATERIALIZED VIEW": "Use CREATE MATERIALIZED VIEW IF NOT EXISTS, or DROP it first.",
-    "TRIGGER": "Use CREATE OR REPLACE TRIGGER (PG14+), or DROP TRIGGER IF EXISTS it "
-               "first (there is no CREATE TRIGGER IF NOT EXISTS).",
-    "POLICY": "DROP POLICY IF EXISTS it first (there is no CREATE POLICY IF NOT EXISTS "
-              "and no CREATE OR REPLACE POLICY).",
-}
-
-
-def _remedy_for(kind: str) -> str:
-    return _REMEDIES.get(kind, f"Use CREATE {kind} IF NOT EXISTS, or DROP it first.")
 
 
 def _signature_of(arglist: str) -> tuple:
@@ -301,44 +393,81 @@ def _balanced_args(text: str, open_paren: int) -> str:
     raise AssertionError("unbalanced parentheses at offset %d" % open_paren)
 
 
-def _signatures(pattern, text: str) -> list[tuple[str, tuple[str, ...], int]]:
+def _identifier(name: str) -> str:
+    """A possibly-qualified name as PostgreSQL resolves it: unquoted parts fold to lower
+    case, quoted parts are kept verbatim. "Assert_Op_Types" and assert_op_types are two
+    different functions, so a DROP of one is a silent no-op under IF EXISTS for the other.
+    """
+    return ".".join(p[1:-1].replace('""', '"') if p.startswith('"') else p.lower()
+                    for p in re.findall(r'"(?:[^"]|"")*"|[^."]+', name))
+
+
+def _signatures(pattern, text: str) -> list[tuple[str, tuple[str, ...] | None, int]]:
+    """(name, argument types, offset) per match. Types are None for a DROP without an
+    argument list, which drops whichever single overload exists."""
     out = []
     for m in pattern.finditer(text):
-        args = _balanced_args(text, text.index("(", m.end() - 1))
-        types = _signature_of(args)
-        out.append((m.group(1).lower().replace('"', ""), types, m.start()))
+        types = None
+        if text[m.end() - 1] == "(":
+            types = _signature_of(_balanced_args(text, m.end() - 1))
+        out.append((_identifier(m.group(1)), types, m.start()))
     return out
 
 
-@pytest.mark.parametrize("path", _installed_sql_files(), ids=lambda p: p.name)
-def test_the_parser_recognises_every_function_definition(path: Path):
-    """A definition the patterns miss is not merely unmatched -- it is UNCHECKED, and the
-    file then passes with zero findings. This turns every parser blind spot into a loud
-    failure instead of a silent pass, which is the single guard the first version most
-    needed."""
-    text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
-    loose = len(ANY_CREATE_FN.findall(text))
-    strict = len(CREATE_FN.findall(text)) + len(CREATE_OR_REPLACE_FN.findall(text))
-    assert loose == strict, (
-        f"{path.name}: {loose} function/procedure definitions found by a loose scan but "
-        f"only {strict} parsed by the strict patterns -- {loose - strict} would be "
-        f"silently unchecked. Fix the patterns rather than the count."
-    )
+def _create_offset(m: re.Match) -> int:
+    """Offset of the CREATE keyword in a line-anchored match."""
+    return m.start() + len(m.group(0)) - len(m.group(0).lstrip(" \t"))
 
 
-@pytest.mark.parametrize("path", _installed_sql_files(), ids=lambda p: p.name)
-def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
-    """A plain CREATE FUNCTION/PROCEDURE needs a DROP for the signature it creates, and
-    the DROP must come FIRST.
+def _unparsed_function_definitions(raw: str, text: str) -> list[str]:
+    """Definitions a loose scan of the RAW file finds that the strict patterns did not
+    parse, other than those `text` (aligned with `raw`) has blanked as comment or body."""
+    parsed = {_create_offset(m) for p in (CREATE_FN, CREATE_OR_REPLACE_FN)
+              for m in p.finditer(text)}
+    return [f"line {raw.count(chr(10), 0, m.start()) + 1}: {' '.join(m.group(0).split())}"
+            for m in ANY_CREATE_FN.finditer(raw)
+            if m.start() not in parsed and not text[m.start()].isspace()]
 
-    Matched on normalised argument TYPES, not on arity: DROP (BOOLEAN,BOOLEAN) followed
-    by CREATE (INT,INT) is the #60 bug exactly, and an arity match waves it through.
+
+def _has_stable_signature_marker(raw: str, line_start: int) -> bool:
+    for line in reversed(raw[:line_start].split("\n")[:-1]):
+        line = line.strip()
+        if not line.startswith("--"):
+            return False
+        if line.startswith(STABLE_SIGNATURE_MARKER):
+            return True
+    return False
+
+
+def _function_coverage(raw: str, text: str) -> tuple[int, int, list[str]]:
+    """(plain CREATEs, CREATE OR REPLACEs that are covered, the uncovered ones).
+
+    CREATE OR REPLACE succeeds on a re-install only while the signature AND return type
+    are unchanged; on the upgrade that changes either, it creates a second overload or
+    aborts. So it is covered only by a DROP of the name before it -- any argument list,
+    since its job is to clear the stale overload, not the current one -- or by an
+    explicit marker saying the signature is stable.
     """
-    text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
+    drops = _signatures(DROP_FN, text)
+    plain = _signatures(CREATE_FN, text)
+    covered, uncovered = 0, []
+    for name, types, pos in _signatures(CREATE_OR_REPLACE_FN, text):
+        if any(d[0] == name and d[2] < pos for d in drops) \
+                or _has_stable_signature_marker(raw, pos):
+            covered += 1
+        else:
+            uncovered.append(f"{name}({', '.join(types or ())})")
+    return len(plain), covered, uncovered
+
+
+def _unpaired_plain_creates(text: str) -> list[str]:
+    """Plain CREATE FUNCTION/PROCEDUREs with no earlier DROP of the same signature."""
     drops = _signatures(DROP_FN, text)
     problems = []
     for name, types, pos in _signatures(CREATE_FN, text):
-        matching = [d for d in drops if d[0] == name and d[1] == types]
+        # A DROP without an argument list removes the one overload of that name -- and
+        # errors loudly if there are several -- so it matches any signature.
+        matching = [d for d in drops if d[0] == name and d[1] in (types, None)]
         if not matching:
             got = sorted({d[1] for d in drops if d[0] == name})
             problems.append(
@@ -348,6 +477,148 @@ def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
             problems.append(
                 f"{name}({', '.join(types) or ''}) is dropped only AFTER it is created, "
                 f"so every install creates it and then destroys it")
+    return problems
+
+
+# Kinds checked by _non_idempotent_objects, with FUNCTION/PROCEDURE checked above.
+_OBJECT_KINDS = ("TYPE", "SCHEMA", "TABLE", "INDEX", "VIEW", "MATERIALIZED VIEW",
+                 "SEQUENCE", "TRIGGER", "POLICY", "EXTENSION", "DOMAIN", "AGGREGATE",
+                 "COLLATION", "RULE", "STATISTICS")
+_CHECKED_KINDS = frozenset(_OBJECT_KINDS) | {"FUNCTION", "PROCEDURE"}
+
+# Any statement that starts with CREATE -- at a line start or after a `;`. Used only to
+# prove the line-anchored patterns, and the kind list, saw everything.
+_ANY_CREATE_STATEMENT = re.compile(
+    r"(?i)(?:^|;)\s*(?P<create>CREATE)\s+(?:OR\s+REPLACE\s+)?(?:UNLOGGED\s+|UNIQUE\s+)?"
+    r"(?P<kind>MATERIALIZED\s+VIEW|\w+)", re.MULTILINE)
+
+
+def _object_pattern(kind: str) -> re.Pattern:
+    """A CREATE <kind> without IF NOT EXISTS; group 1 is the object name.
+
+    CONCURRENTLY is optional and precedes IF NOT EXISTS; an index may also be UNNAMED
+    (CREATE INDEX ON tbl (...)), where PostgreSQL derives the name. The first cut
+    captured "CONCURRENTLY" and "ON" as object names.
+    """
+    return re.compile(
+        r"(?i)^[ \t]*CREATE\s+(?:UNLOGGED\s+|UNIQUE\s+)?%s\s+(?:CONCURRENTLY\s+)?"
+        r"(?!IF\s+NOT\s+EXISTS)(?!ON\b)(?!CONCURRENTLY\b)([a-z0-9_.\"]+)"
+        % kind.replace(" ", r"\s+"), re.MULTILINE)
+
+
+def _non_idempotent_objects(text: str) -> list[tuple[str, str]]:
+    """(kind, name) of every CREATE with neither IF NOT EXISTS nor an earlier DROP.
+
+    No exemption for CREATE TABLE/VIEW ... AS SELECT: nothing rebuilds those. A second
+    CREATE TABLE x AS raises 42P07 like any other, and CREATE VIEW has no IF NOT EXISTS
+    form at all (CREATE OR REPLACE VIEW is not matched by these patterns).
+    """
+    problems = []
+    for kind in _OBJECT_KINDS:
+        for m in _object_pattern(kind).finditer(text):
+            name = m.group(1)
+            if re.search(r"(?i)DROP\s+%s\s+IF\s+EXISTS\s+%s\b"
+                         % (kind.replace(" ", r"\s+"), re.escape(name)), text[:m.start()]):
+                continue
+            problems.append((kind, name))
+    return problems
+
+
+def _unchecked_creates(text: str) -> list[str]:
+    """CREATE statements the line-anchored patterns cannot see, or of a kind they do not
+    check. Both used to be skipped silently: `SELECT 1; CREATE TYPE ...` on one line, and
+    every CREATE DOMAIN / OPERATOR / CAST."""
+    out = []
+    for m in _ANY_CREATE_STATEMENT.finditer(text):
+        kind = " ".join(m.group("kind").upper().split())
+        create = m.start("create")
+        anchored = not text[text.rfind("\n", 0, create) + 1:create].strip()
+        if kind not in _CHECKED_KINDS:
+            out.append(f"CREATE {kind}: not a kind this scanner checks")
+        elif not anchored:
+            out.append(f"CREATE {kind}: not at the start of a line")
+    return out
+
+
+# Not every object kind has an IF NOT EXISTS form. Offering it for TRIGGER, POLICY,
+# VIEW or TYPE prescribes invalid SQL -- the same defect as the DROP UNIQUE INDEX
+# message this file used to emit.
+_REMEDIES = {
+    "TYPE": "CREATE TYPE has no IF NOT EXISTS form: DROP TYPE IF EXISTS it first.",
+    "DOMAIN": "CREATE DOMAIN has no IF NOT EXISTS form: DROP DOMAIN IF EXISTS it first.",
+    "VIEW": "Use CREATE OR REPLACE VIEW, or DROP VIEW IF EXISTS it first "
+            "(there is no CREATE VIEW IF NOT EXISTS).",
+    "MATERIALIZED VIEW": "Use CREATE MATERIALIZED VIEW IF NOT EXISTS, or DROP it first.",
+    "TRIGGER": "Use CREATE OR REPLACE TRIGGER (PG14+), or DROP TRIGGER IF EXISTS it "
+               "first (there is no CREATE TRIGGER IF NOT EXISTS).",
+    "POLICY": "DROP POLICY IF EXISTS it first (there is no CREATE POLICY IF NOT EXISTS "
+              "and no CREATE OR REPLACE POLICY).",
+    "AGGREGATE": "Use CREATE OR REPLACE AGGREGATE, or DROP AGGREGATE IF EXISTS it first.",
+    "RULE": "Use CREATE OR REPLACE RULE, or DROP RULE IF EXISTS it first.",
+}
+
+
+def _remedy_for(kind: str) -> str:
+    return _REMEDIES.get(kind, f"Use CREATE {kind} IF NOT EXISTS, or DROP it first.")
+
+
+_INSTALLED = _installed_sql_files()
+
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_the_comment_stripper_did_not_swallow_the_file(path: Path) -> None:
+    """A stripper that mistakes a literal for a comment opener makes real code invisible,
+    and every check below then passes on nothing. _sql_code fails on a construct left
+    open at end of file; this catches one that closes far too late. The floor is well
+    under the leanest file today (sync_status.sql keeps 14% of its non-blank text)."""
+    raw, _ = _sql_code(path)
+    kept = len(re.sub(r"\s", "", _strip_comments(raw))) / max(1, len(re.sub(r"\s", "", raw)))
+    assert kept >= 0.10, (
+        f"{path.name}: only {kept:.0%} of the non-blank text survives comment stripping")
+
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_the_parser_recognises_every_function_definition(path: Path) -> None:
+    """A definition the patterns miss is not merely unmatched -- it is UNCHECKED, and the
+    file then passes with zero findings. This turns every parser blind spot into a loud
+    failure instead of a silent pass, which is the single guard the first version most
+    needed. The loose scan reads the RAW file, so it does not inherit a stripper failure."""
+    raw, text = _sql_code(path)
+    unparsed = _unparsed_function_definitions(raw, text)
+    assert not unparsed, (
+        f"{path.name}: function/procedure definitions found by a loose scan but not "
+        f"parsed by the strict patterns, so silently unchecked: {unparsed}. Fix the "
+        f"patterns rather than the SQL.")
+
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_every_function_definition_is_checked(path: Path) -> None:
+    """Every definition is either a plain CREATE (paired by signature below) or a
+    CREATE OR REPLACE with a DROP of its name before it or a stable-signature marker.
+
+    Plain CREATEs alone were 5 of 79 definitions: deleting the DROP that clears
+    refresh_network_vote_periods' legacy 1-arg overload, or any of the endpoint DROPs
+    that clear a stale parameter list, left the suite green.
+    """
+    raw, text = _sql_code(path)
+    plain, covered, uncovered = _function_coverage(raw, text)
+    total = len(ANY_CREATE_FN.findall(text))
+    assert not uncovered and plain + covered == total, (
+        f"{path.name}: {plain} plain + {covered} covered CREATE OR REPLACE != {total} "
+        f"definitions. No DROP FUNCTION IF EXISTS of the name before: {uncovered}. "
+        f"Add one, or mark a signature that will never change with "
+        f"'{STABLE_SIGNATURE_MARKER}' directly above the CREATE.")
+
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_every_created_function_is_dropped_with_its_own_signature(path: Path) -> None:
+    """A plain CREATE FUNCTION/PROCEDURE needs a DROP for the signature it creates, and
+    the DROP must come FIRST.
+
+    Matched on normalised argument TYPES, not on arity: DROP (BOOLEAN,BOOLEAN) followed
+    by CREATE (INT,INT) is the #60 bug exactly, and an arity match waves it through.
+    """
+    problems = _unpaired_plain_creates(_sql_code(path)[1])
     assert not problems, (
         f"{path.name}: not re-runnable -- a second install aborts with 'already exists "
         f"with same argument types': {problems}. Add DROP FUNCTION IF EXISTS for that "
@@ -356,7 +627,7 @@ def test_every_created_function_is_dropped_with_its_own_signature(path: Path):
     )
 
 
-def test_the_regression_that_prompted_this_file_is_covered():
+def test_the_regression_that_prompted_this_file_is_covered() -> None:
     """Pins the specific signature AND that it is still created, so a future edit has to
     keep the pair in step. (The generic test above subsumes the first half; this one
     names what to look at.)"""
@@ -370,46 +641,70 @@ def test_the_regression_that_prompted_this_file_is_covered():
         "without it every re-install aborts (#60)")
 
 
-@pytest.mark.parametrize("path", _installed_sql_files(), ids=lambda p: p.name)
-def test_other_object_types_are_created_idempotently(path: Path):
-    """CREATE TYPE/TABLE/SCHEMA/INDEX/VIEW/SEQUENCE/TRIGGER/POLICY/EXTENSION.
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_every_create_statement_is_one_the_scanner_checks(path: Path) -> None:
+    """The object-kind counterpart of the function guard: a CREATE the line-anchored
+    patterns cannot see, or of a kind they do not check, fails here instead of passing."""
+    unchecked = _unchecked_creates(_sql_code(path)[1])
+    assert not unchecked, (
+        f"{path.name}: {unchecked}. Put each statement on its own line, and teach "
+        f"_OBJECT_KINDS (and _REMEDIES, where IF NOT EXISTS does not exist) a new kind.")
 
-    CREATE TYPE has NO `IF NOT EXISTS` form at all, so it *requires* a preceding DROP --
-    the highest-risk class, and one the first version did not scan.
+
+@pytest.mark.parametrize("path", _INSTALLED, ids=lambda p: p.name)
+def test_other_object_types_are_created_idempotently(path: Path) -> None:
+    """CREATE TYPE/TABLE/SCHEMA/INDEX/VIEW/SEQUENCE/TRIGGER/POLICY/EXTENSION/DOMAIN/...
+
+    CREATE TYPE and CREATE DOMAIN have NO `IF NOT EXISTS` form at all, so they *require*
+    a preceding DROP -- the highest-risk class, and one the first version did not scan.
     """
-    text = _strip_function_bodies(_strip_comments(path.read_text(encoding="utf-8")))
-    # No "UNIQUE INDEX": the exemption search is built from the same string, so it
-    # looked for `DROP UNIQUE INDEX IF EXISTS`, which is a syntax error -- the only way
-    # to satisfy the assertion was IF NOT EXISTS or invalid SQL. Indexes drop with
-    # DROP INDEX regardless of uniqueness, and the INDEX pattern below already matches
-    # CREATE UNIQUE INDEX via the optional qualifier.
-    kinds = ("TYPE", "SCHEMA", "TABLE", "INDEX", "VIEW",
-             "MATERIALIZED VIEW", "SEQUENCE", "TRIGGER", "POLICY", "EXTENSION")
-    problems = []
-    for kind in kinds:
-        # CONCURRENTLY is optional and precedes IF NOT EXISTS; an index may also be
-        # UNNAMED (CREATE INDEX ON tbl (...)), where PostgreSQL derives the name. The
-        # first cut captured "CONCURRENTLY" and "ON" as object names.
-        pat = re.compile(
-            r"(?i)^[ \t]*CREATE\s+(?:UNLOGGED\s+|UNIQUE\s+)?%s\s+(?:CONCURRENTLY\s+)?"
-            r"(?!IF\s+NOT\s+EXISTS)(?!ON\b)(?!CONCURRENTLY\b)([a-z0-9_.\"]+)"
-            % kind.replace(" ", r"\s+"), re.MULTILINE)
-        for m in pat.finditer(text):
-            name = m.group(1)
-            # CREATE TABLE x AS SELECT / WITH is rebuilt wholesale; anchor to the
-            # grammar rather than to " AS " appearing anywhere nearby, which previously
-            # exempted GENERATED ALWAYS AS and DEFAULT CAST(0 AS NUMERIC).
-            if re.match(r"(?i)\s*AS\s+(SELECT|WITH)\b", text[m.end():m.end() + 40]):
-                continue
-            if re.search(r"(?i)DROP\s+%s\s+IF\s+EXISTS\s+%s\b"
-                         % (kind.replace(" ", r"\s+"), re.escape(name)), text[:m.start()]):
-                continue
-            problems.append(f"{kind} {name}")
+    problems = _non_idempotent_objects(_sql_code(path)[1])
     assert not problems, (
-        f"{path.name}: a re-install aborts on {problems}. "
-        + " ".join(sorted({_remedy_for(k.split()[0] if k.split()[0] != "MATERIALIZED"
-                                       else "MATERIALIZED VIEW")
-                           for k in problems}))
+        f"{path.name}: a re-install aborts on {[f'{k} {n}' for k, n in problems]}. "
+        + " ".join(sorted({_remedy_for(k) for k, _ in problems}))
+    )
+
+
+def _repo_relative(rel: str) -> str:
+    base = ROOT / "scripts" if rel.startswith("../") else ROOT
+    return (base / rel).resolve().relative_to(ROOT).as_posix()
+
+
+def test_every_sql_path_the_installer_builds_resolves() -> None:
+    """A path the extractor finds but cannot resolve is a file it does not scan -- a
+    `${DB_DIR}/x.sql` spelling, say. Only build-time generated files may be absent."""
+    unresolved = [rel for rel in _installer_sql_paths(INSTALL_SH.read_text(encoding="utf-8"))
+                  if not _resolve_installer_path(rel) and _repo_relative(rel) not in GENERATED_SQL]
+    assert not unresolved, (
+        f"install_app.sh builds {unresolved}, which this scanner cannot resolve to a file "
+        f"and therefore does not check. Extend _resolve_installer_path.")
+
+
+def test_every_sql_file_on_disk_is_installed_or_named_as_not_installed() -> None:
+    """The other direction: a file install_app.sh runs in a spelling the extractor misses
+    shows up here as on disk but not installed."""
+    installed = {p.relative_to(ROOT).as_posix() for p in _INSTALLED}
+    on_disk = {p.relative_to(ROOT).as_posix()
+               for d in ("db", "endpoints") for p in (ROOT / d).glob("*.sql")} - set(GENERATED_SQL)
+    assert on_disk - installed == set(NOT_INSTALLED), (
+        f"on disk but not found in install_app.sh: {sorted(on_disk - installed - set(NOT_INSTALLED))}; "
+        f"NOT_INSTALLED entries that are installed or gone: "
+        f"{sorted(set(NOT_INSTALLED) - (on_disk - installed))}")
+
+
+def test_the_installed_file_count_is_pinned() -> None:
+    count = len([p for p in _INSTALLED if p.relative_to(ROOT).as_posix() not in GENERATED_SQL])
+    assert count == INSTALLED_SQL_FILE_COUNT, (
+        f"install_app.sh now yields {count} SQL files, not {INSTALLED_SQL_FILE_COUNT}. If a "
+        f"file was added or removed on purpose, update INSTALLED_SQL_FILE_COUNT.")
+
+
+def test_the_installed_file_list_includes_the_endpoints_schema() -> None:
+    """Derived from install_app.sh, so it cannot drift from the installer. The first
+    version globbed db/*.sql and therefore never scanned the largest installed file."""
+    names = {p.name for p in _INSTALLED}
+    assert "endpoint_schema.sql" in names, (
+        "endpoints/endpoint_schema.sql is executed by install_app.sh and must be scanned"
     )
 
 
@@ -481,22 +776,173 @@ def test_other_object_types_are_created_idempotently(path: Path):
         ('"page" INT = 1, "page_size" INT = 20', ("integer", "integer")),
         ('"g" INT', ("integer",)),
         ('"g" CHARACTER VARYING = NULL', ("character varying",)),
+        # Multi-word ELEMENT types keep their array-ness. Without these, dropping the
+        # suffix from the multi-word branch collapsed DOUBLE PRECISION[] onto
+        # DOUBLE PRECISION and passed a DROP PostgreSQL cannot resolve -- #60 again.
+        ("DOUBLE PRECISION[]", ("double precision[]",)),
+        ("v DOUBLE PRECISION[]", ("double precision[]",)),
+        ("TIMESTAMP WITH TIME ZONE[]", ("timestamp with time zone[]",)),
+        ("CHARACTER VARYING[]", ("character varying[]",)),
+        ("TIME WITH TIME ZONE", ("time with time zone",)),
+        ("TIME WITHOUT TIME ZONE", ("time without time zone",)),
+        # Argument modes are keywords, and lowercase DDL is legal.
+        ("out b text", ()),
+        ("variadic parts text[]", ("text[]",)),
+        ("inout a integer", ("integer",)),
+        # Names the identifier pattern must still recognise as names.
+        ('"my""arg" DOUBLE PRECISION', ("double precision",)),
+        ("a$b INT", ("integer",)),
     ],
 )
-def test_the_signature_parser(arglist, expected):
+def test_the_signature_parser(arglist, expected) -> None:
     assert _signature_of(arglist) == expected
 
 
-def test_block_comments_are_stripped():
+def test_block_comments_are_stripped() -> None:
     """A DROP written as prose inside /* */ must not count as a statement."""
     text = "/* we used to\nDROP FUNCTION IF EXISTS s.f(INT);\nbut no longer */\nSELECT 1;"
     assert "DROP FUNCTION" not in _strip_comments(text)
 
 
-def test_the_installed_file_list_includes_the_endpoints_schema():
-    """Derived from install_app.sh, so it cannot drift from the installer. The first
-    version globbed db/*.sql and therefore never scanned the largest installed file."""
-    names = {p.name for p in _installed_sql_files()}
-    assert "endpoint_schema.sql" in names, (
-        "endpoints/endpoint_schema.sql is executed by install_app.sh and must be scanned"
-    )
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT '/* not a comment';\nDROP FUNCTION IF EXISTS s.f;",
+        'SELECT 1 AS "-- not a comment";\nDROP FUNCTION IF EXISTS s.f;',
+        "SELECT $q$ /* $q$;\nDROP FUNCTION IF EXISTS s.f;",
+        "SELECT E'it\\'s /*';\nDROP FUNCTION IF EXISTS s.f;",
+        "SELECT 'it''s /*';\nDROP FUNCTION IF EXISTS s.f;",
+    ],
+)
+def test_comment_openers_inside_literals_do_not_hide_code(sql) -> None:
+    stripped, left_open = _lex_comments(sql)
+    assert left_open is None
+    assert len(stripped) == len(sql)
+    assert [n for n, _, _ in _signatures(DROP_FN, stripped)] == ["s.f"]
+
+
+def test_comments_inside_a_function_body_are_stripped_but_a_plain_string_body_is_kept() -> None:
+    code = "DO $$ BEGIN -- DROP FUNCTION IF EXISTS s.f;\nEND $$;"
+    assert "DROP" not in _strip_comments(code)
+    prose = "COMMENT ON TABLE t IS $c$it's -- kept$c$;"
+    assert _strip_comments(prose) == prose
+
+
+@pytest.mark.parametrize("sql,construct", [
+    ("SELECT 1; /* never closed\nDROP FUNCTION IF EXISTS s.f;", "block comment"),
+    ("SELECT 'never closed;\nDROP FUNCTION IF EXISTS s.f;", "string literal"),
+    ("DO $body$ BEGIN END;", "$body$ string"),
+])
+def test_an_unterminated_construct_is_reported(sql, construct) -> None:
+    assert _lex_comments(sql)[1] == construct
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("haf_stats_app.Assert_Op_Types", "haf_stats_app.assert_op_types"),
+    ('"haf_stats_app"."Assert_Op_Types"', "haf_stats_app.Assert_Op_Types"),
+    ('"haf_stats_app".f', "haf_stats_app.f"),
+])
+def test_identifiers_fold_case_only_when_unquoted(name, expected) -> None:
+    assert _identifier(name) == expected
+
+
+@pytest.mark.parametrize("sql,problems", [
+    # A quoted mixed-case name is a different function from its lower-case spelling.
+    ('DROP FUNCTION IF EXISTS s.assert_op_types(BOOLEAN);\n'
+     'CREATE FUNCTION s."Assert_Op_Types"(b BOOLEAN) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;',
+     1),
+    ('DROP FUNCTION IF EXISTS s."Assert_Op_Types"(BOOLEAN);\n'
+     'CREATE FUNCTION s."Assert_Op_Types"(b BOOLEAN) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;',
+     0),
+    # OUT parameters are not part of the signature DROP FUNCTION matches on.
+    ("DROP FUNCTION IF EXISTS s.f(integer);\n"
+     "CREATE FUNCTION s.f(a integer, OUT b text) AS $$ SELECT 'x' $$ LANGUAGE sql;", 0),
+    ("DROP FUNCTION IF EXISTS s.f(integer, text);\n"
+     "CREATE FUNCTION s.f(a integer, OUT b text) AS $$ SELECT 'x' $$ LANGUAGE sql;", 1),
+    # A DROP without an argument list removes the sole overload, whatever it is.
+    ("DROP FUNCTION IF EXISTS s.f;\n"
+     "CREATE FUNCTION s.f(a integer) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;", 0),
+])
+def test_plain_creates_are_paired_by_name_and_signature(sql, problems) -> None:
+    assert len(_unpaired_plain_creates(_strip_function_bodies(_strip_comments(sql)))) == problems
+
+
+_COR = "CREATE OR REPLACE FUNCTION s.f(a DATE, b DATE) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;"
+
+
+@pytest.mark.parametrize("sql,uncovered", [
+    (_COR, ["s.f(date, date)"]),
+    ("DROP FUNCTION IF EXISTS s.f;\n" + _COR, []),
+    # The legacy overload's DROP is what keeps a 1-arg call unambiguous.
+    ("DROP FUNCTION IF EXISTS s.f(DATE);\n" + _COR, []),
+    (_COR + "\nDROP FUNCTION IF EXISTS s.f;", ["s.f(date, date)"]),
+    ("DROP FUNCTION IF EXISTS s.g;\n" + _COR, ["s.f(date, date)"]),
+    (STABLE_SIGNATURE_MARKER + " -- signature fixed by an external caller\n" + _COR, []),
+    # The marker covers only the definition directly below its comment block.
+    (STABLE_SIGNATURE_MARKER + "\nSELECT 1;\n" + _COR, ["s.f(date, date)"]),
+    ("/* " + STABLE_SIGNATURE_MARKER[3:] + " */\n" + _COR, ["s.f(date, date)"]),
+])
+def test_create_or_replace_needs_a_drop_of_its_name_or_a_marker(sql, uncovered) -> None:
+    plain, covered, got = _function_coverage(sql, _strip_function_bodies(_strip_comments(sql)))
+    assert (plain, covered, got) == (0, 1 - len(uncovered), uncovered)
+
+
+def test_the_function_guard_reads_the_raw_text() -> None:
+    raw = "SELECT 1; CREATE FUNCTION s.f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;"
+    assert len(_unparsed_function_definitions(raw, _strip_function_bodies(_strip_comments(raw)))) == 1
+    commented = "-- CREATE FUNCTION s.f() is gone\nSELECT 1;"
+    assert _unparsed_function_definitions(commented, _strip_comments(commented)) == []
+
+
+@pytest.mark.parametrize("sql,name", [
+    ("CREATE UNIQUE INDEX foo ON t(a);", "foo"),
+    ("CREATE UNIQUE INDEX CONCURRENTLY foo ON t(a);", "foo"),
+    ("CREATE INDEX foo ON t(a);", "foo"),
+])
+def test_the_index_pattern_names_unique_and_concurrent_indexes(sql, name) -> None:
+    assert [m.group(1) for m in _object_pattern("INDEX").finditer(sql)] == [name]
+
+
+@pytest.mark.parametrize("sql,problems", [
+    ("CREATE TABLE s.t AS SELECT 1 AS x;", [("TABLE", "s.t")]),
+    ("CREATE TABLE IF NOT EXISTS s.t AS SELECT 1 AS x;", []),
+    ("DROP TABLE IF EXISTS s.t;\nCREATE TABLE s.t AS WITH a AS (SELECT 1) SELECT * FROM a;", []),
+    ("CREATE VIEW s.v AS SELECT 1;", [("VIEW", "s.v")]),
+    ("CREATE OR REPLACE VIEW s.v AS SELECT 1;", []),
+    ("CREATE MATERIALIZED VIEW s.m AS SELECT 1;", [("MATERIALIZED VIEW", "s.m")]),
+    ("CREATE DOMAIN s.d AS int;", [("DOMAIN", "s.d")]),
+    ("DROP DOMAIN IF EXISTS s.d;\nCREATE DOMAIN s.d AS int;", []),
+    ("CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int);", [("AGGREGATE", "s.a")]),
+])
+def test_object_creation_needs_if_not_exists_or_a_drop(sql, problems) -> None:
+    assert _non_idempotent_objects(sql) == problems
+
+
+@pytest.mark.parametrize("sql,unchecked", [
+    ("SELECT 1; CREATE TYPE s.t AS (a int);", ["CREATE TYPE: not at the start of a line"]),
+    ("CREATE OPERATOR s.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq);",
+     ["CREATE OPERATOR: not a kind this scanner checks"]),
+    ("CREATE CAST (int AS s.d) WITH INOUT;", ["CREATE CAST: not a kind this scanner checks"]),
+    ("CREATE TABLE IF NOT EXISTS s.t (a int);\nCREATE OR REPLACE VIEW s.v AS SELECT 1;", []),
+    ("GRANT CREATE ON SCHEMA s TO r;", []),
+])
+def test_every_create_kind_is_one_the_scanner_checks(sql, unchecked) -> None:
+    assert _unchecked_creates(sql) == unchecked
+
+
+@pytest.mark.parametrize("line,path", [
+    ('run_sql_file "${SCRIPT_DIR}/../db/a.sql"', "../db/a.sql"),
+    ('DB_DIR="${SCRIPT_DIR}/.."; run_sql_file "${DB_DIR}/db/a.sql"', "db/a.sql"),
+    ('for f in "${SCRIPT_DIR}"/../db/new_*.sql; do run_sql_file "$f"; done', "../db/new_*.sql"),
+    ('run_sql_file "${SCRIPT_DIR}/../db/new-thing.sql"', "../db/new-thing.sql"),
+    ('run_sql_file "$(dirname "$0")/../db/a.sql"', "../db/a.sql"),
+])
+def test_the_installer_path_extractor_reads_every_spelling(line, path) -> None:
+    assert _installer_sql_paths(line) == [path]
+
+
+def test_installer_prose_and_comments_are_not_paths() -> None:
+    script = ('# run_sql_file "${SCRIPT_DIR}/../db/a.sql"\n'
+              'log "see db/haf_stats_app.sql"\n'
+              "RAISE NOTICE 'per the db/process_*.sql headers';")
+    assert _installer_sql_paths(script) == []
