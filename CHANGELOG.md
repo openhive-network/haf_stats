@@ -59,7 +59,7 @@ before this policy (new endpoints and fields) are not itemized.
   `_operation_types` → `operation_types`. The old names are not accepted.
 * With no `from_date`, `GET /network/daily-active-users` (`50e3781`, #34) and
   `GET /network/rc-utilization` (`07f1106`, #35) now start at chain genesis
-  (2016-03-24) instead of 30 days back (2026-07-01). A caller relying on the default
+  (2016-03-24) instead of the last 30 days (both changed 2026-07-01). A caller relying on the default
   gets the full history, and the request costs much more.
 * 55 response fields widened to `[type, "null"]` (`10d73d9`, #68/#69/#71, 2026-09-09).
   Those fields could already be `null` on the wire (for example `last_missed_block` on
