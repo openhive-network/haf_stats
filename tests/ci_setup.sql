@@ -461,9 +461,9 @@ INSERT INTO hafd.operations (id, op_type_id, body_value) VALUES
 (5000000120, 18, '{"id": "follow", "json": "{not valid json at all"}'),
 (5000000121, 1, '{"author": "ixtester", "permlink": "r4", "parent_author": "ixalice", "parent_permlink": "p1"}'),
 -- Regression guard: a follow is an EVENT, so a second follow of the SAME partner in the SAME
--- block must count twice. An earlier revision keyed every op-18 row on (author, permlink) --
--- absent from a follow payload, so the key was NULL and collapsed to one shared fallback per
--- block, silently merging these two into one (293 real follows lost over the first 5M blocks).
+-- block must count twice. Keying op-18 rows on (author, permlink) -- absent from a follow
+-- payload, so NULL -- would collapse them to one shared fallback per block and silently merge
+-- these two into one.
 (5000000122, 18, '{"id": "follow", "json": "{\"follower\":\"ixtester\",\"following\":\"ixbob\",\"what\":[\"blog\"]}"}'),
 -- Four exclusion rules that would otherwise ship UNEXECUTED — every one of them targets ixdave,
 -- so if any predicate is inverted or deleted an 'ixdave' partner appears and the expectations

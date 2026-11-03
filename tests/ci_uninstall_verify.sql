@@ -1,12 +1,9 @@
 -- What a real uninstall_app.sh run must have removed. (#84)
 --
--- Runs after the teardown in docker/docker-compose-ci-install.yml. NOTHING IN CI HAD
--- EVER RUN uninstall_app.sh AGAINST A DATABASE before this lane -- which is the whole
--- point, and is a stronger statement than the one an earlier version of this comment
--- made ("the only references anywhere were three --help/argument smoke assertions in
--- docker-build"). That was false: tests/unit/test_uninstall_app.py holds 51 tests and
--- tests/unit/test_script_arguments.py parametrises over the script in three more places,
--- all run by shell-tests. They stub psql, so none of them reaches a server.
+-- Runs after the teardown in docker/docker-compose-ci-install.yml. This lane is the only
+-- place CI runs uninstall_app.sh AGAINST A DATABASE: tests/unit/test_uninstall_app.py and
+-- tests/unit/test_script_arguments.py exercise the script in shell-tests, but they stub
+-- psql, so none of them reaches a server.
 --
 -- uninstall_app.sh does run scripts/uninstall_verify.sql itself, but that path is
 -- PERMISSIVE by design: the destructive steps push past errors the way upstream teardowns

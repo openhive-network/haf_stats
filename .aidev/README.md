@@ -15,7 +15,32 @@ pipeline started from the web UI or the API still runs on `aidev/integration`.
 the failure body. `unit` also writes one case per pytest test (`unit.xml`);
 `endpoint` and `install` write one case per compose service
 (`endpoint/endpoint.xml`, `install/install.xml`, each service's log beside it), and
-`endpoint` one per tavern test (`endpoint/tavern.xml`).
+`endpoint` one per tavern test (`endpoint/tavern.xml`); `pattern` one per tavern
+test (`pattern.xml`), `regression` one per guard (`regression.xml`,
+`regression::<guard>`) and `reinstall` one per check (`reinstall.xml`,
+`reinstall::<check>`). A step whose failing tests its own report records is reported
+skipped in `junit.xml`, pointing there, so each failure is reported once, under the
+test's own id; a step that fails with no failing test recorded (a crash, a broken
+setup, a pytest collection error) fails as itself.
+
+`.aidev/run-checks.sh <suite> <step>... --rerun <id>...` re-runs only the named
+tests, through the listed steps that own them, and reports to
+`test-results/<suite>/rerun/<n>/`, leaving the original run's reports in place (the
+suite's next run removes it). A unit id or file (`tests/unit/<file>.py[::<test>]`)
+runs pytest on it alone, without the stack; a tavern id
+(`<dotted.path>.tavern.yaml::<name>` as reported, or its path under `tests/tavern/`),
+a `regression::<guard>` or a `reinstall::<check>` runs `sync` first, then only that
+test (`reinstall`'s checks depend on each other, so all of them). Tavern ids must be
+ones `pattern` selects; they are checked by collection before the sync. An argument
+no listed step owns or that names no test adds a failing `rerun-ids` case, so a
+re-run never passes for a test it did not run. `endpoint`'s and `install`'s
+per-service cases and `endpoint`'s tavern tests are not re-run.
+
+The gate slots declare this as their `rerun:` (one rule per id shape: aidev's
+isolation re-run, same-SHA flake detection and, for unit files, repeat-new-tests)
+and `honor_quarantine: true`: a failing test listed in `known_failures.txt`
+(`aidev test quarantine <id> --reason "see #N"`) is pardoned. A failing case no rule
+matches (a step's own case, a per-service case) blocks.
 
 Every step is one of `.gitlab-ci.yml`'s jobs, run as that job runs it:
 
@@ -33,7 +58,7 @@ Every step is one of `.gitlab-ci.yml`'s jobs, run as that job runs it:
 | `install` | install-test | `docker/docker-compose-ci-install.yml`: the baseline install from `.baseline/`, upgrade, reset, install, seed repair, break-schema + install-again, install under a lock holder, verify, `uninstall_app --force`, verify-gone |
 | `sync` | sync | a clone of the shared 5M-block HAF for this run; `scripts/install_app.sh` into it, then the block processing (`haf_app_driver.py`, as `scripts/process_blocks.sh` runs it) to block 5,000,000, with `haf_stats.processor_timings` on; then `scripts/processor_timings_report.py` over the driver's log (`sync-driver.log`) writes `processor-timings.json` and prints the per-processor table |
 | `pattern` | pattern-test | `tavern -m 'not negative and not synthetic'` (the exact mainnet values) against PostgREST over the clone, anon role `haf_stats_user`; one junit case per test in `pattern.xml` |
-| `regression` | regression-test | `scripts/run_verification.sh` over the clone |
+| `regression` | regression-test | `scripts/run_verification.sh` over the clone, one guard per run (`--guard=<name>`, `--list-guards`), so a failing guard leaves the others run |
 | `reinstall` | reinstall-test | `scripts/install_app.sh` again over the synced clone: the three schemas' definitions unchanged, the synced block unchanged, and each install's privileges (`tests/privileges.sql`) are `tests/expected_privileges.txt` |
 
 `endpoint` and `install` replay the compose file itself with

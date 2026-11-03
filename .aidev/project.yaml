@@ -83,28 +83,58 @@ sandbox:
 # about 1.9x that run, room for the host-load swing of the sync, inside its 2100s
 # activity ceiling; canary's 1500s is its cap (the deploy timeout less its 300s
 # reserve), about 1.5x.
+#
+# A failing test is reported under its own id (unit.xml, pattern.xml, regression.xml,
+# reinstall.xml, the lanes' per-service and tavern reports), its step's own case then
+# skipped, so `.aidev/known_failures.txt` can pardon it (honor_quarantine) and aidev's
+# flake layers re-run it through `run-checks.sh ... --rerun <id>...`, which runs only
+# the steps owning the ids: a unit id without the stack, a pattern, regression or
+# reinstall id after the sync. Each rule below hands its ids over verbatim. Any other
+# failing case (a step that crashed, endpoint's and install's per-service cases) has
+# no rule and blocks; an endpoint tavern id the second rule takes fails its re-run,
+# since only pattern's are re-run. Only unit ids name a file repeat-new-tests can
+# narrow to.
 verification:
   quick:
     adapter: command
     args: [".aidev/run-checks.sh", "quick", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins"]
     stack: false
     artifacts: ["test-results/quick/"]
+    honor_quarantine: true
+    rerun: &stats_rerun
+      - match: "^tests/unit/.+\\.py::"
+        classify: true
+        file_pattern: "^tests/unit/(.+/)?test_[^/]*\\.py$"
+        ids: ["--rerun", "{ids}"]
+        files: ["--rerun", "{files}"]
+      - match: "^[^/:]+\\.(tavern\\.yaml|py)::"
+        file_pattern: "\\.(tavern\\.yaml|py)$"
+        ids: ["--rerun", "{ids}"]
+      - match: "^(regression|reinstall)::"
+        file_pattern: "^(regression|reinstall)$"
+        ids: ["--rerun", "{ids}"]
   full:
     reports: ["test-results/full/processor-timings.json"]
     adapter: command
     args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/full/"]
     timeout: 1800
+    honor_quarantine: true
+    rerun: *stats_rerun
   baseline:
     adapter: command
     args: [".aidev/run-checks.sh", "baseline", "unit", "endpoint", "install"]
     artifacts: ["test-results/baseline/"]
+    honor_quarantine: true
+    rerun: *stats_rerun
   canary:
     reports: ["test-results/canary/processor-timings.json"]
     adapter: command
     args: [".aidev/run-checks.sh", "canary", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/canary/"]
     timeout: 1500
+    honor_quarantine: true
+    rerun: *stats_rerun
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # that read the candidate's code (AIDEV runs it in the post-implementation scan
   # only). `static` and `system` are left unbound: AIDEV runs neither for a project.

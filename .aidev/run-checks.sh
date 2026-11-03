@@ -4,7 +4,7 @@
 # The checks AIDEV's verification slots run (.aidev/project.yaml), as junit reports
 # per suite: each named step is a test case, its log the failure body.
 #
-#   .aidev/run-checks.sh <suite> <step>...
+#   .aidev/run-checks.sh <suite> <step>... [--rerun <id>...]
 #
 # Each step is one of the project's own CI jobs, run as .gitlab-ci.yml runs it:
 #   - shellcheck      shell-lint: shellcheck --severity=warning on scripts/ and
@@ -57,23 +57,72 @@
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
-#   - regression      regression-test: scripts/run_verification.sh over the clone
+#   - regression      regression-test: scripts/run_verification.sh over the clone,
+#                     one guard at a time (--guard), so every guard runs; one junit
+#                     case per guard, regression.xml (regression::<guard>)
 #   - reinstall       reinstall-test: scripts/install_app.sh again; the three schemas'
 #                     definitions (.aidev/schema_snapshot.sql) unchanged, the synced
 #                     block unchanged, and both installs' privileges
-#                     (tests/privileges.sql) tests/expected_privileges.txt
+#                     (tests/privileges.sql) tests/expected_privileges.txt; one junit
+#                     case per check, reinstall.xml (reinstall::<check>)
 #
 # endpoint and install need the stack (.aidev/test-stack.compose.yml): its
 # `postgres` service is the one both CI compose files start. Each lane starts on a
 # freshly created haf_block_log with the app's roles dropped, as a fresh container
 # gives CI. pattern, regression and reinstall need sync; the clone is dropped when
 # the script exits, pass or fail. Reports go to test-results/<suite>/.
+#
+# A step that wrote a per-test junit (unit.xml, endpoint/*.xml, install/install.xml,
+# pattern.xml, regression.xml, reinstall.xml) and failed with failures recorded there
+# is reported skipped in junit.xml, pointing there (.aidev/junit_cases.py), so a
+# failing test is reported once, under its own id, where the quarantine ledger
+# (.aidev/known_failures.txt) and aidev's re-runs can name it. A step that failed
+# with none recorded (a crash, a broken setup) fails as itself.
+#
+# --rerun runs only the named tests, through the listed steps that own them, and
+# reports to test-results/<suite>/rerun/<n>/, leaving the run it re-runs intact (the
+# next run's rm -rf removes it). An argument is a reported id or a test file:
+#   - tests/unit/<file>.py[::<test>]       unit, over pytest's node ids; no stack
+#   - <dotted.path>.tavern.yaml::<name>, <dir>/<file>.tavern.yaml[::<name>] or
+#     test_<x>.py[::<test>] (relative to tests/tavern/, with or without the prefix)
+#                                          pattern, after sync
+#   - regression::<guard>                  regression, that guard alone, after sync
+#   - reinstall::<check>                   reinstall (its checks depend on each other,
+#                                          so all of them), after sync
+# A tavern id must be one pattern selects (-m 'not negative and not synthetic'):
+# endpoint's are not re-run, nor are endpoint's and install's per-service cases.
+# An argument no listed step owns, or that names no test, adds a failing rerun-ids
+# case, so a re-run never passes for a test it did not run; the tavern ids are
+# checked by collection before the sync is paid for.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-suite="${1:?usage: $0 <suite> <step>...}"; shift
-out="test-results/$suite"
-rm -rf "$out"; mkdir -p "$out"
+suite="${1:?usage: $0 <suite> <step>... [--rerun <id>...]}"; shift
+steps=()
+while [ $# -gt 0 ] && [ "$1" != --rerun ]; do steps+=("$1"); shift; done
+rerun=()
+if [ $# -gt 0 ]; then
+    shift
+    rerun=("$@")
+    [ ${#rerun[@]} -gt 0 ] || { echo "--rerun needs at least one test id" >&2; exit 2; }
+fi
+for s in "${steps[@]}"; do
+    case "$s" in
+        shellcheck|ci-shell-lint|unit|sql-lint|hadolint|compose-validate|openapi-drift|stack-pins) ;;
+        endpoint|install|sync|pattern|regression|reinstall) ;;
+        *) echo "unknown step: $s" >&2; exit 2 ;;
+    esac
+done
+
+if [ ${#rerun[@]} -eq 0 ]; then
+    out="test-results/$suite"
+    rm -rf "$out"; mkdir -p "$out"
+else
+    mkdir -p "test-results/$suite/rerun"
+    n=1
+    until mkdir "test-results/$suite/rerun/$n" 2>/dev/null; do n=$((n + 1)); done
+    out="test-results/$suite/rerun/$n"
+fi
 cases="$out/cases.tsv"; : > "$cases"
 py=/opt/venv/bin/python3
 
@@ -86,22 +135,24 @@ clone=""; clone_id=""; clone_url=""; stage=""; synced=""
 exec 3>&2
 
 status=0
-# record CASES_FILE NAME RC SECONDS LOG
+# record CASES_FILE NAME RC SECONDS LOG [TESTS_JUNIT...]
 record() {
-    if [ "$3" -eq 0 ]; then
-        printf 'case\t%s\tpass\t%s\t\n' "$2" "$4" >> "$1"
+    local file="$1" name="$2" rc="$3" seconds="$4" log="$5"; shift 5
+    if [ "$rc" -eq 0 ]; then
+        printf 'case\t%s\tpass\t%s\t\n' "$name" "$seconds" >> "$file"
     else
-        printf 'case\t%s\tfail\t%s\texit %s\t%s\n' "$2" "$4" "$3" "$5" >> "$1"
+        { printf 'case\t%s\tfail\t%s\texit %s\t%s' "$name" "$seconds" "$rc" "$log"; printf '\t%s' "$@"; echo; } >> "$file"
     fi
 }
 
-step() {
-    local name="$1"; shift
+step() {  # NAME TESTS_JUNITS COMMAND...  (TESTS_JUNITS: the per-test junits it writes, space-separated, or "")
+    local name="$1" tests_junits=()
+    read -ra tests_junits <<< "$2"; shift 2
     local log="$out/$name.log" t0=$SECONDS rc=0
     echo "== $name" >&2
     "$@" > "$log" 2>&1 < /dev/null || rc=$?
     [ "$rc" -eq 0 ] || { status=1; tail -40 "$log" >&2; }
-    record "$cases" "$name" "$rc" "$((SECONDS - t0))" "$log"
+    record "$cases" "$name" "$rc" "$((SECONDS - t0))" "$log" "${tests_junits[@]}"
 }
 
 run_shellcheck() {
@@ -117,8 +168,10 @@ ci_shell_lint() {
     shellcheck --severity=warning "$d"/*.sh
 }
 
-unit() {
-    PYTHONPATH=. pytest tests/unit/ -q -p no:cacheprovider --junitxml="$1"
+unit() {  # JUNIT [NODE_ID...]  (default: tests/unit/)
+    local junit="$1"; shift
+    [ $# -gt 0 ] || set -- tests/unit/
+    PYTHONPATH=. pytest "$@" -q -p no:cacheprovider --junitxml="$junit"
 }
 
 sql_lint() {
@@ -357,10 +410,17 @@ needs_sync() {
     "$@"
 }
 
+# .gitlab-ci.yml's global REWRITER_URL: tavern resolves it while collecting the
+# rewriter tests the pattern selection deselects.
+pattern_pytest() {  # API_URL PYTEST_ARGS...
+    API_URL="$1" REWRITER_URL="http://rewriter.invalid" PYTHONPATH=tests/tavern TAVERN_DIR=tests/tavern \
+        "$py" -m pytest -p no:cacheprovider -m "not negative and not synthetic" "${@:2}"
+}
+
 # docker/docker-compose-ci-test.yml's postgrest service, logging in as the consumer
 # (the clone's only login) instead of haf_stats_owner, and switching to the same anon
 # role.
-pattern_test() {
+pattern_test() {  # [NODE_ID...]  (default: tests/tavern)
     local port=13000 base pid rc=0 i
     base="http://127.0.0.1:$port"
     PGRST_DB_URI="$clone_url?options=-c%20statement_timeout%3D30s" PGRST_DB_SCHEMA=haf_stats_endpoints \
@@ -375,18 +435,31 @@ pattern_test() {
         [ "$i" -lt 60 ] || { echo "postgrest did not answer in 60s"; kill "$pid"; return 1; }
         sleep 1
     done
-    # .gitlab-ci.yml's global REWRITER_URL: tavern resolves it while collecting the
-    # rewriter tests this run deselects.
-    API_URL="$base" REWRITER_URL="http://rewriter.invalid" PYTHONPATH=tests/tavern TAVERN_DIR=tests/tavern \
-        "$py" -m pytest tests/tavern -p no:cacheprovider -m "not negative and not synthetic" --tb=short -v \
-        --junitxml="$out/pattern.xml" -o junit_family=xunit1 || rc=$?
+    [ $# -gt 0 ] || set -- tests/tavern
+    pattern_pytest "$base" "$@" --tb=short -v --junitxml="$out/pattern.xml" -o junit_family=xunit1 || rc=$?
     kill "$pid"; wait "$pid" 2>/dev/null
     return "$rc"
 }
 
-regression_test() {
-    bash scripts/run_verification.sh --host="$AIDEV_EXTERNAL_HAF_HOST" --port="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
-        --user=haf_shared_consumer --database="$clone"
+regression_guards() {
+    bash scripts/run_verification.sh --list-guards
+}
+
+# Each guard is its own run, so one that fails leaves the rest run and reported.
+regression_test() {  # [GUARD...]  (default: every guard)
+    local guards=("$@") guard rc=0 grc t0 sub="$out/regression/cases.tsv"
+    [ ${#guards[@]} -gt 0 ] || mapfile -t guards < <(regression_guards)
+    [ ${#guards[@]} -gt 0 ] || { echo "scripts/run_verification.sh --list-guards named no guard"; return 1; }
+    mkdir -p "$out/regression"; : > "$sub"
+    for guard in "${guards[@]}"; do
+        t0=$SECONDS; grc=0
+        bash scripts/run_verification.sh --host="$AIDEV_EXTERNAL_HAF_HOST" --port="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
+            --user=haf_shared_consumer --database="$clone" --guard="$guard" 2>&1 | tee "$out/regression/$guard.log" || grc=$?
+        record "$sub" "$guard" "$grc" "$((SECONDS - t0))" "$out/regression/$guard.log"
+        [ "$grc" -eq 0 ] || rc=1
+    done
+    python3 .aidev/junit_cases.py "$out/regression.xml" regression "$sub" || return 1
+    return "$rc"
 }
 
 # tests/privileges.sql minus what differs only because the clone is not CI's HAF: the
@@ -403,46 +476,171 @@ privileges_against_expected() {
     fi | diff -u - "$actual"
 }
 
+# reinstall's checks, in order; reinstall.xml has one case per check, failing "not
+# reached" for each one an earlier failure stopped. A run stopped before the first
+# check records none, and the step fails as itself.
+reinstall_checks=(privileges-first second-install block-unchanged schema-unchanged privileges-second)
+
 reinstall_test() {
-    local before after rc=0
-    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-before.txt" || return 1
-    echo "schema-before.txt: $(wc -l < "$out/schema-before.txt") lines"
-    [ "$(wc -l < "$out/schema-before.txt")" -ge 1000 ] || { echo "the schema snapshot is too short for an install to have succeeded"; return 1; }
-    privileges_against_expected first || rc=1
-    before="$(current_block)" || return 1
-    clone_install || return 1
-    echo "Second install exited 0."
-    after="$(current_block)" || return 1
-    echo "synced block before $before, after $after"
-    [ "$before" = "$after" ] || { echo "reinstalling over a synced schema moved its block"; rc=1; }
-    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-after.txt" || return 1
-    if diff -u "$out/schema-before.txt" "$out/schema-after.txt" > "$out/schema.diff"; then
-        echo "OK: the second install left the three schemas' definitions unchanged."
-    else
-        echo "FAIL: the second install changed the schema:"; head -200 "$out/schema.diff"; rc=1
-    fi
-    privileges_against_expected second || rc=1
+    local sub="$out/reinstall-cases.tsv" rc=0
+    : > "$sub"
+    reinstall_checks_run "$sub" || rc=1
+    [ ! -s "$sub" ] || reinstall_unreached "$sub"
+    python3 .aidev/junit_cases.py "$out/reinstall.xml" reinstall "$sub" || return 1
     return "$rc"
 }
 
-for s in "$@"; do
+# check CASES_FILE NAME RC: one of reinstall's checks, its output in the step's log.
+check() {
+    record "$1" "$2" "$3" 0 "$out/reinstall.log"
+    return "$3"
+}
+
+# So a step that stopped early cannot pass by the quarantine of the checks that ran.
+reinstall_unreached() {  # CASES_FILE
+    local c
+    for c in "${reinstall_checks[@]}"; do
+        awk -F'\t' -v c="$c" '$2 == c { found = 1 } END { exit !found }' "$1" ||
+            printf 'case\t%s\tfail\t0\tnot reached: reinstall stopped before it\t%s\n' "$c" "$out/reinstall.log" >> "$1"
+    done
+}
+
+reinstall_checks_run() {  # CASES_FILE
+    local sub="$1" before after rc=0 crc
+    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-before.txt" || return 1
+    echo "schema-before.txt: $(wc -l < "$out/schema-before.txt") lines"
+    [ "$(wc -l < "$out/schema-before.txt")" -ge 1000 ] || { echo "the schema snapshot is too short for an install to have succeeded"; return 1; }
+    crc=0; privileges_against_expected first || crc=1
+    check "$sub" privileges-first "$crc" || rc=1
+    before="$(current_block)" || return 1
+    crc=0; clone_install || crc=$?
+    check "$sub" second-install "$crc" || return 1
+    echo "Second install exited 0."
+    after="$(current_block)" || return 1
+    echo "synced block before $before, after $after"
+    crc=0; [ "$before" = "$after" ] || { echo "reinstalling over a synced schema moved its block"; crc=1; }
+    check "$sub" block-unchanged "$crc" || rc=1
+    cq -At -f .aidev/schema_snapshot.sql > "$out/schema-after.txt" || return 1
+    crc=0
+    if diff -u "$out/schema-before.txt" "$out/schema-after.txt" > "$out/schema.diff"; then
+        echo "OK: the second install left the three schemas' definitions unchanged."
+    else
+        echo "FAIL: the second install changed the schema:"; head -200 "$out/schema.diff"; crc=1
+    fi
+    check "$sub" schema-unchanged "$crc" || rc=1
+    crc=0; privileges_against_expected second || crc=1
+    check "$sub" privileges-second "$crc" || rc=1
+    return "$rc"
+}
+
+run_step() {  # NAME [SELECTION...]  (SELECTION: a re-run's tests, for unit, pattern and regression)
+    local s="$1"; shift
     case "$s" in
-        shellcheck) step shellcheck run_shellcheck ;;
-        ci-shell-lint) step ci-shell-lint ci_shell_lint ;;
-        unit) step unit unit "$out/unit.xml" ;;
-        sql-lint) step sql-lint sql_lint ;;
-        hadolint) step hadolint run_hadolint ;;
-        compose-validate) step compose-validate compose_validate ;;
-        openapi-drift) step openapi-drift openapi_drift ;;
-        stack-pins) step stack-pins stack_pins ;;
-        endpoint) step endpoint endpoint ;;
-        install) step install install ;;
-        sync) step sync sync_blocks ;;
-        pattern) step pattern needs_sync pattern_test ;;
-        regression) step regression needs_sync regression_test ;;
-        reinstall) step reinstall needs_sync reinstall_test ;;
-        *) echo "unknown step: $s" >&2; exit 2 ;;
+        shellcheck) step shellcheck "" run_shellcheck ;;
+        ci-shell-lint) step ci-shell-lint "" ci_shell_lint ;;
+        unit) step unit "$out/unit.xml" unit "$out/unit.xml" "$@" ;;
+        sql-lint) step sql-lint "" sql_lint ;;
+        hadolint) step hadolint "" run_hadolint ;;
+        compose-validate) step compose-validate "" compose_validate ;;
+        openapi-drift) step openapi-drift "" openapi_drift ;;
+        stack-pins) step stack-pins "" stack_pins ;;
+        endpoint) step endpoint "$out/endpoint/endpoint.xml $out/endpoint/tavern.xml" endpoint ;;
+        install) step install "$out/install/install.xml" install ;;
+        sync) step sync "" sync_blocks ;;
+        pattern) step pattern "$out/pattern.xml" needs_sync pattern_test "$@" ;;
+        regression) step regression "$out/regression.xml" needs_sync regression_test "$@" ;;
+        reinstall) step reinstall "$out/reinstall.xml" needs_sync reinstall_test ;;
     esac
-done
+}
+
+listed() {  # STEP
+    [[ " ${steps[*]} " == *" $1 "* ]]
+}
+
+# A tavern argument as the node id pytest takes from the repository root: a dotted
+# report id (get_x.negative.y.tavern.yaml) back into its path, under tests/tavern/.
+tavern_node() {  # ARG
+    local file="${1%%::*}" rest=""
+    [[ "$1" == *::* ]] && rest="::${1#*::}"
+    file="${file#tests/tavern/}"
+    if [[ "$file" != */* && "$file" == *.tavern.yaml ]]; then
+        file="${file%.tavern.yaml}"; file="${file//.//}.tavern.yaml"
+    fi
+    printf 'tests/tavern/%s%s' "$file" "$rest"
+}
+
+rerun_unit=(); rerun_pattern=(); rerun_regression=(); rerun_reinstall=""; rerun_refused=()
+rerun_refuse() {  # ARG WHY
+    rerun_refused+=("$1 ($2)")
+}
+
+rerun_assign() {
+    local arg file name owner
+    for arg in "${rerun[@]}"; do
+        file="${arg%%::*}"; name="${arg#*::}"; owner=""
+        case "$file" in
+            tests/unit/*.py) owner=unit ;;
+            *.tavern.yaml|tests/tavern/*.py|test_*.py) owner=pattern ;;
+            regression|reinstall) owner="$file" ;;
+        esac
+        if [ -z "$owner" ]; then rerun_refuse "$arg" "no step reports it"; continue; fi
+        if ! listed "$owner"; then rerun_refuse "$arg" "its step $owner is not listed"; continue; fi
+        if [ "$owner" != unit ] && ! listed sync; then rerun_refuse "$arg" "$owner needs sync, which is not listed"; continue; fi
+        case "$owner" in
+            unit) rerun_unit+=("$arg") ;;
+            pattern) rerun_pattern+=("$(tavern_node "$arg")") ;;
+            regression)
+                if [ "$name" = "$arg" ] || ! regression_guards | grep -qxF -- "$name"; then rerun_refuse "$arg" "no such guard"; continue; fi
+                [[ " ${rerun_regression[*]} " == *" $name "* ]] || rerun_regression+=("$name") ;;
+            reinstall)
+                if [ "$name" = "$arg" ] || [[ " ${reinstall_checks[*]} " != *" $name "* ]]; then rerun_refuse "$arg" "no such check"; continue; fi
+                rerun_reinstall=yes ;;
+        esac
+    done
+}
+
+# Whether a `pytest --collect-only -q` listing names NODE, or for a file, a test in it.
+collected() {  # LISTING NODE
+    local line want="${2#tests/tavern/}"
+    while IFS= read -r line; do
+        line="${line#tests/tavern/}"
+        [ "$line" = "$want" ] && return 0
+        [[ "$want" != *::* && "$line" == "$want::"* ]] && return 0
+    done <<< "$1"
+    return 1
+}
+
+# Each tavern node id the pattern selection collects; the others are dropped from
+# the re-run and fail it, before the sync they would wait for.
+rerun_collect_pattern() {
+    [ ${#rerun_pattern[@]} -gt 0 ] || return 0
+    local listing node kept=()
+    listing="$(pattern_pytest "http://127.0.0.1:1" --collect-only -q "${rerun_pattern[@]}" 2>&1)"
+    for node in "${rerun_pattern[@]}"; do
+        if collected "$listing" "$node"; then kept+=("$node"); else rerun_refuse "$node" "pattern collects no such test"; fi
+    done
+    rerun_pattern=("${kept[@]}")
+}
+
+if [ ${#rerun[@]} -eq 0 ]; then
+    for s in "${steps[@]}"; do run_step "$s"; done
+else
+    rerun_assign
+    rerun_collect_pattern
+    for s in "${steps[@]}"; do
+        case "$s" in
+            unit) [ ${#rerun_unit[@]} -eq 0 ] || run_step unit "${rerun_unit[@]}" ;;
+            sync) if [ ${#rerun_pattern[@]} -gt 0 ] || [ ${#rerun_regression[@]} -gt 0 ] || [ -n "$rerun_reinstall" ]; then run_step sync; fi ;;
+            pattern) [ ${#rerun_pattern[@]} -eq 0 ] || run_step pattern "${rerun_pattern[@]}" ;;
+            regression) [ ${#rerun_regression[@]} -eq 0 ] || run_step regression "${rerun_regression[@]}" ;;
+            reinstall) [ -z "$rerun_reinstall" ] || run_step reinstall ;;
+        esac
+    done
+    if [ ${#rerun_refused[@]} -gt 0 ]; then
+        status=1
+        printf 're-run ids not run: %s\n' "${rerun_refused[@]}" >&2
+        printf 'case\trerun-ids\tfail\t0\tre-run ids not run: %s\n' "$(IFS=';'; echo "${rerun_refused[*]}")" >> "$cases"
+    fi
+fi
 python3 .aidev/junit_cases.py "$out/junit.xml" "$suite" "$cases"
 exit "$status"

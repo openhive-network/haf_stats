@@ -34,7 +34,10 @@ Scope and limits, stated rather than implied:
     pins them, this test does not replay them;
   * a GRANT/REVOKE on a haf_stats object that the parser cannot read -- a column list,
     GRANT OPTION FOR, a quoted role, a statement built with format() -- FAILS the test
-    instead of being skipped: a blind spot that reports nothing is worse than no test.
+    instead of being skipped: a blind spot that reports nothing is worse than no test;
+  * in install_app.sh only the -c "..." or heredoc body of a psql call is read as SQL. A
+    haf_stats GRANT/REVOKE anywhere else in its non-comment text (a variable later passed
+    to psql, say) fails, and so does a psql word in a call form the extractor does not read.
 """
 
 from __future__ import annotations
@@ -44,7 +47,19 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.unit.test_sql_idempotency import INSTALL_SH, ROOT, _installed_sql_files, _strip_comments
+from tests.unit.test_sql_idempotency import (
+    _COMMENT,
+    _HEREDOC_BODY,
+    _LITERAL,
+    HEREDOC,
+    INSTALL_SH,
+    ROOT,
+    _blanked,
+    _installed_sql_files,
+    _line,
+    _shell_lex,
+    _strip_comments,
+)
 
 EXPECTED = ROOT / "tests" / "expected_privileges.txt"
 SCHEMAS = ("haf_stats_app", "haf_stats_backend", "haf_stats_endpoints")
@@ -157,11 +172,116 @@ def _install_order() -> list:
                   key=lambda f: order[f.relative_to(ROOT).as_posix()])
 
 
-def _install_sh_sql() -> str:
-    """install_app.sh with its shell comments, then SQL comments, removed: the SQL it inlines
-    (psql_cmd -c "..."), so a commented-out GRANT inside an inline block is not replayed."""
-    shell = "\n".join(l for l in INSTALL_SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
-    return _strip_comments(shell)
+# A psql invocation in command position, matched over shell text with comments, quoted
+# strings and heredoc bodies blanked, so prose never matches: after a command separator or a keyword that takes a command,
+# then any run of `time`, `!` and VAR=value prefixes. Every psql word in that text must be
+# one of these -- a form or wrapper it does not read fails rather than being skipped.
+PSQL_CALL = re.compile(
+    r"(?:^|\$\(|[;&|(]|\b(?:if|elif|then|do|else|while|until)\b)"
+    r"(?:[ \t]*(?:time(?:[ \t]+-p)?|!|[A-Za-z_]\w*=[^\s;&|()]*)(?=[ \t]))*"
+    r"[ \t]*(?P<cmd>psql(?:_cmd)?)\b",
+    re.MULTILINE,
+)
+PSQL_WORD = re.compile(r"\bpsql\w*")
+SHELL_WORD = re.compile(r"""(?:\$'(?:[^'\\]|\\.)*'|(?:[^\s"'<>;|&()$]|\$(?!'))+|"(?:[^"\\]|\\.)*"|'[^']*')+""")
+_END = "__end_of_extracted_sql__"
+
+
+def _dq_body(shell: str, i: int) -> tuple[str, int]:
+    """The bash double-quoted string opening at shell[i], unescaped, and the index past it."""
+    out, j = [], i + 1
+    while j < len(shell):
+        c = shell[j]
+        if c == "\\" and shell[j + 1:j + 2] in ('"', "\\", "$", "`"):
+            out.append(shell[j + 1])
+            j += 2
+        elif c == '"':
+            return "".join(out), j + 1
+        else:
+            out.append(c)
+            j += 1
+    raise AssertionError(f"line {shell.count(chr(10), 0, i) + 1}: unterminated double-quoted psql argument")
+
+
+def _left_open(sql: str) -> bool:
+    """Whether the SQL lexer ends sql inside a literal, quoted identifier, $tag$ string or
+    block comment. Probed through _strip_comments alone: a -- comment appended after it is
+    kept only from inside a string, and a bare word is blanked only inside a comment."""
+    return _END in _strip_comments(f"{sql}\n--{_END}") or _END not in _strip_comments(f"{sql}\n{_END}")
+
+
+def _psql_bodies(shell: str) -> tuple[list[tuple[int, str, tuple[int, int]]], bytearray]:
+    """(line, SQL, span) for every psql call in shell text, plus _shell_lex's kinds."""
+    kind, heredocs = _shell_lex(shell)
+    code = _blanked(shell, kind, {_COMMENT, _LITERAL, _HEREDOC_BODY})
+    calls = list(PSQL_CALL.finditer(code))
+    called = {m.start("cmd") for m in calls}
+    for w in PSQL_WORD.finditer(code):
+        assert w.start() in called, (
+            f"line {_line(shell, w.start())}: `{w.group(0)}` is not in a form PSQL_CALL reads as a psql "
+            f"call -- a new wrapper or command form; teach PSQL_CALL and install_sh_sql_bodies it")
+    bodies = []
+    for m in calls:
+        line_no = _line(shell, m.start("cmd"))
+        found, i = [], m.end()
+        while True:
+            while i < len(shell) and shell[i] in " \t":
+                i += 1
+            if (h := HEREDOC.match(shell, i)):
+                start, end = heredocs[i]
+                found.append((shell[start:end], (start, end)))
+                i = h.end()
+            elif (w := SHELL_WORD.match(shell, i)):
+                if re.fullmatch(r"-[A-Za-z]*c", w.group(0)):
+                    i = w.end()
+                    while i < len(shell) and shell[i] in " \t":
+                        i += 1
+                    assert shell[i:i + 1] == '"', f"line {line_no}: psql -c argument is not a double-quoted string"
+                    start = i
+                    body, i = _dq_body(shell, i)
+                    found.append((body, (start, i)))
+                else:
+                    i = w.end()
+            else:
+                break
+        assert len(found) == 1, f"line {line_no}: a psql call with {len(found)} SQL bodies (-c \"...\" or a heredoc); expected one"
+        assert not _left_open(found[0][0]), (
+            f"line {line_no}: the SQL lexer ends this psql body inside a literal or comment -- "
+            f"everything after the opening is invisible to it")
+        bodies.append((line_no, *found[0]))
+    return bodies, kind
+
+
+def install_sh_sql_bodies(shell: str) -> list[tuple[int, str]]:
+    """(line, SQL) for every psql call in shell text: its -c "..." argument or its heredoc.
+
+    Only these reach the SQL lexer. Run over the whole script, a shell apostrophe
+    (log "can't wait") opened a literal that hid, or revived, the comments after it. A call
+    with neither form, a body the lexer ends inside a literal or comment, or a psql word
+    PSQL_CALL does not read as a call, fails.
+    """
+    return [(line_no, sql) for line_no, sql, _ in _psql_bodies(shell)[0]]
+
+
+def install_sh_statements(shell: str) -> tuple[list[Stmt], list[str]]:
+    """parse() over each SQL body install_app.sh inlines, comments stripped per body; and,
+    as unparsed, every haf_stats GRANT/REVOKE in the shell text no body claimed -- a
+    variable that is later passed to psql, a heredoc fed to something else."""
+    stmts, unparsed = [], []
+    bodies, kind = _psql_bodies(shell)
+    for line_no, sql, _ in bodies:
+        s, u = parse(_strip_comments(sql), f"scripts/install_app.sh:{line_no}")
+        stmts += s
+        unparsed += [f"scripts/install_app.sh:{line_no}: {x}" for x in u]
+    claimed = bytearray(kind)
+    for _, _, (start, end) in bodies:
+        claimed[start:end] = bytes([_COMMENT]) * (end - start)
+    rest = _blanked(shell, claimed, {_COMMENT})
+    unparsed += [
+        f"scripts/install_app.sh:{_line(rest, c.start())}: (outside any psql SQL body) {' '.join(c.group(0).split())[:160]}"
+        for c in CANDIDATE.finditer(rest)
+    ]
+    return stmts, unparsed
 
 
 def source_statements() -> tuple[list[Stmt], list[str]]:
@@ -171,9 +291,9 @@ def source_statements() -> tuple[list[Stmt], list[str]]:
         s, u = parse(_strip_comments(f.read_text(encoding="utf-8")), rel)
         stmts += s
         unparsed += [f"{rel}: {x}" for x in u]
-    s, u = parse(_install_sh_sql(), "scripts/install_app.sh")
+    s, u = install_sh_statements(INSTALL_SH.read_text(encoding="utf-8"))
     stmts += s
-    unparsed += [f"scripts/install_app.sh: {x}" for x in u]
+    unparsed += u
     return stmts, unparsed
 
 
@@ -257,19 +377,19 @@ def _expected_lines() -> list[str]:
 
 # --------------------------------------------------------------------------- the real check
 
-def test_every_source_grant_and_revoke_is_reflected_in_the_committed_list():
+def test_every_source_grant_and_revoke_is_reflected_in_the_committed_list() -> None:
     stmts, _ = source_statements()
     assert len(stmts) >= 25, f"only {len(stmts)} statements parsed; the parser or the file list broke"
     errors = check(stmts, read_listing(_expected_lines()))
     assert not errors, "\n".join(errors)
 
 
-def test_every_haf_stats_grant_or_revoke_in_the_sources_is_parsed():
+def test_every_haf_stats_grant_or_revoke_in_the_sources_is_parsed() -> None:
     _, unparsed = source_statements()
     assert not unparsed, "GRANT/REVOKE statements the parser could not read:\n" + "\n".join(unparsed)
 
 
-def test_files_replay_in_installer_order():
+def test_files_replay_in_installer_order() -> None:
     """db/haf_stats_app.sql is named in a comment above db/builtin_roles.sql's run line; the
     order must come from the run lines, where builtin_roles.sql runs first."""
     names = [f.name for f in _install_order()]
@@ -277,13 +397,13 @@ def test_files_replay_in_installer_order():
     assert names[-1] == "endpoint_schema.sql"
 
 
-def test_the_committed_list_is_sorted_and_unique():
+def test_the_committed_list_is_sorted_and_unique() -> None:
     lines = _expected_lines()
     assert lines == sorted(lines, key=lambda s: s.encode()), "tests/expected_privileges.txt must be in C (byte) order"
     assert len(lines) == len(set(lines)), "tests/expected_privileges.txt has duplicate lines"
 
 
-def test_function_names_are_not_overloaded():
+def test_function_names_are_not_overloaded() -> None:
     names = [l.split("(")[0] for l in _expected_lines() if l.startswith("function ")]
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert not dupes, f"overloaded functions {dupes}: test_privileges_pinned matches by name only; tighten it"
@@ -325,7 +445,7 @@ def _run(sql: str) -> list[str]:
         "RAISE NOTICE 'grant SELECT to haf_stats_user on whichever haf_stats_backend table applies';",
     ],
 )
-def test_consistent_sources_pass(sql):
+def test_consistent_sources_pass(sql) -> None:
     assert _run(sql) == []
 
 
@@ -347,7 +467,7 @@ def test_consistent_sources_pass(sql):
         ("GRANT EXECUTE ON FUNCTION haf_stats_app.gone() TO haf_stats_user;", "does not list"),
     ],
 )
-def test_inconsistent_sources_fail(sql, needle):
+def test_inconsistent_sources_fail(sql, needle) -> None:
     errors = _run(sql)
     assert any(needle in e for e in errors), errors
 
@@ -364,6 +484,131 @@ def test_inconsistent_sources_fail(sql, needle):
         "EXECUTE 'GRANT INSERT ON ' || 'haf_stats_backend.t' || ' TO haf_stats_user';",
     ],
 )
-def test_an_unparseable_statement_is_reported_not_skipped(sql):
+def test_an_unparseable_statement_is_reported_not_skipped(sql) -> None:
     _, unparsed = parse(sql, "fixture.sql")
     assert unparsed, sql
+
+
+# --------------------------------------------------------------------------- install_app.sh's inline SQL
+
+def _install_sh_with(block: str) -> str:
+    """install_app.sh with block inserted directly before step 7's grants."""
+    shell = INSTALL_SH.read_text(encoding="utf-8")
+    at = shell.index("\n# 7. ") + 1
+    return shell[:at] + block + "\n" + shell[at:]
+
+
+def test_the_step_7_grants_are_extracted_as_sql() -> None:
+    bodies = [sql for _, sql in install_sh_sql_bodies(INSTALL_SH.read_text(encoding="utf-8"))]
+    assert any("ALTER DEFAULT PRIVILEGES FOR ROLE haf_stats_owner IN SCHEMA haf_stats_endpoints" in b for b in bodies)
+    assert not any("log " in b or "run_sql_file" in b for b in bodies), "shell text reached the SQL lexer"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'log "can\'t wait"',
+        # The reviewed mutation: an apostrophe earlier in the shell must not revive a REVOKE
+        # commented out inside an inline block.
+        'log "can\'t wait"\npsql_cmd -c "\n    -- REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\n    SELECT 1;\n"',
+        "log \"can't wait\"\npsql_cmd <<'SQL'\n    /* REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user; */\n"
+        "    -- GRANT INSERT ON haf_stats_backend.app_config TO haf_stats_user;\n    SELECT 1;\nSQL",
+        # A shell comment is not a psql call, whatever it quotes.
+        "# psql_cmd -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
+        'true  # psql_cmd -c "GRANT INSERT ON haf_stats_backend.app_config TO haf_stats_user;"',
+        # Nor is prose in a quoted string.
+        'log "psql_cmd output: grant SELECT to haf_stats_user on haf_stats_backend if needed"',
+        # ANSI-C quoting: \' does not close the string.
+        "log $'can\\'t wait'",
+        "log $'can\\'t wait # psql_cmd -c \"' # psql_cmd -c \"",
+    ],
+)
+def test_shell_text_and_commented_sql_do_not_change_the_parsed_statements(block: str) -> None:
+    assert install_sh_statements(_install_sh_with(block)) == install_sh_statements(INSTALL_SH.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        'log "can\'t wait"\npsql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;"',
+        'x="$(psql_cmd -Atq -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user")"',
+        "psql_cmd -v v=\"${V}\" <<'SQL'\n    REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\nSQL",
+        'time psql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;"',
+        'if false; then :\nelif psql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;"; then :\nfi',
+        "PGOPTIONS='-c statement_timeout=0' psql_cmd -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
+        '! psql_cmd -c "REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;" || die',
+        "psql_cmd -v note=$'can\\'t' -c \"REVOKE SELECT ON haf_stats_backend.app_config FROM haf_stats_user;\"",
+    ],
+)
+def test_live_inline_sql_is_parsed(block: str) -> None:
+    stmts, _ = install_sh_statements(_install_sh_with(block))
+    assert [(s.verb, s.obj, s.roles) for s in stmts] == [("REVOKE", "haf_stats_backend.app_config", ("haf_stats_user",))]
+
+
+@pytest.mark.parametrize(
+    "block, needle",
+    [
+        ('psql_cmd -c "SELECT \'unterminated;"', "inside a literal or comment"),
+        ("psql_cmd <<'SQL'\n    /* never closed\nSQL", "inside a literal or comment"),
+        ('psql_cmd -f "${SCRIPT_DIR}/x.sql"', "0 SQL bodies"),
+        ("psql_cmd <<'SQL'\n    SELECT 1;\n", "never closed"),
+    ],
+)
+def test_unreadable_inline_sql_fails_loudly(block: str, needle: str) -> None:
+    with pytest.raises(AssertionError, match=needle):
+        install_sh_sql_bodies(_install_sh_with(block))
+
+
+def test_an_unterminated_ansi_c_string_fails_loudly() -> None:
+    shell = INSTALL_SH.read_text(encoding="utf-8") + "\nlog $'can\\'t wait\n"
+    with pytest.raises(AssertionError, match=re.escape("unterminated $'...' shell string")):
+        install_sh_sql_bodies(shell)
+
+
+def _install_sh_findings(shell: str) -> list[str]:
+    """What the two source tests report for shell as install_app.sh's text, on its own."""
+    stmts, unparsed = install_sh_statements(shell)
+    return unparsed + check(stmts, read_listing(_expected_lines()))
+
+
+GRANT = "GRANT INSERT ON haf_stats_backend.app_config TO haf_stats_user;"
+
+
+def test_install_sh_alone_has_no_findings() -> None:
+    assert _install_sh_findings(INSTALL_SH.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        f'time psql_cmd -c "{GRANT}"',
+        f'if false; then :\nelif psql_cmd -c "{GRANT}"; then :\nfi',
+        f"PGOPTIONS='-c statement_timeout=0' psql_cmd -c \"{GRANT}\"",
+        f'! psql_cmd -c "{GRANT}" || die',
+        f'GRANT_SQL="{GRANT}"; psql_cmd -c "$GRANT_SQL"',
+        f"GRANT_SQL=\"$(cat <<'SQL'\n    {GRANT}\nSQL\n)\"\npsql_cmd -c \"$GRANT_SQL\"",
+        f"log $'can\\'t'\npsql_cmd -c \"{GRANT}\"",
+    ],
+)
+def test_a_live_grant_in_any_shell_form_is_reported(block: str) -> None:
+    findings = _install_sh_findings(_install_sh_with(block))
+    assert any("haf_stats_backend" in f for f in findings), findings
+
+
+def test_a_grant_outside_any_psql_body_is_reported_with_its_line() -> None:
+    shell = _install_sh_with(f'GRANT_SQL="{GRANT}"; psql_cmd -c "$GRANT_SQL"')
+    line_no = shell[:shell.index("GRANT_SQL=")].count("\n") + 1
+    _, unparsed = install_sh_statements(shell)
+    assert [u.split(": (")[0] for u in unparsed] == [f"scripts/install_app.sh:{line_no}"], unparsed
+
+
+@pytest.mark.parametrize(
+    "block, needle",
+    [
+        (f'psql_cmd_x -c "{GRANT}"', "`psql_cmd_x` is not in a form PSQL_CALL reads"),
+        (f'exec psql_cmd -c "{GRANT}"', "`psql_cmd` is not in a form PSQL_CALL reads"),
+    ],
+)
+def test_a_psql_word_outside_a_known_call_form_fails_loudly(block: str, needle: str) -> None:
+    with pytest.raises(AssertionError, match=re.escape(needle)):
+        install_sh_sql_bodies(_install_sh_with(block))

@@ -102,11 +102,9 @@ BEGIN
     -- haf_stats_endpoints but not the current haf_stats_app, which is exactly what a
     -- hot-patch of endpoint_schema.sql produces. GET / must serve a document, not 500.
     --
-    -- An earlier version of this file claimed this arm "a transaction cannot stage"
-    -- and grepped root()'s source for the word `undefined_table` instead. That was
-    -- wrong: PostgreSQL DDL is transactional, so the DROP and the privileges it
-    -- cascades are both undone by the ROLLBACK below -- the same mechanism that already
-    -- protects the DELETE above. Staging it tests the behaviour instead of the wording.
+    -- PostgreSQL DDL is transactional, so the DROP and the privileges it cascades are
+    -- both undone by the ROLLBACK below -- the same mechanism that protects the DELETE
+    -- above.
     DROP TABLE haf_stats_app.app_config;
     SELECT haf_stats_endpoints.root()::jsonb #>> '{servers,0,url}' INTO _got;
     IF _got IS DISTINCT FROM _default THEN
