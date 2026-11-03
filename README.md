@@ -993,6 +993,10 @@ a bare hostname, say — is ignored and `/haf-stats-api` is used instead.
 
 ## API Endpoints
 
+`info.version` in the served OpenAPI document is the version of the API contract, bumped
+by Semantic Versioning; `GET /version` is the build's git hash. What counts as breaking,
+and every change a caller can observe, is in [CHANGELOG.md](CHANGELOG.md).
+
 > **The development lane is different.** `docker/docker-compose-test.yml` (used by the
 > Quick Start above) starts **no rewriter** and publishes PostgREST itself on
 > `${TEST_API_PORT:-3001}`. The clean paths below exist only in the full

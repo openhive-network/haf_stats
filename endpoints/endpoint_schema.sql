@@ -389,7 +389,7 @@ info:
   license:
     name: MIT License
     url: https://opensource.org/license/mit
-  version: 1.0.0
+  version: 2.0.0
 externalDocs:
   description: HAF Stats GitLab repository
   url: https://gitlab.syncad.com/hive/haf_stats
@@ -519,7 +519,7 @@ DECLARE
       "name": "MIT License",
       "url": "https://opensource.org/license/mit"
     },
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "externalDocs": {
     "description": "HAF Stats GitLab repository",
