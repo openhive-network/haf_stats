@@ -77,7 +77,7 @@ class ParallelCoordinator:
     class of what its connections raise (psycopg2.Error).
     """
 
-    def __init__(self, parallelism: int, connect: Callable[[str], _Connection], db_error: type[Exception]):
+    def __init__(self, parallelism: int, connect: Callable[[str], _Connection], db_error: type[Exception]) -> None:
         if parallelism < 1:
             raise ValueError(f"parallelism must be at least 1, not {parallelism}")
         self._parallelism = parallelism
