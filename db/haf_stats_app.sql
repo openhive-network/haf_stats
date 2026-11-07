@@ -504,6 +504,64 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Parallel massive sync (scripts/haf_stats_parallel.py): the two halves of a batch that run
+-- in the driver's transaction, around the processor groups that run on connections of their own
+-- (process_processor_group, db/process_block_range.sql, "Processor groups").
+--
+-- begin_parallel_range returns FALSE, having done nothing, outside MASSIVE_PROCESSING: the
+-- caller then hands the range to process_blocks, so live sync keeps the single-session path.
+-- Otherwise it makes process_blocks' preparations and returns TRUE. finish_parallel_range
+-- raises unless every group has applied the range, so the driver's commit -- which moves the
+-- HAF context -- can only follow a fully applied batch; then it does what process_block_range
+-- does after its groups, and records the batch as process_blocks does. Neither commits.
+-- ---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS haf_stats_app.begin_parallel_range;
+CREATE OR REPLACE FUNCTION haf_stats_app.begin_parallel_range(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SET search_path = pg_catalog, haf_stats_app, public
+AS $$
+BEGIN
+    IF hive.get_current_stage_name('haf_stats') IS DISTINCT FROM 'MASSIVE_PROCESSING' THEN
+        RETURN FALSE;
+    END IF;
+    -- 55R23 while hivemind has not reached the range, as in process_blocks.
+    PERFORM haf_stats_app.require_content_source(_first_block, _last_block);
+    -- Session-scoped, as process_blocks sets it; process_blocks restores it outside massive sync.
+    PERFORM set_config('synchronous_commit', 'off', FALSE);
+    -- process_daily_retention, which runs in this transaction, defers its refreshes too.
+    PERFORM haf_stats_app.prepare_rollup_refreshes(TRUE);
+    RETURN TRUE;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS haf_stats_app.finish_parallel_range;
+CREATE OR REPLACE FUNCTION haf_stats_app.finish_parallel_range(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, haf_stats_app, public
+AS $$
+DECLARE
+    _group TEXT;
+BEGIN
+    FOREACH _group IN ARRAY haf_stats_app.processor_groups() LOOP
+        IF haf_stats_app.processor_group_from(_group, _first_block, _last_block) IS NOT NULL THEN
+            RAISE EXCEPTION 'haf_stats: processor group % has not applied blocks %..%; the batch is not committed', _group, _first_block, _last_block;
+        END IF;
+    END LOOP;
+    PERFORM haf_stats_app.finish_block_range(_first_block, _last_block);
+    UPDATE haf_stats_app.app_status SET last_processed_block = _last_block;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- One-time self-heal for the precomputed endpoint rollups (called by install_app.sh)
 --
 -- The period rollups (account_cohort_retention, active_users_period_counts,

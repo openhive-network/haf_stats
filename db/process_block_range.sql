@@ -1,7 +1,8 @@
 SET ROLE haf_stats_owner;
 
 -- Block range dispatcher.
--- Calls domain-specific processors in order. Add calls here as features are implemented.
+-- Calls domain-specific processors in groups (see "Processor groups" below). Add calls to a
+-- group as features are implemented.
 
 -- ---------------------------------------------------------------------------
 -- Per-processor timings, off unless the session sets haf_stats.processor_timings = on
@@ -390,8 +391,100 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS haf_stats_app.process_block_range;
-CREATE OR REPLACE FUNCTION haf_stats_app.process_block_range(
+-- ---------------------------------------------------------------------------
+-- Processor groups
+--
+-- The processors are called in groups: contiguous runs of the call order, each reading only
+-- the batch's staged operations and what the processors before it in the same group wrote,
+-- and writing tables no other group reads or writes within a batch. So the groups of one batch
+-- can run in any order, or at once on separate connections, and write what the call order
+-- writes:
+--
+--   financial    account_financial_*
+--   users        account_cohort_*, active_user*: both read prepare_batch_authored_ops
+--   content      community_registry before content_stats (a community registered in the batch
+--                must be in community_registry when the comment scan classifies posts
+--                addressed to it), content_stats before content_cohorts (which reads
+--                network_author_daily)
+--   custom_json  account_custom_json_*: reads prepare_batch_authored_ops, prepare_batch_exact_rc
+--                and prepare_batch_custom_json_ops
+--   network      network_op_daily, network_custom_json_daily, witness_blocks_daily
+--
+-- Each group writes its own deferred_rollup_refreshes rows (keyed by processor). Every group
+-- starts by staging the batch's operations: in one session the first group stages them and the
+-- rest find them staged; a group on a connection of its own stages its own copy, and any other
+-- staging its processors read (authored ops, exact RC, custom_json ops) lazily, as a direct
+-- processor call does. process_daily_retention is not in a group: it reads and rewrites what
+-- users and custom_json write, and can restage this session's temp tables for an older day
+-- (db/daily_retention.sql), so it runs after every group, in the batch's own transaction.
+--
+-- process_block_range runs the groups one after another in its own session. During massive sync
+-- scripts/haf_stats_parallel.py runs them at once instead, each group in its own transaction on
+-- a connection of its own (process_processor_group), and commits each with a row in
+-- processor_group_progress recording that the group has applied the batch. The batch's own
+-- transaction -- the one that moves the HAF context -- runs only once every group has
+-- committed (finish_parallel_range): it runs process_daily_retention, deletes the batch's
+-- progress rows and records the batch in app_status. So the context never moves past a batch a
+-- group has not applied, and when the batch's transaction does not commit (a group failed, the
+-- process crashed) the batch is delivered again and every group that already applied it skips
+-- it: the progress row commits with the group's writes, or not at all.
+-- ---------------------------------------------------------------------------
+
+-- At most one row per group, and only while a batch is in flight: a group's row is written in
+-- the transaction that applies the batch to the group's tables, and deleted in the transaction
+-- that moves the HAF context past the batch. A regular logged table, so it survives a crash
+-- exactly as the group's writes do.
+CREATE TABLE IF NOT EXISTS haf_stats_app.processor_group_progress (
+    group_name TEXT PRIMARY KEY,
+    first_block INT NOT NULL,
+    last_block INT NOT NULL
+);
+
+-- The groups in call order: the order process_block_range runs them in.
+DROP FUNCTION IF EXISTS haf_stats_app.processor_groups;
+CREATE OR REPLACE FUNCTION haf_stats_app.processor_groups()
+RETURNS TEXT []
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT ARRAY['financial', 'users', 'content', 'custom_json', 'network']::TEXT [];
+$$;
+
+-- The first block of _first_block.._last_block that _group has still to apply, or NULL when it
+-- has applied all of them. A batch is delivered again from the block it started at, so a
+-- progress row for any other start, or reaching past the range, means the HAF context was moved
+-- under an in-flight batch: that raises rather than apply a block twice or skip one.
+DROP FUNCTION IF EXISTS haf_stats_app.processor_group_from;
+CREATE OR REPLACE FUNCTION haf_stats_app.processor_group_from(
+    _group TEXT,
+    _first_block INT,
+    _last_block INT
+)
+RETURNS INT
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    _done haf_stats_app.processor_group_progress;
+BEGIN
+    SELECT * INTO _done FROM haf_stats_app.processor_group_progress WHERE group_name = _group;
+    IF NOT FOUND THEN
+        RETURN _first_block;
+    END IF;
+    IF _done.first_block <> _first_block OR _done.last_block > _last_block THEN
+        RAISE EXCEPTION 'haf_stats: processor group % has applied blocks %..% of a batch that was not committed, which blocks %..% do not continue', _group, _done.first_block, _done.last_block, _first_block, _last_block
+            USING HINT = 'The HAF context was moved while a batch was in flight. Rebuild the group''s tables, or delete its haf_stats_app.processor_group_progress row once they hold exactly the blocks up to the context''s.';
+    END IF;
+    IF _done.last_block = _last_block THEN
+        RETURN NULL;
+    END IF;
+    RETURN _done.last_block + 1;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS haf_stats_app.run_processor_group;
+CREATE OR REPLACE FUNCTION haf_stats_app.run_processor_group(
+    _group TEXT,
     _first_block INT,
     _last_block INT
 )
@@ -405,48 +498,144 @@ BEGIN
     -- Each IF _timed line reports the step above it and restarts the clock. The reads
     -- lists name the op types each step selects (see report_processor_timing).
     IF _timed THEN _t := clock_timestamp(); END IF;
-    -- Every processor below reads its operations from what this stages.
+    -- Every processor below reads its operations from what this stages. It is reported once
+    -- per batch, as the financial group's: in any other group it is either already done (one
+    -- session) or the group's own copy (a connection of its own), whose time is then in the
+    -- group's first step.
     PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_financial(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_financial', _first_block, _last_block, _t, '{author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,claim_reward_balance_operation,interest_operation,transfer_operation,transfer_to_savings_operation,transfer_from_savings_operation,fill_transfer_from_savings_operation,transfer_to_vesting_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation}', NULL); END IF;
-    PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_authored_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
-    PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_account_cohorts', _first_block, _last_block, _t, '{account_created_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_active_users', _first_block, _last_block, _t, '{}', NULL); END IF;
-    -- Before process_content_stats: a community registered in this batch must already be
-    -- in community_registry when the comment scan classifies posts addressed to it.
-    PERFORM haf_stats_app.process_community_registry(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_community_registry', _first_block, _last_block, _t, '{account_created_operation,custom_json_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_content_stats(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_stats', _first_block, _last_block, _t, '{vote_operation,comment_operation,delete_comment_operation,ineffective_delete_comment_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_cohorts', _first_block, _last_block, _t, '{comment_operation}', NULL); END IF;
-    -- The three rollups below each call the first of these, the two custom_json ones the second,
-    -- and find them done; called here so their work is a step of its own rather than part of
-    -- whichever rollup runs first.
-    PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
-    PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
-    PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_network_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
-    PERFORM haf_stats_app.process_network_custom_json(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_network_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
-    -- Reads hafd.blocks and the staged producer_missed ops, so it has no ordering dependency on
-    -- any processor above it.
-    PERFORM haf_stats_app.process_witness_blocks(_first_block, _last_block);
-    IF _timed THEN _t := haf_stats_app.report_processor_timing('process_witness_blocks', _first_block, _last_block, _t, '{producer_missed_operation}', NULL); END IF;
-    -- Last: it can restage this batch's temp tables for an older day (db/daily_retention.sql).
+    CASE _group
+    WHEN 'financial' THEN
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_financial(_first_block, _last_block);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_financial', _first_block, _last_block, _t, '{author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,claim_reward_balance_operation,interest_operation,transfer_operation,transfer_to_savings_operation,transfer_from_savings_operation,fill_transfer_from_savings_operation,transfer_to_vesting_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation}', NULL); END IF;
+    WHEN 'users' THEN
+        PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_authored_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('process_account_cohorts', _first_block, _last_block, _t, '{account_created_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_active_users', _first_block, _last_block, _t, '{}', NULL); END IF;
+    WHEN 'content' THEN
+        PERFORM haf_stats_app.process_community_registry(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('process_community_registry', _first_block, _last_block, _t, '{account_created_operation,custom_json_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_content_stats(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_stats', _first_block, _last_block, _t, '{vote_operation,comment_operation,delete_comment_operation,ineffective_delete_comment_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_content_cohorts', _first_block, _last_block, _t, '{comment_operation}', NULL); END IF;
+    WHEN 'custom_json' THEN
+        -- The three rollups that read exact RC each call the first of these, the two custom_json
+        -- ones the second, and find them done; called here so their work is a step of its own
+        -- rather than part of whichever rollup runs first. On a connection of its own the
+        -- network group stages them again, inside process_network_ops and
+        -- process_network_custom_json.
+        PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+    WHEN 'network' THEN
+        PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('process_network_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        PERFORM haf_stats_app.process_network_custom_json(_first_block, _last_block);
+        IF _timed THEN _t := haf_stats_app.report_processor_timing('process_network_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+        -- Reads hafd.blocks and the staged producer_missed ops, so it has no ordering dependency
+        -- on any processor above it.
+        PERFORM haf_stats_app.process_witness_blocks(_first_block, _last_block);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_witness_blocks', _first_block, _last_block, _t, '{producer_missed_operation}', NULL); END IF;
+    ELSE
+        RAISE EXCEPTION 'haf_stats: unknown processor group %', _group;
+    END CASE;
+END;
+$$;
+
+-- One group's share of a massive-sync batch, on a connection of its own, in a transaction of
+-- its own that the caller commits: the group's processors and its progress row commit together.
+-- A no-op when the group has already applied the batch. The batch's rollup refreshes are
+-- deferred, as main() and process_blocks() defer them during massive sync.
+DROP FUNCTION IF EXISTS haf_stats_app.process_processor_group;
+CREATE OR REPLACE FUNCTION haf_stats_app.process_processor_group(
+    _group TEXT,
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = pg_catalog, haf_stats_app, public
+AS $$
+DECLARE
+    _from INT;
+BEGIN
+    IF NOT _group = ANY(haf_stats_app.processor_groups()) THEN
+        RAISE EXCEPTION 'haf_stats: unknown processor group %', _group;
+    END IF;
+    -- Serialises two calls for the same group (a worker of a coordinator that died, still
+    -- running when the batch is delivered again), so the second reads the first's progress row.
+    PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.processor_group_progress'), hashtext(_group));
+    _from := haf_stats_app.processor_group_from(_group, _first_block, _last_block);
+    IF _from IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- The massive-sync durability trade main() makes. The batch's own transaction commits after
+    -- this one, so its commit record follows this one's in the WAL: a crash cannot keep the
+    -- context's move and lose this group's writes.
+    PERFORM set_config('synchronous_commit', 'off', TRUE);
+    PERFORM haf_stats_app.prepare_rollup_refreshes(TRUE);
+    PERFORM haf_stats_app.run_processor_group(_group, _from, _last_block);
+
+    INSERT INTO haf_stats_app.processor_group_progress AS p (group_name, first_block, last_block)
+    VALUES (_group, _first_block, _last_block)
+    ON CONFLICT (group_name) DO UPDATE SET last_block = EXCLUDED.last_block;
+END;
+$$;
+
+-- What follows the groups in every batch, in the batch's own transaction: process_daily_retention,
+-- then the in-flight batch's progress rows, which the groups' writes now stand for.
+DROP FUNCTION IF EXISTS haf_stats_app.finish_block_range;
+CREATE OR REPLACE FUNCTION haf_stats_app.finish_block_range(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _timed BOOLEAN := current_setting('haf_stats.processor_timings', TRUE) = 'on';
+    _t TIMESTAMPTZ;
+BEGIN
+    IF _timed THEN _t := clock_timestamp(); END IF;
     PERFORM haf_stats_app.process_daily_retention(_first_block, _last_block);
     IF _timed THEN
         PERFORM haf_stats_app.report_processor_timing('process_daily_retention', _first_block, _last_block, _t, '{}', NULL);
         PERFORM haf_stats_app.report_operation_counts(_first_block, _last_block);
     END IF;
+    DELETE FROM haf_stats_app.processor_group_progress;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS haf_stats_app.process_block_range;
+CREATE OR REPLACE FUNCTION haf_stats_app.process_block_range(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _group TEXT;
+    _from INT;
+BEGIN
+    -- Every group in this session, skipping what a group already applied in a massive-sync
+    -- batch that did not commit (processor_group_progress), e.g. when the parallel path is
+    -- switched off after a crash.
+    FOREACH _group IN ARRAY haf_stats_app.processor_groups() LOOP
+        _from := haf_stats_app.processor_group_from(_group, _first_block, _last_block);
+        IF _from IS NOT NULL THEN
+            PERFORM haf_stats_app.run_processor_group(_group, _from, _last_block);
+        END IF;
+    END LOOP;
+    PERFORM haf_stats_app.finish_block_range(_first_block, _last_block);
 END;
 $$;
 

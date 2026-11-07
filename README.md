@@ -865,6 +865,31 @@ and exits rather than naming a target it cannot verify. `docker/docker-compose.y
 `--force`, so an unattended teardown against a server that cannot answer one `SELECT` now
 stops instead of proceeding ([#75](https://gitlab.syncad.com/hive/haf_stats/-/issues/75)).
 
+## Parallel massive sync
+
+`HAF_STATS_SYNC_PARALLELISM` (on `haf-stats-process`; default `1`) is how many database
+connections the massive sync spreads each batch over. With `1` every batch runs in one
+session, as it always has. Above `1`, `process_blocks` runs `haf_app_driver.py` with
+`scripts/haf_stats_parallel.py` as its range processor: during `MASSIVE_PROCESSING` the
+batch's processors run in five groups (`haf_stats_app.processor_groups()`, described in
+`db/process_block_range.sql`), each on a connection of its own, and live sync stays on the
+driver's one session. A value that is not a positive integer is logged and treated as `1`.
+The legacy `CALL main()` loop ignores the setting. More than five adds nothing, because
+there are five groups.
+
+Each group commits its writes together with a row in `haf_stats_app.processor_group_progress`.
+The driver's transaction moves the HAF context only after every group has committed. That
+transaction runs `process_daily_retention`, deletes the progress rows and records the batch.
+If a group fails, or the process dies mid-batch, the context stays before the batch and the
+batch is delivered again. Groups that already applied it skip it, so nothing is counted twice.
+The single-session path honours the same rows, so switching back to `1` after a crash is safe.
+
+The rows outlive a crash on purpose. A `rebuild_*.sh` run that falls between such a crash and
+the processor's restart replays only up to the context's block. A progress row left for the
+rebuilt group would then make that group skip the in-flight batch. So before rebuilding after
+a crash, start the processor until it logs a committed batch, or check that
+`SELECT * FROM haf_stats_app.processor_group_progress` is empty.
+
 ## Redeploying against a node under load
 
 `install_app` re-runs on **every** `docker compose up -d` — `haf-stats-setup` starts
