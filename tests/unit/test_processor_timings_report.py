@@ -235,8 +235,10 @@ def _sql(name: str) -> str:
 
 
 def _dispatcher() -> str:
+    """From the group dispatcher on: run_processor_group's groups in call order, then
+    finish_block_range's process_daily_retention, then process_block_range, which calls both."""
     text = _sql("process_block_range.sql")
-    return text[text.index("CREATE OR REPLACE FUNCTION haf_stats_app.process_block_range("):]
+    return text[text.index("CREATE OR REPLACE FUNCTION haf_stats_app.run_processor_group("):]
 
 
 def test_every_step_the_dispatcher_calls_is_timed_in_order() -> None:

@@ -40,8 +40,8 @@
 # haf_shared_consumer, which is a member of haf_stats_owner there):
 #   - sync            sync: scripts/install_app.sh into the clone, then the block
 #                     processing (haf_app_driver.py, as scripts/process_blocks.sh runs
-#                     it, as haf_stats_owner) to block 5,000,000, with
-#                     haf_stats.processor_timings on. The context is still in massive
+#                     it at HAF_STATS_SYNC_PARALLELISM=4, as haf_stats_owner) to block
+#                     5,000,000, with haf_stats.processor_timings on. The context is still in massive
 #                     sync at 5,000,000, which defers the rollup refreshes to its first
 #                     live batch, and the lane never reaches one: so, with the driver
 #                     gone between two batches as a crash would leave it,
@@ -53,7 +53,11 @@
 #                     tests/ci_daily_retention_equality.sql (.gitlab-ci.yml's sync job
 #                     runs the same four steps; keep them in step); then
 #                     scripts/processor_timings_report.py over both logs:
-#                     processor-timings.json and its table
+#                     processor-timings.json and its table; then
+#                     tests/ci_parallel_sync_equality.sh, on two clones of its own:
+#                     blocks 1..3,000,000 synced at parallelism 1 and at 4, the latter
+#                     through an injected group failure and a resume, give identical
+#                     tables (parallel-equality/)
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
@@ -127,6 +131,12 @@ cases="$out/cases.tsv"; : > "$cases"
 py=/opt/venv/bin/python3
 
 STOP_AT_BLOCK=5000000
+# The synced lane's massive sync runs on the parallel path (scripts/haf_stats_parallel.py).
+SYNC_PARALLELISM=4
+# tests/ci_parallel_sync_equality.sh: the range both of its clones sync, and the block whose
+# day the injected failure fires on.
+EQUALITY_STOP_AT_BLOCK=3000000
+EQUALITY_FAIL_BLOCK=2500000
 # The shared HAF trusts haf_shared_consumer from the fleet LAN: no password.
 consumer_url="postgresql://haf_shared_consumer@${AIDEV_EXTERNAL_HAF_HOST:-}:${AIDEV_EXTERNAL_HAF_PORT:-5432}"
 clone=""; clone_id=""; clone_url=""; stage=""; synced=""
@@ -373,9 +383,11 @@ sync_blocks() {
     cq -c "GRANT CREATE ON DATABASE \"$clone\" TO haf_stats_owner" || return 1
     clone_install || return 1
     t0="$(date +%s.%N)"
-    if ! /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
+    if ! HAF_STATS_SYNC_PARALLELISM="$SYNC_PARALLELISM" PYTHONPATH="$stage/scripts" \
+        /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
         --postgres-url="$clone_url?application_name=haf_stats_block_processing&options=-c%20role%3Dhaf_stats_owner%20-c%20haf_stats.processor_timings%3Don" \
-        --stop-at-block="$STOP_AT_BLOCK" --startup-marker='' --server-messages=INFO > "$driver_log" 2>&1; then
+        --stop-at-block="$STOP_AT_BLOCK" --startup-marker='' --server-messages=INFO \
+        --process-python=haf_stats_parallel:process_blocks > "$driver_log" 2>&1; then
         echo "the block processing failed; the end of its log ($driver_log):"
         grep -v 'haf_stats_processor_timing\|haf_stats_operation_counts' "$driver_log" | tail -40
         return 1
@@ -399,7 +411,9 @@ sync_blocks() {
     synced=yes
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
         --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \
-        --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds"
+        --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds" || return 1
+    bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
+        "$EQUALITY_STOP_AT_BLOCK" "$EQUALITY_FAIL_BLOCK"
 }
 
 needs_sync() {

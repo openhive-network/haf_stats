@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -85,7 +86,7 @@ def clean_env(bindir=None) -> dict:
     return env
 
 
-def stub_bin(tmp_path):
+def stub_bin(tmp_path: Path) -> Path:
     """A bin/ directory on PATH holding a pg_isready that always succeeds.
 
     EVERY invocation of install_app.sh / uninstall_app.sh / process_blocks.sh needs

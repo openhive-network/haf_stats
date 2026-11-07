@@ -81,6 +81,10 @@ services:
       POSTGRES_HOST: haf
       POSTGRES_USER: haf_stats_owner
       POSTGRES_DB:   haf_block_log
+      # Connections the massive sync spreads each batch's processor groups over (README,
+      # "Parallel massive sync"). 1 is the single-session path; live sync is single-session
+      # whatever this says.
+      HAF_STATS_SYNC_PARALLELISM: ${HAF_STATS_SYNC_PARALLELISM:-1}
     networks:
       haf-network:
     # Declared here rather than in the Dockerfile -- see the note there. This is the only

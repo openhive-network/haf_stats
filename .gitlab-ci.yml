@@ -1169,6 +1169,7 @@ sync:
     PGRST_DB_SCHEMA=haf_stats_endpoints
     PGRST_DB_ANON_ROLE=haf_stats_user
     PGRST_DB_EXTRA_SEARCH_PATH=haf_stats_app
+    HAF_STATS_SYNC_PARALLELISM=4
     EOF
     cat ci.env
 

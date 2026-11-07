@@ -17,6 +17,12 @@
 #                  unless it names haf_stats_app
 #   --is_forking=  Accepted likewise; this app's context is always non-forking
 #   --help,-h,-?   Show this and exit                           # --- help-end ---
+#
+# ENVIRONMENT:
+#   HAF_STATS_SYNC_PARALLELISM  Connections the massive sync spreads each batch's processor
+#                  groups over (default 1: one session, as before). Above 1 the driver
+#                  runs scripts/haf_stats_parallel.py as its range processor; live sync
+#                  stays on one session either way. The legacy main() loop ignores it.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -224,13 +230,30 @@ if [ "${_haf_stats_force_legacy}" = "1" ]; then
     log "HAF_STATS_USE_LEGACY_LOOP is set; using the legacy CALL main() loop"
 fi
 
+# A value that is not a positive integer falls back to 1, today's single-session path,
+# rather than stopping the container: the same fail-safe direction as the legacy switch.
+_haf_stats_parallelism="${HAF_STATS_SYNC_PARALLELISM:-1}"
+case "${_haf_stats_parallelism}" in
+    ''|*[!0-9]*|0) log "WARNING: HAF_STATS_SYNC_PARALLELISM='${_haf_stats_parallelism}' is not a positive integer; using 1"
+                   _haf_stats_parallelism=1 ;;
+esac
+_haf_stats_driver_args=()
+if [ "${_haf_stats_parallelism}" -gt 1 ]; then
+    # haf_stats_parallel.py reads the value itself; PYTHONPATH is how the driver's
+    # --process-python import finds it. /app/scripts is root-owned and read-only to the
+    # runtime user (Dockerfile), so this adds no writable import path.
+    export HAF_STATS_SYNC_PARALLELISM="${_haf_stats_parallelism}"
+    export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+    _haf_stats_driver_args+=(--process-python=haf_stats_parallel:process_blocks)
+fi
+
 if command -v haf_app_driver.py >/dev/null 2>&1 \
    && [ "${_haf_stats_force_legacy}" = "0" ]; then
     if registry_has_haf_stats; then
-        log "haf_stats is registered in the HAF application registry; running haf_app_driver.py"
+        log "haf_stats is registered in the HAF application registry; running haf_app_driver.py (massive-sync parallelism ${_haf_stats_parallelism})"
         exec haf_app_driver.py --app=haf_stats \
             --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing" \
-            --startup-marker=
+            --startup-marker= "${_haf_stats_driver_args[@]}"
     fi
     # Deliberately does not name a cause. Every psql failure in the probe above is
     # swallowed, so "not registered" and "could not reach PostgreSQL" are indistinguishable
@@ -249,6 +272,12 @@ fi
 # and set here rather than at the top of the script so the probe and the startup-timestamp
 # queries above are NOT mistaken for a running block processor.
 export PGAPPNAME="haf_stats_block_processing"
+if [ "${_haf_stats_parallelism}" -gt 1 ]; then
+    # main() runs inside one server session, which cannot open the connections the
+    # parallel path needs; only the driver can.
+    log "WARNING: HAF_STATS_SYNC_PARALLELISM=${_haf_stats_parallelism} applies only to haf_app_driver.py;"
+    log "         the legacy CALL main() loop syncs on one session"
+fi
 psql_cmd -c "CALL haf_stats_app.main('haf_stats');"
 
 log "Block processing loop exited."
