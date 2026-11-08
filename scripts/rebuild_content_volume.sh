@@ -144,6 +144,7 @@ if (( TO_BLOCK != app_block )); then
 fi
 
 refuse_if_processor_live
+refuse_if_parallel_batch_pending
 
 # Before anything is truncated: a refused switch, or a hivemind that is behind, must leave the
 # tables as they are. -v and stdin keep the value out of the SQL text, as install_app.sh does.

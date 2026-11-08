@@ -318,3 +318,43 @@ refuse_if_processor_started_during_rebuild() {
         exit 2
     fi
 }
+
+# ---------------------------------------------------------------------------------------
+# Uncommitted parallel-sync batch guard. Call right after refuse_if_processor_live.
+#
+# A haf_stats_app.processor_group_progress row exists only while a massive-sync batch is in
+# flight (db/process_block_range.sql): it commits with its group's writes, and the transaction
+# that moves the HAF context past the batch deletes it. With the processor stopped, any row is
+# therefore a batch a crash left behind, beyond the context. A rebuild replays only up to the
+# context, so after it the group's tables no longer hold that batch -- but the row still says
+# they do, and the resumed sync skips the group's share of it. The batch is lost from the
+# rebuilt tables with no error anywhere.
+#
+# Every row refuses, not only rows of groups this script rebuilds: a group spans several
+# tables, and deleting its row is only correct once ALL of them have lost the batch.
+#
+# Fails closed on psql's exit status, explicitly, for the reasons _read_live_processor_count
+# gives. Call as a plain statement.
+refuse_if_parallel_batch_pending() {
+    local rc=0 pending
+    pending="$(psql_cmd -Atc "
+        SELECT '  group ' || group_name || ': blocks ' || first_block || '..' || last_block
+        FROM haf_stats_app.processor_group_progress
+        ORDER BY group_name
+    ")" || rc=$?
+    if (( rc != 0 )); then
+        echo "Could not read haf_stats_app.processor_group_progress: psql exited ${rc}." >&2
+        echo "Refusing to rebuild -- this check fails CLOSED." >&2
+        exit 2
+    fi
+    if [[ -n "${pending}" ]]; then
+        echo "A parallel massive-sync batch was left uncommitted by a crash; refusing to rebuild." >&2
+        echo "These processor groups have applied it, and the HAF context has not passed it:" >&2
+        printf '%s\n' "${pending}" >&2
+        echo "Rebuilding now would replay only up to the context, and the resumed sync would then" >&2
+        echo "skip these groups' share of that batch, leaving it out of their tables for good." >&2
+        echo "Start the haf-stats-process container and let it commit the batch -- that clears" >&2
+        echo "the rows -- then stop it again and re-run this script." >&2
+        exit 2
+    fi
+}

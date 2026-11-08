@@ -180,6 +180,7 @@ GUARD_FUNCTIONS = (
     "_read_live_processor_count",
     "refuse_if_processor_live",
     "refuse_if_processor_started_during_rebuild",
+    "refuse_if_parallel_batch_pending",
 )
 
 
@@ -343,6 +344,18 @@ def test_the_guard_is_called_before_the_first_truncate(script: Path):
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
+def test_the_pending_batch_check_is_called_before_the_first_truncate(script: Path) -> None:
+    """After the live-processor check, which is the right refusal while the processor is
+    still mid-batch, and before anything is destroyed."""
+    code = _statements(script)
+    call = "refuse_if_parallel_batch_pending"
+    assert call in code, f"{script.name} never checks for an uncommitted parallel batch"
+    assert code.index("refuse_if_processor_live") < code.index(call) < _first_destructive(code), (
+        f"{script.name} checks for an uncommitted parallel batch out of order"
+    )
+
+
+@pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
 def test_the_post_replay_recheck_is_called_with_its_own_consequence(script: Path):
     """The pre-flight check is TOCTOU over a multi-minute replay. The consequence differs
     per script -- an additive upsert double-counts, a membership set does not -- so the
@@ -371,7 +384,8 @@ def bash():
     return require_bash()
 
 
-def make_psql(tmp_path, answers: list[str], count_exit: int = 0) -> Path:
+def make_psql(tmp_path: Path, answers: list[str], count_exit: int = 0,
+              progress: str = "", progress_exit: int = 0) -> Path:
     """A stub psql that answers every read a rebuild script performs.
 
     `answers` is consumed one entry per live-processor COUNT, in order, so a test can say
@@ -383,6 +397,10 @@ def make_psql(tmp_path, answers: list[str], count_exit: int = 0) -> Path:
     (a failover, a postmaster restart, a PgBouncer drop). psql documents exit 2 for exactly
     that. Until this parameter existed the stub always exited 0, so no test in this file
     could see a guard that ignores psql's exit status, and one shipped in the first draft.
+
+    `progress` is what the read of haf_stats_app.processor_group_progress prints -- empty,
+    the normal case, is a table with no rows -- and `progress_exit` the status psql exits
+    with after printing it.
     """
     bindir = stub_bin(tmp_path)
     log = tmp_path / "sql.log"
@@ -390,6 +408,8 @@ def make_psql(tmp_path, answers: list[str], count_exit: int = 0) -> Path:
     counter.write_text("1\n", encoding="utf-8")
     answer_file = tmp_path / "answers"
     answer_file.write_text(chr(10).join(answers) + chr(10), encoding="utf-8")
+    progress_file = tmp_path / "progress"
+    progress_file.write_text(progress, encoding="utf-8")
 
     write_exec(
         bindir / "psql",
@@ -418,6 +438,10 @@ def make_psql(tmp_path, answers: list[str], count_exit: int = 0) -> Path:
         f'    sed -n "${{n}}p" "{answer_file.as_posix()}"\n'
         f"    exit {count_exit}\n"
         "    ;;\n"
+        "  *processor_group_progress*)\n"
+        f'    cat "{progress_file.as_posix()}"\n'
+        f"    exit {progress_exit}\n"
+        "    ;;\n"
         "  *pg_stat_activity*)\n"
         '    echo "  pid 4242  user=haf_stats_owner  application_name=haf_stats_block_processing'
         '  state=idle  since 2026-09-24 00:00:00"\n'
@@ -435,9 +459,11 @@ def make_psql(tmp_path, answers: list[str], count_exit: int = 0) -> Path:
     return log
 
 
-def run_rebuild(bash, script: Path, tmp_path, answers: list[str], count_exit: int = 0,
-                env_extra: dict | None = None):
-    log = make_psql(tmp_path, answers, count_exit=count_exit)
+def run_rebuild(bash: str, script: Path, tmp_path: Path, answers: list[str], count_exit: int = 0,
+                env_extra: dict[str, str] | None = None, progress: str = "",
+                progress_exit: int = 0) -> tuple[subprocess.CompletedProcess[str], str]:
+    log = make_psql(tmp_path, answers, count_exit=count_exit,
+                    progress=progress, progress_exit=progress_exit)
     env = clean_env(tmp_path / "bin")
     env.update(env_extra or {})
     proc = subprocess.run(
@@ -535,6 +561,37 @@ def test_it_fails_closed_when_psql_answers_the_count_and_then_dies(bash, script,
     proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6, count_exit=1)
     assert proc.returncode != 0, "a failed psql was treated as a clean 'no processor'"
     assert not DESTRUCTIVE.search(statements), "it truncated on an unreliable count"
+
+
+# Two rows, as a crash between two groups' commits leaves them: what
+# refuse_if_parallel_batch_pending's query prints for each.
+PENDING_BATCH = "  group content: blocks 101..200\n  group financial: blocks 101..200\n"
+
+
+@pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
+def test_it_refuses_while_a_crashed_parallel_batch_left_progress_rows(
+    bash: str, script: Path, tmp_path: Path,
+) -> None:
+    """A progress row outlives a crash so the resumed batch can skip the groups that applied
+    it. A rebuild in between replays only up to the context, so the row would make the
+    resumed sync skip that batch for the rebuilt tables, and they would lose it silently."""
+    proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6, progress=PENDING_BATCH)
+    assert proc.returncode == 2, f"exit {proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert not DESTRUCTIVE.search(statements), "it destroyed data under a pending batch"
+    assert "group content: blocks 101..200" in proc.stderr
+    assert "group financial: blocks 101..200" in proc.stderr
+    assert "let it commit the batch" in proc.stderr
+
+
+@pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
+def test_it_fails_closed_when_the_progress_rows_cannot_be_read(
+    bash: str, script: Path, tmp_path: Path,
+) -> None:
+    """No output and a failed psql is not an empty table."""
+    proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6, progress_exit=2)
+    assert proc.returncode == 2, f"exit {proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert not DESTRUCTIVE.search(statements), "an unreadable progress table let it truncate"
+    assert "processor_group_progress: psql exited 2" in proc.stderr
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)

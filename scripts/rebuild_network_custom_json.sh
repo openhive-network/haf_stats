@@ -110,6 +110,7 @@ if (( TO_BLOCK != app_block )); then
 fi
 
 refuse_if_processor_live
+refuse_if_parallel_batch_pending
 
 log "Rebuilding network custom_json usage through app block ${TO_BLOCK} in batches of ${BATCH_SIZE}."
 log "The haf_stats processor must remain stopped until this command finishes."
