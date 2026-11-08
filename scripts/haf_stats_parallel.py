@@ -18,9 +18,11 @@ Here, for one range:
     finished, the driver rolls its transaction back, and the context stays before the range: the
     range is delivered again and the groups that committed skip it.
 
-The worker connections use the driver's connection parameters (conn.dsn, so the same
-application_name the rebuild scripts look for); libpq reads a password from PGPASSWORD or
-~/.pgpass, as conn.dsn does not carry one. Their server messages are written to stdout as the
+The worker connections use the driver's connection parameters (conn.get_dsn_parameters(), so
+the same application_name the rebuild scripts look for) and the password the driver's
+connection authenticated with (conn.info.password), whether it came from the URL, PGPASSWORD
+or ~/.pgpass. conn.dsn is not used: psycopg2 masks a password in it as "password=xxx", which
+would override PGPASSWORD and ~/.pgpass. Their server messages are written to stdout as the
 driver writes its own.
 """
 
@@ -44,9 +46,15 @@ class _Cursor(Protocol):
     def fetchone(self) -> Any: ...
 
 
+class _ConnectionInfo(Protocol):
+    password: str | None
+
+
 class _Connection(Protocol):
-    dsn: str
+    info: _ConnectionInfo
     notices: list[str]
+
+    def get_dsn_parameters(self) -> dict[str, str]: ...
 
     def cursor(self) -> _Cursor: ...
 
@@ -73,11 +81,12 @@ def parallelism_from_env(environ: Mapping[str, str] = os.environ) -> int:
 class ParallelCoordinator:
     """Runs a range's processor groups on up to `parallelism` connections of its own.
 
-    `connect` opens a worker connection from a libpq connection string; `db_error` is the base
-    class of what its connections raise (psycopg2.Error).
+    `connect` opens a worker connection from libpq connection parameters given as keyword
+    arguments (psycopg2.connect); `db_error` is the base class of what its connections raise
+    (psycopg2.Error).
     """
 
-    def __init__(self, parallelism: int, connect: Callable[[str], _Connection], db_error: type[Exception]) -> None:
+    def __init__(self, parallelism: int, connect: Callable[..., _Connection], db_error: type[Exception]) -> None:
         if parallelism < 1:
             raise ValueError(f"parallelism must be at least 1, not {parallelism}")
         self._parallelism = parallelism
@@ -100,8 +109,9 @@ class ParallelCoordinator:
                 max_workers=min(self._parallelism, len(self._groups)), thread_name_prefix="haf_stats_group"
             )
         executor = self._executor
+        params = _worker_connection_params(conn)
         futures = [
-            executor.submit(self._run_group, conn.dsn, group, first_block, last_block) for group in self._groups
+            executor.submit(self._run_group, params, group, first_block, last_block) for group in self._groups
         ]
         # Every group is waited for, failed or not, so no worker of this range is still running
         # when the driver rolls back and asks for the range again.
@@ -116,11 +126,11 @@ class ParallelCoordinator:
         cur.execute("SELECT haf_stats_app.begin_parallel_range(%s, %s)", (first_block, last_block))
         return bool(cur.fetchone()[0])
 
-    def _run_group(self, dsn: str, group: str, first_block: int, last_block: int) -> None:
+    def _run_group(self, params: Mapping[str, str], group: str, first_block: int, last_block: int) -> None:
         try:
             worker = self._idle.get_nowait()
         except queue.Empty:
-            worker = self._connect(dsn)
+            worker = self._connect(**params)
             worker.notices = []
         healthy = False
         try:
@@ -170,6 +180,15 @@ class ParallelCoordinator:
         with self._out_lock:
             sys.stdout.write(f"{ts} {lines[0]}\n" + "".join(f"    {extra}\n" for extra in lines[1:]))
             sys.stdout.flush()
+
+
+def _worker_connection_params(conn: _Connection) -> dict[str, str]:
+    params = dict(conn.get_dsn_parameters())
+    password = conn.info.password
+    # libpq reports "" for a connection that authenticated without a password.
+    if password:
+        params["password"] = password
+    return params
 
 
 _coordinator: ParallelCoordinator | None = None

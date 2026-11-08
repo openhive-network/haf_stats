@@ -98,16 +98,32 @@ class FakeCursor:
         return self.row
 
 
+DRIVER_PARAMS = {"user": "haf_stats_owner", "dbname": "haf_block_log", "application_name": "haf_stats_block_processing"}
+
+
+class FakeInfo:
+    def __init__(self, password: str) -> None:
+        self.password = password
+
+
 class FakeConn:
-    def __init__(
-        self, db: FakeDb, name: str, dsn: str = "user=haf_stats_owner application_name=haf_stats_block_processing"
-    ) -> None:
+    """A psycopg2 connection as it presents its parameters: get_dsn_parameters() leaves the
+    password out, info.password is the one it authenticated with ("" for none), and dsn
+    masks it as "password=xxx"."""
+
+    def __init__(self, db: FakeDb, name: str, params: dict[str, str] | None = None) -> None:
         self.db = db
         self.name = name
-        self.dsn = dsn
+        params = dict(DRIVER_PARAMS if params is None else params)
+        self.info = FakeInfo(params.pop("password", ""))
+        self.params = params
+        self.dsn = " ".join(f"{k}={v}" for k, v in params.items()) + (" password=xxx" if self.info.password else "")
         self.pending: str | None = None
         self.closed = False
         self.notices: list[str] = []
+
+    def get_dsn_parameters(self) -> dict[str, str]:
+        return dict(self.params)
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -127,13 +143,15 @@ class FakeConn:
         self.closed = True
 
 
-def coordinator(db: FakeDb, parallelism: int = 4) -> Any:
-    def connect(dsn: str) -> FakeConn:
+def coordinator(db: FakeDb, parallelism: int = 4, opened_with: list[dict[str, str]] | None = None) -> Any:
+    def connect(**params: str) -> FakeConn:
         with db.lock:
             db.opened += 1
             n = db.opened
-        assert "application_name=haf_stats_block_processing" in dsn, dsn
-        return FakeConn(db, f"worker{n}", dsn)
+            if opened_with is not None:
+                opened_with.append(params)
+        assert params.get("application_name") == "haf_stats_block_processing", params
+        return FakeConn(db, f"worker{n}", params)
 
     return parallel.ParallelCoordinator(parallelism, connect, FakeDbError)
 
@@ -209,6 +227,28 @@ def test_parallelism_one_is_the_single_session_path_even_in_massive_sync() -> No
     coordinator(db, parallelism=1).process(driver_conn(db), 101, 10100)
     assert db.log == [("driver", "process_blocks (101,10100)")]
     assert db.opened == 0
+
+
+def test_workers_connect_with_the_password_the_driver_authenticated_with() -> None:
+    db = FakeDb()
+    driver = FakeConn(db, "driver", {**DRIVER_PARAMS, "host": "haf", "password": "s3cret"})
+    assert "password=xxx" in driver.dsn
+    opened_with: list[dict[str, str]] = []
+    coordinator(db, opened_with=opened_with).process(driver, 101, 10100)
+
+    assert opened_with, "no worker connection was opened"
+    assert all(p == {**DRIVER_PARAMS, "host": "haf", "password": "s3cret"} for p in opened_with), opened_with
+    assert ("driver", "finish 101..10100") in db.log
+
+
+def test_workers_pass_no_password_when_the_driver_had_none() -> None:
+    # No password key, so libpq takes one from PGPASSWORD or ~/.pgpass as it did for the driver.
+    db = FakeDb()
+    opened_with: list[dict[str, str]] = []
+    coordinator(db, opened_with=opened_with).process(driver_conn(db), 101, 10100)
+
+    assert opened_with
+    assert all(p == DRIVER_PARAMS for p in opened_with), opened_with
 
 
 def test_worker_server_messages_reach_the_log(capsys: pytest.CaptureFixture[str]) -> None:
