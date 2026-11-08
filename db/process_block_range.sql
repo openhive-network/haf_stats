@@ -463,7 +463,7 @@ $$;
 --
 -- Each group writes its own deferred_rollup_refreshes rows (keyed by processor). Every group
 -- starts by staging the batch's operations: in one session the first group stages them and the
--- rest find them staged; a group on a connection of its own reads the batch's shared staging
+-- rest find them staged; a group on a worker connection reads the batch's shared staging
 -- ("Shared batch staging" below), which was staged once before the groups started, and stages
 -- for itself, lazily as a direct processor call does, only what is not shared for its range.
 -- process_daily_retention is not in a group: it reads and rewrites what
@@ -471,9 +471,10 @@ $$;
 -- (db/daily_retention.sql), so it runs after every group, in the batch's own transaction.
 --
 -- process_block_range runs the groups one after another in its own session. During massive sync
--- scripts/haf_stats_parallel.py runs them at once instead, each group in its own transaction on
--- a connection of its own (process_processor_group), and commits each with a row in
--- processor_group_progress recording that the group has applied the batch. The batch's own
+-- scripts/haf_stats_parallel.py deals them out to worker connections that run at once instead
+-- (a connection runs its groups one after another), each group in its own transaction
+-- (process_processor_group), and commits each with a row in processor_group_progress recording
+-- that the group has applied the batch. The batch's own
 -- transaction -- the one that moves the HAF context -- runs only once every group has
 -- committed (finish_parallel_range): it runs process_daily_retention, deletes the batch's
 -- progress rows and records the batch in app_status. So the context never moves past a batch a
@@ -541,9 +542,9 @@ $$;
 -- tables every connection reads: the four per-batch stages a group's processors read
 -- (prepare_batch_ops, prepare_batch_authored_ops, prepare_batch_exact_rc,
 -- prepare_batch_custom_json_ops), filled by the same fill_batch_* functions as the temp tables.
--- scripts/haf_stats_parallel.py runs the steps of shared_batch_stage_levels() a level at a time,
--- the steps of a level at once, each in a transaction of its own on a worker connection
--- (stage_shared_batch), and dispatches the groups once every step has committed. A group then
+-- scripts/haf_stats_parallel.py runs the steps of shared_batch_stage_levels() in level order,
+-- each in a transaction of its own (stage_shared_batch), on one worker connection in one round
+-- trip, and dispatches the groups once every step has committed. A group then
 -- attaches the stages (attach_shared_batch_stage): in its transaction, each stage's
 -- haf_stats_batch_* name is a temp view of the shared table and the stage's range GUCs are set,
 -- so every prepare_batch_* call of its processors is a no-op.
@@ -563,8 +564,7 @@ $$;
 -- a batch's rows replace the previous batch's by DELETE in the same transaction (the ops
 -- step). TRUNCATE, or dropping and building an index, gives a table that is not temporary new
 -- files, and committing that drops the old files' pages from shared_buffers and creates new
--- unlogged init forks. On the gate's HAF server that cost about 2 s a batch, ten times what a
--- whole early-history batch takes in one session. The tables are never empty between batches,
+-- unlogged init forks, every batch. The tables are never empty between batches,
 -- so an autovacuum ANALYZE never records an empty table for the planner; and they are not
 -- analyzed every batch, only when a load is an order of magnitude off what the planner
 -- assumes (analyze_shared_batch_stage). vacuum_truncate is off: autovacuum, which reclaims the
@@ -618,8 +618,10 @@ CREATE UNLOGGED TABLE IF NOT EXISTS haf_stats_app.shared_batch_custom_json_ops (
 ) WITH (vacuum_truncate = FALSE);
 
 -- The staging steps in levels: every step reads only the stages of the levels before it, so the
--- steps of a level can run at once. The exact_rc step stages exact_rc, then custom_json_ops,
--- which joins the shares to the custom_json ops.
+-- steps of a level could run at once. scripts/haf_stats_parallel.py runs them one after another
+-- in a single round trip instead: on a server where a round trip is slow, a level's own round
+-- trip cost more than running its steps at once saved. The exact_rc step stages exact_rc, then
+-- custom_json_ops, which joins the shares to the custom_json ops.
 DROP FUNCTION IF EXISTS haf_stats_app.shared_batch_stage_levels;
 CREATE OR REPLACE FUNCTION haf_stats_app.shared_batch_stage_levels()
 RETURNS JSONB
@@ -879,8 +881,8 @@ BEGIN
 END;
 $$;
 
--- One group's share of a massive-sync batch, on a connection of its own, in a transaction of
--- its own that the caller commits: the group's processors and its progress row commit together.
+-- One group's share of a massive-sync batch, on a worker connection, in a transaction of its own
+-- that the caller commits: the group's processors and its progress row commit together.
 -- A no-op when the group has already applied the batch. The batch's rollup refreshes are
 -- deferred, as main() and process_blocks() defer them during massive sync.
 DROP FUNCTION IF EXISTS haf_stats_app.process_processor_group;

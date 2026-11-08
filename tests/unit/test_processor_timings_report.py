@@ -72,6 +72,14 @@ def _batch(first: int, last: int, seconds: float, refreshes: tuple[str, ...] = (
     return lines
 
 
+def _phases(first: int, last: int, begin: float = 0.01, staging: float = 0.3, groups: float = 0.6,
+            finish: float = 0.05) -> str:
+    """scripts/haf_stats_parallel.py's line for one batch of the parallel path."""
+    record = {"first_block": first, "last_block": last,
+              "seconds": {"begin": begin, "staging": staging, "groups": groups, "finish": finish}}
+    return f"2026-10-25T10:00:00.000Z haf_stats_parallel: haf_stats_batch_phases {json.dumps(record)}\n"
+
+
 def _run(tmp_path: Path, lines: list[str], first: int = 1, last: int = 2_000_000) -> tuple[int, Path]:
     log = tmp_path / "driver.log"
     log.write_text("2026-10-25T09:59:59.000Z application 'haf_stats': current block 0\n" + "".join(lines),
@@ -145,6 +153,18 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
         "not process_financial", id="a refresh credited to another processor"),
     pytest.param([line.replace('"rows": 7', '"rows": "7"') for line in _batch(1, 2_000_000, 1.0)],
                  "'rows' is '7'", id="a count that is not a number"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000).replace(', "finish": 0.05', "")],
+                 "the phases are ['begin', 'groups', 'staging']", id="a phase missing"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000, groups=-0.1)],
+                 "'groups' is negative", id="a negative phase"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 1_000_000)],
+                 "blocks 1..1000000: a phase begin for a range that is not a batch", id="phases for no batch"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000)] * 2,
+                 "batch 1..2000000: phase begin is logged twice", id="phases twice"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + _batch(1, 2_000_000, 1.0)[-1:],
+                 "batch 1..2000000: processing time is logged twice", id="processed twice"),
+    pytest.param([line.replace("processed in 1.00s", "processed in 101.00s") for line in _batch(1, 2_000_000, 1.0)],
+                 "more than the sync wall time 100.00s", id="more processing than wall time"),
 ])
 def test_bad_input_fails_and_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str],
                                             lines: list[str], problem: str) -> None:
@@ -153,6 +173,42 @@ def test_bad_input_fails_and_writes_nothing(tmp_path: Path, capsys: pytest.Captu
     assert rc == 1
     assert not out.exists()
     assert problem in capsys.readouterr().err
+
+
+def test_the_wall_time_is_split_by_where_it_went(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lines = (_batch(1, 1_000_000, 1.0) + [_phases(1, 1_000_000, groups=0.5, finish=0.1)]
+             + _batch(1_000_001, 1_500_000, 1.0) + [_phases(1_000_001, 1_500_000, staging=0.32, groups=0.5, finish=0.1)]
+             + _batch(1_500_001, 2_000_000, 1.0) + [_phases(1_500_001, 2_000_000, groups=0.52, finish=0.1)])
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    wall = json.loads(out.read_text(encoding="utf-8"))["batch_wall"]
+    # Three batches of 1.00s in the range processor, out of a 100 s sync.
+    assert wall["range_processor_seconds"] == 3.0
+    assert wall["outside_range_processor_seconds"] == 97.0
+    assert wall["phase_batches"] == 3
+    assert wall["phases"] == {"begin": 0.03, "staging": 0.92, "groups": 1.52, "finish": 0.3}
+    assert wall["attributed_share"] == 0.9977
+    table = capsys.readouterr().out
+    assert "in the range processor 3.0s, outside it (the driver between batches) 97.0s" in table
+    assert ("phases over 3 batches: begin 0.0s, staging 0.9s, groups 1.5s, finish 0.3s;"
+            " with the driver's, 99.8% of the sync wall") in table
+
+
+def test_a_single_session_run_has_no_phases(tmp_path: Path) -> None:
+    rc, out = _run(tmp_path, _three_batches())
+
+    assert rc == 0
+    wall = json.loads(out.read_text(encoding="utf-8"))["batch_wall"]
+    assert wall == {"range_processor_seconds": 3.0, "outside_range_processor_seconds": 97.0,
+                    "phase_batches": 0, "phases": None, "attributed_share": None}
+
+
+def test_a_log_without_driver_batch_lines_has_no_batch_wall(tmp_path: Path) -> None:
+    rc, out = _run(tmp_path, [line for line in _three_batches() if "processed in" not in line])
+
+    assert rc == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["batch_wall"] is None
 
 
 def test_a_missing_log_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
