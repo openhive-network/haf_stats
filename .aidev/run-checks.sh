@@ -54,10 +54,11 @@
 #                     runs the same four steps; keep them in step); then
 #                     scripts/processor_timings_report.py over both logs:
 #                     processor-timings.json and its table; then
-#                     tests/ci_parallel_sync_equality.sh, on two clones of its own:
-#                     blocks 1..3,000,000 synced at parallelism 1 and at 4, the latter
-#                     through an injected group failure and a resume, give identical
-#                     tables (parallel-equality/)
+#                     tests/ci_parallel_sync_equality.sh, on three clones of its own:
+#                     blocks 1..3,000,000 synced at parallelism 1, and at 4 through an
+#                     injected group failure and a partly applied batch then resumed at 4
+#                     and at 1, give identical tables (parallel-equality/; .gitlab-ci.yml's
+#                     sync job runs it too, with the same blocks)
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
@@ -133,8 +134,8 @@ py=/opt/venv/bin/python3
 STOP_AT_BLOCK=5000000
 # The synced lane's massive sync runs on the parallel path (scripts/haf_stats_parallel.py).
 SYNC_PARALLELISM=4
-# tests/ci_parallel_sync_equality.sh: the range both of its clones sync, and the block whose
-# day the injected failure fires on.
+# tests/ci_parallel_sync_equality.sh: the range its clones sync, and the block whose day the
+# injected failure fires on. .gitlab-ci.yml's sync job passes the same two; keep them in step.
 EQUALITY_STOP_AT_BLOCK=3000000
 EQUALITY_FAIL_BLOCK=2500000
 # The shared HAF trusts haf_shared_consumer from the fleet LAN: no password.
