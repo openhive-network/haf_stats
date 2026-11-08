@@ -1127,6 +1127,9 @@ sync:
     POSTGRES_ACCESS: "postgresql://haf_admin@docker:5432/haf_block_log"
     COMPOSE_OPTIONS_STRING: "--env-file ci.env --file docker-compose.yml --file overrides/ci.yml
       --ansi never"
+    # A copy of haf_block_log from before haf_stats is installed into it, for
+    # tests/ci_parallel_sync_equality.sh to clone; dropped once that has run.
+    PARALLEL_EQUALITY_TEMPLATE: "haf_stats_equality_base"
     # process is an infinite loop, so the fast-healthcheck override targets it too.
     CI_FAST_HEALTHCHECK_SERVICES: "haf haf-stats-process"
   before_script:
@@ -1187,6 +1190,22 @@ sync:
     # (job 3270294 did exactly that). This lane exists to run the PUBLISHED image, so a
     # missing one must be an error. No service here needs building in CI; the
     # before_script says so.
+    #
+    # The parallel-equality step below syncs its own copies of a HAF database without
+    # haf_stats. haf_block_log is one only until haf-stats-setup installs into it, so it is
+    # copied first, with HAF (--skip-hived) the only service up. CREATE DATABASE ... TEMPLATE
+    # refuses while another session is connected to haf_block_log, which HAF's own
+    # healthcheck can briefly be: retried.
+    if ! docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull --no-build --wait haf; then
+      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color --tail 100 haf || true
+      exit 1
+    fi
+    for attempt in 1 2 3 4 5 6; do
+      psql "${POSTGRES_ACCESS%/*}/postgres" -X -v ON_ERROR_STOP=on \
+        -c "CREATE DATABASE ${PARALLEL_EQUALITY_TEMPLATE} TEMPLATE haf_block_log" && break
+      [[ "$attempt" == 6 ]] && exit 1
+      sleep 10
+    done
     if ! docker compose "${COMPOSE_OPTIONS[@]}" up --detach --quiet-pull --no-build; then
       echo "--- up failed; dumping one-shot container logs ---"
       docker compose "${COMPOSE_OPTIONS[@]}" logs --no-color haf-stats-setup || true
@@ -1244,6 +1263,22 @@ sync:
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_deferred_refresh_complete.sql
     psql "${POSTGRES_ACCESS}" -X -v ON_ERROR_STOP=on -f tests/ci_daily_retention_equality.sql
     echo -e "\e[0Ksection_end:$(date +%s):deferred\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):equality[collapsed=true]\r\e[0KParallel sync equality, through a failed batch and two resumes..."
+    cd "${CI_PROJECT_DIR}/docker" || exit 1
+    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+    # .aidev/run-checks.sh's sync_blocks runs the same test with the same blocks
+    # (EQUALITY_STOP_AT_BLOCK, EQUALITY_FAIL_BLOCK); keep them in step. Here its clones are
+    # copies of the template the compose step made, and it runs in this commit's haf_stats
+    # image, which carries haf_app_driver.py and the install tree (/app). The script exits
+    # non-zero when any table's checksum differs, which fails the job.
+    docker compose "${COMPOSE_OPTIONS[@]}" run --rm --no-deps -T \
+      --volume "${CI_PROJECT_DIR}/tests:/src/tests:ro" --entrypoint bash haf-stats-process \
+      /src/tests/ci_parallel_sync_equality.sh postgresql://haf_admin@haf:5432 /app /tmp/parallel-equality \
+      3000000 2500000 "${PARALLEL_EQUALITY_TEMPLATE}"
+    # Not left in the datadir the cache saves.
+    psql "${POSTGRES_ACCESS%/*}/postgres" -X -v ON_ERROR_STOP=on -c "DROP DATABASE ${PARALLEL_EQUALITY_TEMPLATE}"
+    echo -e "\e[0Ksection_end:$(date +%s):equality\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):shutdown[collapsed=true]\r\e[0KClean PostgreSQL shutdown..."
     cd "${CI_PROJECT_DIR}/docker" || exit 1
