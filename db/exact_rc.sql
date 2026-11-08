@@ -316,6 +316,29 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stats_user;
 
+-- Loads the shares into whatever haf_stats_batch_exact_rc names: prepare_batch_exact_rc's temp
+-- table, or the shared staging of parallel massive sync (stage_shared_batch,
+-- db/process_block_range.sql). Returns the number of rows loaded.
+DROP FUNCTION IF EXISTS haf_stats_app.fill_batch_exact_rc(INT, INT);
+CREATE OR REPLACE FUNCTION haf_stats_app.fill_batch_exact_rc(
+    _first_block INT,
+    _last_block INT
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+DECLARE
+    _rows BIGINT;
+BEGIN
+    INSERT INTO haf_stats_batch_exact_rc (op_id, rc_exact)
+    SELECT e.operation_id, e.rc_exact
+    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block) AS e;
+    GET DIAGNOSTICS _rows = ROW_COUNT;
+    RETURN _rows;
+END;
+$$;
+
 -- The exact shares of one batch's operations, computed ONCE for the three rollups. The rollup
 -- functions (network_op_rows, network_custom_json_rows, account_custom_json_rows) each call this
 -- and then read the temp table, so a batch - or a backfilled day - splits its transactions' RC
@@ -353,9 +376,7 @@ BEGIN
     -- Dropped first so a second staging in the same transaction loads without it too.
     ALTER TABLE haf_stats_batch_exact_rc DROP CONSTRAINT IF EXISTS haf_stats_batch_exact_rc_pkey;
 
-    INSERT INTO haf_stats_batch_exact_rc (op_id, rc_exact)
-    SELECT e.operation_id, e.rc_exact
-    FROM haf_stats_app.exact_rc_for_range(_first_block, _last_block) AS e;
+    PERFORM haf_stats_app.fill_batch_exact_rc(_first_block, _last_block);
 
     ALTER TABLE haf_stats_batch_exact_rc
         ADD CONSTRAINT haf_stats_batch_exact_rc_pkey PRIMARY KEY (op_id);

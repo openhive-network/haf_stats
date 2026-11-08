@@ -9,14 +9,21 @@ Here, for one range:
   * outside MASSIVE_PROCESSING (haf_stats_app.begin_parallel_range returns FALSE) the range goes
     to CALL haf_stats_app.process_blocks, exactly as the driver would call it without this
     module, so live sync keeps the single-session path;
-  * during massive sync each processor group (haf_stats_app.processor_groups(),
-    db/process_block_range.sql) runs on a connection of its own, at most
-    HAF_STATS_SYNC_PARALLELISM at once, in a transaction of its own that commits the group's
-    writes with its progress row (haf_stats_app.process_processor_group). Once every group has
-    committed, haf_stats_app.finish_parallel_range runs in the driver's transaction and the
-    driver commits. If a group fails, the first failure is raised once every group has
-    finished, the driver rolls its transaction back, and the context stays before the range: the
-    range is delivered again and the groups that committed skip it.
+  * during massive sync the range is first staged once for every group: the steps of
+    haf_stats_app.shared_batch_stage_levels() run a level at a time, the steps of a level at
+    once, each on a worker connection in a transaction of its own that commits the staged rows
+    (haf_stats_app.stage_shared_batch, db/process_block_range.sql, "Shared batch staging").
+    Then each processor group (haf_stats_app.processor_groups()) runs on a connection of its
+    own, at most HAF_STATS_SYNC_PARALLELISM at once, in a transaction of its own that reads the
+    shared staging and commits the group's writes with its progress row
+    (haf_stats_app.process_processor_group). Once every group has committed,
+    haf_stats_app.finish_parallel_range runs in the driver's transaction, which also empties the
+    staging, and the driver commits. If a staging step or a group fails, the first failure is
+    raised once every statement of its level has finished, the driver rolls its transaction
+    back, and the context stays before the range: the range is delivered again, the staging
+    steps that committed are reused and the groups that committed skip it. Staging cannot run in
+    the driver's transaction: the groups could not read it before that transaction commits, and
+    its commit is what moves the HAF context.
 
 The worker connections use the driver's connection parameters (conn.get_dsn_parameters(), so
 the same application_name the rebuild scripts look for) and the password the driver's
@@ -95,6 +102,7 @@ class ParallelCoordinator:
         self._idle: queue.SimpleQueue[_Connection] = queue.SimpleQueue()
         self._executor: ThreadPoolExecutor | None = None
         self._groups: list[str] | None = None
+        self._stage_levels: list[list[str]] | None = None
         self._out_lock = threading.Lock()
 
     def process(self, conn: _Connection, first_block: int, last_block: int) -> None:
@@ -102,31 +110,51 @@ class ParallelCoordinator:
         if self._parallelism == 1 or not self._begin(cur, first_block, last_block):
             cur.execute("CALL haf_stats_app.process_blocks(%s::hive.blocks_range)", (f"({first_block},{last_block})",))
             return
-        if self._groups is None or self._executor is None:
-            cur.execute("SELECT haf_stats_app.processor_groups()")
-            self._groups = list(cur.fetchone()[0])
+        if self._groups is None or self._stage_levels is None or self._executor is None:
+            cur.execute("SELECT haf_stats_app.processor_groups(), haf_stats_app.shared_batch_stage_levels()")
+            groups, levels = cur.fetchone()
+            self._groups = list(groups)
+            self._stage_levels = [list(level) for level in levels]
             self._executor = ThreadPoolExecutor(
                 max_workers=min(self._parallelism, len(self._groups)), thread_name_prefix="haf_stats_group"
             )
-        executor = self._executor
         params = _worker_connection_params(conn)
+        for level in self._stage_levels:
+            self._run_at_once(
+                params, "batch staging step", "SELECT haf_stats_app.stage_shared_batch(%s, %s, %s)",
+                level, first_block, last_block,
+            )
+        self._run_at_once(
+            params, "processor group", "SELECT haf_stats_app.process_processor_group(%s, %s, %s)",
+            self._groups, first_block, last_block,
+        )
+        cur.execute("SELECT haf_stats_app.finish_parallel_range(%s, %s)", (first_block, last_block))
+
+    def _run_at_once(
+        self, params: Mapping[str, str], kind: str, sql: str, names: Sequence[str], first_block: int, last_block: int
+    ) -> None:
+        """`sql` for each of `names` and the range, each on a worker connection and committed there."""
+        if self._executor is None:
+            raise RuntimeError("the coordinator has no executor")
         futures = [
-            executor.submit(self._run_group, params, group, first_block, last_block) for group in self._groups
+            self._executor.submit(self._run_on_worker, params, kind, sql, name, first_block, last_block)
+            for name in names
         ]
-        # Every group is waited for, failed or not, so no worker of this range is still running
-        # when the driver rolls back and asks for the range again.
+        # Every statement is waited for, failed or not, so no worker of this range is still running
+        # when the next level starts, or when the driver rolls back and asks for the range again.
         errors = [f.exception() for f in futures]
         failed = next((e for e in errors if e is not None), None)
         if failed is not None:
             raise failed
-        cur.execute("SELECT haf_stats_app.finish_parallel_range(%s, %s)", (first_block, last_block))
 
     @staticmethod
     def _begin(cur: _Cursor, first_block: int, last_block: int) -> bool:
         cur.execute("SELECT haf_stats_app.begin_parallel_range(%s, %s)", (first_block, last_block))
         return bool(cur.fetchone()[0])
 
-    def _run_group(self, params: Mapping[str, str], group: str, first_block: int, last_block: int) -> None:
+    def _run_on_worker(
+        self, params: Mapping[str, str], kind: str, sql: str, name: str, first_block: int, last_block: int
+    ) -> None:
         try:
             worker = self._idle.get_nowait()
         except queue.Empty:
@@ -135,11 +163,11 @@ class ParallelCoordinator:
         healthy = False
         try:
             cur = worker.cursor()
-            cur.execute("SELECT haf_stats_app.process_processor_group(%s, %s, %s)", (group, first_block, last_block))
+            cur.execute(sql, (name, first_block, last_block))
             worker.commit()
             healthy = True
         except self._db_error as e:
-            self._log(f"processor group {group}, blocks {first_block}..{last_block}, failed: {str(e).strip()}")
+            self._log(f"{kind} {name}, blocks {first_block}..{last_block}, failed: {str(e).strip()}")
             healthy = self._rolled_back(worker)
             raise
         finally:
