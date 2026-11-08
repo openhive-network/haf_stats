@@ -884,6 +884,24 @@ If a group fails, or the process dies mid-batch, the context stays before the ba
 batch is delivered again. Groups that already applied it skip it, so nothing is counted twice.
 The single-session path honours the same rows, so switching back to `1` after a crash is safe.
 
+Each batch is staged once, before its groups start
+([#145](https://gitlab.syncad.com/hive/haf_stats/-/issues/145)). The batch's operations, authored
+ops, exact RC shares and custom_json ops go into UNLOGGED `haf_stats_app.shared_batch_*` tables.
+Each staging step runs on a worker connection and commits on its own, never in the driver's
+transaction, because that commit is what moves the HAF context. The groups then read those
+rows instead of staging their own copies. A row in `haf_stats_app.shared_batch_stage` marks a
+stage as complete for one block range. It commits with the stage's rows and, being UNLOGGED
+too, is emptied with them by crash recovery. So a batch delivered again after a crash is staged
+again, and one delivered again after a failed group reuses the staged rows. A group whose share
+of a batch starts past its first block stages its own copy. The driver's transaction deletes the
+marker rows with the progress rows; the next batch's first staging step replaces the rows. The
+shared tables are created once at install, with their keys and index, and their rows are replaced
+by `DELETE`, not `TRUNCATE` and index rebuilds: on a table that is not temporary those give it new
+files, which cost about 2 s a batch on the gate's HAF server, ten times a whole single-session
+early-history batch ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)). They are
+analyzed only when a batch's row count is an order of magnitude off the planner's estimate. The
+single-session path keeps its own session-local staging.
+
 The rows outlive a crash on purpose. A `rebuild_*.sh` run that falls between such a crash and
 the processor's restart replays only up to the context's block. A progress row left for the
 rebuilt group would then make that group skip the in-flight batch. So every `rebuild_*.sh`
@@ -891,6 +909,9 @@ rebuilt group would then make that group skip the in-flight batch. So every `reb
 the blocks it applied, before it writes anything
 ([#143](https://gitlab.syncad.com/hive/haf_stats/-/issues/143)). To proceed, start the
 processor until the batch commits (that deletes the rows), stop it again and re-run the script.
+Leftover `shared_batch_*` rows do not matter to the rebuild scripts. The rebuild scripts stage
+in their own session and never read them. Staged rows come from irreversible blocks only, so
+they stay right for the block range they are marked with.
 
 Why this design ([#140](https://gitlab.syncad.com/hive/haf_stats/-/issues/140)). The groups
 were derived from each processor's read and write tables, so no group touches another
@@ -901,8 +922,19 @@ group's tables within a batch. The alternatives were rejected:
 - **Two-phase commit**: `max_prepared_transactions` is 0 on steem-20, and is not a setting haf_stats controls.
 - **Syncing disjoint block ranges** with the rebuild scripts: processors carry state across
   blocks (cohorts, registries, retention), so a range cannot start cold.
-- **Shared staging tables**: each worker stages the batch for itself instead. That repeats
-  `prepare_batch_ops` per worker, which costs CPU rather than wall time.
+
+At first (#140) each worker staged the batch for itself, and shared staging was rejected as costing
+CPU rather than wall time. Measured on steem-20 at blocks 61.2–61.9M with parallelism 5
+(2026-11-08), it cost both. The rate was about 416 blocks/s against about 441 single-session
+(different ranges, so not a clean A/B). Staging was over half of all haf_stats CPU:
+`prepare_batch_ops` 35.4 % (about 18.5 calls per batch, against 11 single-session),
+`prepare_batch_authored_ops` 17.1 %, `exact_rc_for_range` 8.1 % (twice per batch) and
+`prepare_batch_custom_json_ops` 6.4 %. It was also on the critical path, because each group
+staged before its own work. The custom_json group, the slowest, was the only one still running
+in about 40 % of `pg_stat_activity` samples. Hence the shared staging above. It still runs before
+the groups, so a batch takes its staging plus the slowest group's own work. The staging is done
+once, though, with the authored-ops and exact-RC steps at once, instead of once per group
+competing for the same cores.
 
 The custom_json group bounds the speedup: at block 60M it takes about 15.6 s of a roughly
 35 s single-session batch, so expect a little over 2x at most in that part of the history.
