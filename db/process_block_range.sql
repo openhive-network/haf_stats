@@ -453,9 +453,10 @@ $$;
 --
 -- Each group writes its own deferred_rollup_refreshes rows (keyed by processor). Every group
 -- starts by staging the batch's operations: in one session the first group stages them and the
--- rest find them staged; a group on a connection of its own stages its own copy, and any other
--- staging its processors read (authored ops, exact RC, custom_json ops) lazily, as a direct
--- processor call does. process_daily_retention is not in a group: it reads and rewrites what
+-- rest find them staged; a group on a connection of its own reads the batch's shared staging
+-- ("Shared batch staging" below), which was staged once before the groups started, and stages
+-- for itself, lazily as a direct processor call does, only what is not shared for its range.
+-- process_daily_retention is not in a group: it reads and rewrites what
 -- users and custom_json write, and can restage this session's temp tables for an older day
 -- (db/daily_retention.sql), so it runs after every group, in the batch's own transaction.
 --
@@ -765,7 +766,8 @@ DROP FUNCTION IF EXISTS haf_stats_app.run_processor_group;
 CREATE OR REPLACE FUNCTION haf_stats_app.run_processor_group(
     _group TEXT,
     _first_block INT,
-    _last_block INT
+    _last_block INT,
+    _shared TEXT [] DEFAULT '{}'
 )
 RETURNS VOID
 LANGUAGE plpgsql
@@ -775,21 +777,23 @@ DECLARE
     _t TIMESTAMPTZ;
 BEGIN
     -- Each IF _timed line reports the step above it and restarts the clock. The reads
-    -- lists name the op types each step selects (see report_processor_timing).
+    -- lists name the op types each step selects (see report_processor_timing). _shared names
+    -- the stages attached from the shared batch staging (attach_shared_batch_stage): their
+    -- prepare_batch_* calls are no-ops, and stage_shared_batch reported their time.
     IF _timed THEN _t := clock_timestamp(); END IF;
     -- Every processor below reads its operations from what this stages. It is reported once
     -- per batch, as the financial group's: in any other group it is either already done (one
-    -- session) or the group's own copy (a connection of its own), whose time is then in the
-    -- group's first step.
+    -- session), shared, or the group's own copy (a connection of its own), whose time is then
+    -- in the group's first step.
     PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
     CASE _group
     WHEN 'financial' THEN
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
+        IF _timed AND NOT 'ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
         PERFORM haf_stats_app.process_financial(_first_block, _last_block);
         IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_financial', _first_block, _last_block, _t, '{author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,claim_reward_balance_operation,interest_operation,transfer_operation,transfer_to_savings_operation,transfer_from_savings_operation,fill_transfer_from_savings_operation,transfer_to_vesting_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation}', NULL); END IF;
     WHEN 'users' THEN
         PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_authored_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        IF _timed AND NOT 'authored_ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_authored_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
         PERFORM haf_stats_app.process_account_cohorts(_first_block, _last_block);
         IF _timed THEN _t := haf_stats_app.report_processor_timing('process_account_cohorts', _first_block, _last_block, _t, '{account_created_operation}', NULL); END IF;
         PERFORM haf_stats_app.process_active_users(_first_block, _last_block);
@@ -805,12 +809,12 @@ BEGIN
         -- The three rollups that read exact RC each call the first of these, the two custom_json
         -- ones the second, and find them done; called here so their work is a step of its own
         -- rather than part of whichever rollup runs first. On a connection of its own the
-        -- network group stages them again, inside process_network_ops and
-        -- process_network_custom_json.
+        -- network group reads them from the shared batch staging, or, without it, stages them
+        -- again inside process_network_ops and process_network_custom_json.
         PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        IF _timed AND NOT 'exact_rc' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
         PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
-        IF _timed THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+        IF _timed AND NOT 'custom_json_ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
         PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
         IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
     WHEN 'network' THEN
@@ -844,6 +848,7 @@ SET search_path = pg_catalog, haf_stats_app, public
 AS $$
 DECLARE
     _from INT;
+    _shared TEXT [];
 BEGIN
     IF NOT _group = ANY(haf_stats_app.processor_groups()) THEN
         RAISE EXCEPTION 'haf_stats: unknown processor group %', _group;
@@ -861,7 +866,12 @@ BEGIN
     -- context's move and lose this group's writes.
     PERFORM set_config('synchronous_commit', 'off', TRUE);
     PERFORM haf_stats_app.prepare_rollup_refreshes(TRUE);
-    PERFORM haf_stats_app.run_processor_group(_group, _from, _last_block);
+    -- The stages are attached only for exactly the share this group applies: a share that
+    -- starts past the batch's first block stages its own copy.
+    _shared := haf_stats_app.attach_shared_batch_stage(_from, _last_block,
+                                                       ARRAY['ops', 'authored_ops', 'exact_rc', 'custom_json_ops']);
+    PERFORM haf_stats_app.run_processor_group(_group, _from, _last_block, _shared);
+    PERFORM haf_stats_app.detach_shared_batch_stage(_shared);
 
     INSERT INTO haf_stats_app.processor_group_progress AS p (group_name, first_block, last_block)
     VALUES (_group, _first_block, _last_block)
@@ -870,7 +880,9 @@ END;
 $$;
 
 -- What follows the groups in every batch, in the batch's own transaction: process_daily_retention,
--- then the in-flight batch's progress rows, which the groups' writes now stand for.
+-- then the in-flight batch's progress rows, which the groups' writes now stand for, and its
+-- shared staging. TRUNCATE only when something is staged: it replaces the tables' files, which
+-- live sync would otherwise do on every block.
 DROP FUNCTION IF EXISTS haf_stats_app.finish_block_range;
 CREATE OR REPLACE FUNCTION haf_stats_app.finish_block_range(
     _first_block INT,
@@ -890,6 +902,11 @@ BEGIN
         PERFORM haf_stats_app.report_operation_counts(_first_block, _last_block);
     END IF;
     DELETE FROM haf_stats_app.processor_group_progress;
+    IF EXISTS (SELECT FROM haf_stats_app.shared_batch_stage) THEN
+        TRUNCATE haf_stats_app.shared_batch_stage, haf_stats_app.shared_batch_ops,
+            haf_stats_app.shared_batch_authored_ops, haf_stats_app.shared_batch_exact_rc,
+            haf_stats_app.shared_batch_custom_json_ops;
+    END IF;
 END;
 $$;
 

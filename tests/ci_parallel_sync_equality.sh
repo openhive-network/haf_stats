@@ -19,8 +19,9 @@
 #   single    at parallelism 1: the registered process_blocks procedure;
 #   parallel  at HAF_STATS_SYNC_PARALLELISM=4 (scripts/haf_stats_parallel.py), with a trigger
 #             that fails the network group once, on the first network_op_daily row of
-#             FAIL_BLOCK's day. The driver must stop on it with the context before that batch
-#             and the other groups' progress rows committed for it. Then the trigger is
+#             FAIL_BLOCK's day. The driver must stop on it with the context before that batch,
+#             the batch's four shared stages committed (they are staged before any group
+#             starts) and the other groups' progress rows committed for it. Then the trigger is
 #             dropped, the network group applies the first half of the batch on its own, as a
 #             delivery of the batch cut short would have left it, and the sync is resumed to
 #             STOP_BLOCK at parallelism 4: the other groups skip the batch, the network group
@@ -29,7 +30,7 @@
 #             single-session process_block_range skips what the groups have applied.
 #
 # Then every haf_stats table's checksum (tests/ci_table_checksums.sql) must be the same in
-# each resumed clone as in single, and neither may hold a progress row. The clones are dropped
+# each resumed clone as in single, and neither may hold a progress row or a shared stage. The clones are dropped
 # on exit.
 set -uo pipefail
 
@@ -107,7 +108,7 @@ psql "$haf_url/$single" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.s
 # against single's.
 fail_and_resume() {
     local name="$1" db="$2" resume_parallelism="$3" log="$out/$1.log" t0=$SECONDS
-    local fail_day state at rows continuing network context batch_end half left
+    local fail_day state at rows continuing network context batch_end half left staged
     fail_day="$(q "$db" "SELECT created_at::DATE FROM hafd.blocks WHERE num = $fail_block")" || return 1
     [ -n "$fail_day" ] || { echo "block $fail_block is not in HAF"; return 1; }
     q "$db" "
@@ -146,6 +147,9 @@ fail_and_resume() {
     [ "$context" = "$at" ] || { echo "FAIL: $name: the HAF context ($context) moved apart from app_status ($at)"; return 1; }
     [ "$rows" -ge 1 ] && [ "$rows" = "$continuing" ] && [ "$network" = 0 ] \
         || { echo "FAIL: $name: expected the other groups' progress rows for the failed batch, and none for network"; return 1; }
+    staged="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_stage
+                       WHERE first_block = $((at + 1)) AND last_block = $batch_end")" || return 1
+    [ "$staged" = 4 ] || { echo "FAIL: $name: $staged of the failed batch's 4 shared stages committed"; return 1; }
 
     q "$db" "SET ROLE haf_stats_owner; DROP TRIGGER ci_fail_network_once ON haf_stats_backend.network_op_daily;
              DROP FUNCTION haf_stats_app.ci_fail_network_once(); DROP SEQUENCE haf_stats_app.ci_fail_once;" >/dev/null || return 1
@@ -160,6 +164,9 @@ fail_and_resume() {
 
     left="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.processor_group_progress")" || return 1
     [ "$left" = 0 ] || { echo "FAIL: $name: $left progress rows left after the resumed sync"; return 1; }
+    left="$(q "$db" "SELECT (SELECT COUNT(*) FROM haf_stats_app.shared_batch_stage)
+                            + (SELECT COUNT(*) FROM haf_stats_app.shared_batch_ops)")" || return 1
+    [ "$left" = 0 ] || { echo "FAIL: $name: $left shared staging rows left after the resumed sync"; return 1; }
     psql "$haf_url/$db" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/$name.checksums" || return 1
     echo "$name: $(wc -l < "$out/$name.checksums") tables compared"
     if ! diff -u "$out/single.checksums" "$out/$name.checksums"; then

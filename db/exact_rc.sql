@@ -316,17 +316,6 @@ $$;
 
 GRANT EXECUTE ON FUNCTION haf_stats_app.exact_rc_for_range(INT, INT) TO haf_stats_user;
 
--- The exact shares of one batch's operations, computed ONCE for the three rollups. The rollup
--- functions (network_op_rows, network_custom_json_rows, account_custom_json_rows) each call this
--- and then read the temp table, so a batch - or a backfilled day - splits its transactions' RC
--- once instead of three times. Like prepare_batch_authored_ops (db/process_block_range.sql), the
--- range-key GUC plus the temp table's existence make repeat calls for the same range no-ops; unlike
--- it, the key is set transaction-local, so it ends with the ON COMMIT DROP table (and rolls back
--- with it) instead of outliving it.
---
--- The table gets a PRIMARY KEY on op_id, so an operation split twice stops the batch rather than
--- counting twice. It is added after the load: the rows arrive in hash order, and building the key
--- once is cheaper than inserting each of them into it.
 -- Loads the shares into whatever haf_stats_batch_exact_rc names: prepare_batch_exact_rc's temp
 -- table, or the shared staging of parallel massive sync (stage_shared_batch,
 -- db/process_block_range.sql).
@@ -346,6 +335,17 @@ BEGIN
 END;
 $$;
 
+-- The exact shares of one batch's operations, computed ONCE for the three rollups. The rollup
+-- functions (network_op_rows, network_custom_json_rows, account_custom_json_rows) each call this
+-- and then read the temp table, so a batch - or a backfilled day - splits its transactions' RC
+-- once instead of three times. Like prepare_batch_authored_ops (db/process_block_range.sql), the
+-- range-key GUC plus the temp table's existence make repeat calls for the same range no-ops; unlike
+-- it, the key is set transaction-local, so it ends with the ON COMMIT DROP table (and rolls back
+-- with it) instead of outliving it.
+--
+-- The table gets a PRIMARY KEY on op_id, so an operation split twice stops the batch rather than
+-- counting twice. It is added after the load: the rows arrive in hash order, and building the key
+-- once is cheaper than inserting each of them into it.
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_exact_rc(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_exact_rc(
     _first_block INT,

@@ -5,9 +5,11 @@ function haf_stats_app.account_op_seq_range(_account_id integer, _from_block int
 function haf_stats_app.allow_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.apply_schema_migration(_needed boolean, _ddl text, _what text, _lock_timeout text, _attempts integer) | owner=haf_stats_owner | secdef=false | acl=<owner only>
 function haf_stats_app.assert_op_types(_fatal_scan_includes_endpoints boolean, _bypass_fatal boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.attach_shared_batch_stage(_first_block integer, _last_block integer, _stages text[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.backfill_rc_exact(_day date) | owner=haf_stats_owner | secdef=false | acl=<owner only>
 function haf_stats_app.backfill_rollup_if_column_null(_rollup regclass, _sentinel_col text, _refresh_call text) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.backfill_rollup_if_empty(_rollup regclass, _source regclass, _refresh_call text) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.batch_op_types(_op_types integer[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.begin_parallel_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.block_range_for_dates(_from date, _to date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.community_start_block() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -18,11 +20,16 @@ function haf_stats_app.custom_json_rc_unsettled_days(_from date, _to date) | own
 function haf_stats_app.custom_json_type_id_of(_json_id text) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.daily_retention_keep_from(_day date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.detach_shared_batch_stage(_stages text[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.drain_deferred_engagement_refresh() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.expected_op_type_names() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.fill_batch_authored_ops() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.fill_batch_custom_json_ops() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.fill_batch_exact_rc(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.fill_batch_ops(_first_block integer, _last_block integer, _types integer[], _full_set boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.finalize_active_users_before(_keep date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.finish_block_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.finish_parallel_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
@@ -97,13 +104,15 @@ function haf_stats_app.roll_up_account_custom_json_accounts(_keep date, _lo_id i
 function haf_stats_app.run_deferred_engagement_refresh() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.run_deferred_rollup_refreshes_past_massive() | owner=haf_stats_owner | secdef=false | acl=<default>
-function haf_stats_app.run_processor_group(_group text, _first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.run_processor_group(_group text, _first_block integer, _last_block integer, _shared text[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_ids() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.select_content_source(_requested text, _allow_switch boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.set_daily_retention_floor(_daily_table text, _kept_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.shared_batch_stage_levels() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stage_engagement_days_from_hivemind() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stage_retired_custom_json() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.stage_shared_batch(_step text, _first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stop_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.sync_status() | owner=haf_stats_owner | secdef=true | acl=haf_stats_user:EXECUTE
 function haf_stats_app.to_filter_date(_input text, _default date) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
@@ -152,6 +161,11 @@ table haf_stats_app.daily_retention_floor | owner=haf_stats_owner | acl=haf_stat
 table haf_stats_app.deferred_rollup_refreshes | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.haf_stats | owner=haf_stats_owner | acl=<default>
 table haf_stats_app.processor_group_progress | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.shared_batch_authored_ops | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.shared_batch_custom_json_ops | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.shared_batch_exact_rc | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.shared_batch_ops | owner=haf_stats_owner | acl=<default>
+table haf_stats_app.shared_batch_stage | owner=haf_stats_owner | acl=<default>
 table haf_stats_backend.account_cohort_members | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_cohort_retention | owner=haf_stats_owner | acl=haf_stats_user:SELECT
 table haf_stats_backend.account_community_daily | owner=haf_stats_owner | acl=haf_stats_user:SELECT
