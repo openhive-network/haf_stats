@@ -886,9 +886,11 @@ The single-session path honours the same rows, so switching back to `1` after a 
 
 The rows outlive a crash on purpose. A `rebuild_*.sh` run that falls between such a crash and
 the processor's restart replays only up to the context's block. A progress row left for the
-rebuilt group would then make that group skip the in-flight batch. So before rebuilding after
-a crash, start the processor until it logs a committed batch, or check that
-`SELECT * FROM haf_stats_app.processor_group_progress` is empty.
+rebuilt group would then make that group skip the in-flight batch. So every `rebuild_*.sh`
+**refuses** while `haf_stats_app.processor_group_progress` has any row, naming each group and
+the blocks it applied, before it writes anything
+([#143](https://gitlab.syncad.com/hive/haf_stats/-/issues/143)). To proceed, start the
+processor until the batch commits (that deletes the rows), stop it again and re-run the script.
 
 The design, the alternatives it rejected (dblink, two-phase commit, disjoint block ranges,
 shared staging) and the speedup bound set by the custom_json group are recorded in
