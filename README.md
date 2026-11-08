@@ -892,9 +892,20 @@ the blocks it applied, before it writes anything
 ([#143](https://gitlab.syncad.com/hive/haf_stats/-/issues/143)). To proceed, start the
 processor until the batch commits (that deletes the rows), stop it again and re-run the script.
 
-The design, the alternatives it rejected (dblink, two-phase commit, disjoint block ranges,
-shared staging) and the speedup bound set by the custom_json group are recorded in
-[docs/decisions/0000-run-massive-sync-batches-as-concurrent-processor-groups.md](docs/decisions/0000-run-massive-sync-batches-as-concurrent-processor-groups.md).
+Why this design ([#140](https://gitlab.syncad.com/hive/haf_stats/-/issues/140)). The groups
+were derived from each processor's read and write tables, so no group touches another
+group's tables within a batch. The alternatives were rejected:
+
+- **Connections opened from SQL (dblink)**: dblink is untrusted, and granting
+  `dblink_connect_u` under the stack's trust auth would let `haf_stats_owner` connect as any role.
+- **Two-phase commit**: `max_prepared_transactions` is 0 on steem-20, and is not a setting haf_stats controls.
+- **Syncing disjoint block ranges** with the rebuild scripts: processors carry state across
+  blocks (cohorts, registries, retention), so a range cannot start cold.
+- **Shared staging tables**: each worker stages the batch for itself instead. That repeats
+  `prepare_batch_ops` per worker, which costs CPU rather than wall time.
+
+The custom_json group bounds the speedup: at block 60M it takes about 15.6 s of a roughly
+35 s single-session batch, so expect a little over 2x at most in that part of the history.
 
 ## Redeploying against a node under load
 
