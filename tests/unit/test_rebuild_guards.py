@@ -212,7 +212,7 @@ def _assignments_to(name: str, text: str) -> int:
 
 
 @pytest.mark.parametrize("name", GUARD_FUNCTIONS)
-def test_each_guard_function_is_defined_exactly_once(name):
+def test_each_guard_function_is_defined_exactly_once(name) -> None:
     """Last definition wins, so "the right text is present" is not the same as "the right
     text runs".
 
@@ -227,7 +227,7 @@ def test_each_guard_function_is_defined_exactly_once(name):
     )
 
 
-def test_the_predicate_is_assigned_exactly_once():
+def test_the_predicate_is_assigned_exactly_once() -> None:
     """`+=` is an assignment. Appending `_LIVE_PROCESSOR_MATCH+=" AND FALSE"` leaves the
     asserted block intact, makes the predicate match nothing, and passed every test in
     this file."""
@@ -236,7 +236,7 @@ def test_the_predicate_is_assigned_exactly_once():
     )
 
 
-def test_the_predicate_is_exactly_what_this_suite_was_written_against():
+def test_the_predicate_is_exactly_what_this_suite_was_written_against() -> None:
     """#85: the driver tags its connection and idles between ranges, so the predicate must
     match on the tag and must not filter on `state`. The legacy `CALL ... main` arm stays
     for a processor container still running an older image, which tags nothing.
@@ -248,7 +248,7 @@ def test_the_predicate_is_exactly_what_this_suite_was_written_against():
     )
 
 
-def test_the_guard_uses_the_tag_the_processor_actually_sets():
+def test_the_guard_uses_the_tag_the_processor_actually_sets() -> None:
     """The two literals are written in different files and nothing made them agree.
 
     Renaming the tag in process_blocks.sh and in its own test -- the natural "update the
@@ -298,13 +298,13 @@ COUNT_QUERY = chr(10).join([
 ])
 
 
-def test_the_count_query_is_scoped_to_this_database_and_excludes_itself():
+def test_the_count_query_is_scoped_to_this_database_and_excludes_itself() -> None:
     assert COUNT_QUERY in _code(COMMON), (
         "the live-processor count query is not what this suite was written against"
     )
 
 
-def test_the_remedy_does_not_promise_stop_processing_alone():
+def test_the_remedy_does_not_promise_stop_processing_alone() -> None:
     """stop_processing() sets a column the driver never reads, and hive.app_pause() leaves
     the driver connected. The instruction an operator is given has to work under both
     loops, so it leads with stopping the container."""
@@ -314,7 +314,7 @@ def test_the_remedy_does_not_promise_stop_processing_alone():
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_no_script_keeps_its_own_copy_of_the_predicate(script: Path):
+def test_no_script_keeps_its_own_copy_of_the_predicate(script: Path) -> None:
     """The point of #98 is one home for it. A second copy is how #85 happened.
 
     A script can opt out of the shared guard without holding a copy of it: appending
@@ -333,7 +333,7 @@ def test_no_script_keeps_its_own_copy_of_the_predicate(script: Path):
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_the_guard_is_called_before_the_first_truncate(script: Path):
+def test_the_guard_is_called_before_the_first_truncate(script: Path) -> None:
     """Ordering, which no substring search can see: a guard below the TRUNCATE guards
     nothing. Behavioural coverage proves this too -- this states it where it reads."""
     code = _statements(script)
@@ -356,7 +356,7 @@ def test_the_pending_batch_check_is_called_before_the_first_truncate(script: Pat
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_the_post_replay_recheck_is_called_with_its_own_consequence(script: Path):
+def test_the_post_replay_recheck_is_called_with_its_own_consequence(script: Path) -> None:
     """The pre-flight check is TOCTOU over a multi-minute replay. The consequence differs
     per script -- an additive upsert double-counts, a membership set does not -- so the
     caller supplies the sentence."""
@@ -478,8 +478,8 @@ def run_rebuild(bash: str, script: Path, tmp_path: Path, answers: list[str], cou
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
 @pytest.mark.parametrize("knob", ["BATCH_SIZE", "FROM_BLOCK", "TO_BLOCK"])
 @pytest.mark.parametrize("bad", ["09", "abc"], ids=["leading-zero", "not-a-number"])
-def test_it_refuses_a_bad_range_input_without_destroying_anything(bash, script, tmp_path,
-                                                                 knob, bad):
+def test_it_refuses_a_bad_range_input_without_destroying_anything(bash, script, tmp_path: Path,
+                                                                 knob, bad) -> None:
     """A rebuild must not destroy anything it cannot then rebuild.
 
     `TO_BLOCK=09` on the four scripts this MR newly guarded used to TRUNCATE, replay ZERO
@@ -505,7 +505,7 @@ def test_it_refuses_a_bad_range_input_without_destroying_anything(bash, script, 
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_it_truncates_when_no_processor_is_connected(bash, script, tmp_path):
+def test_it_truncates_when_no_processor_is_connected(bash, script, tmp_path: Path) -> None:
     """The control. Without it, a guard that refuses unconditionally would pass every
     other test in this file."""
     proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6)
@@ -514,7 +514,7 @@ def test_it_truncates_when_no_processor_is_connected(bash, script, tmp_path):
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_it_refuses_and_truncates_nothing_while_a_processor_is_live(bash, script, tmp_path):
+def test_it_refuses_and_truncates_nothing_while_a_processor_is_live(bash, script, tmp_path: Path) -> None:
     proc, statements = run_rebuild(bash, script, tmp_path, ["1"] * 6)
     assert proc.returncode == 2, f"exit {proc.returncode}: {proc.stderr}"
     assert not DESTRUCTIVE.search(statements), "it truncated anyway"
@@ -522,7 +522,7 @@ def test_it_refuses_and_truncates_nothing_while_a_processor_is_live(bash, script
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_the_refusal_names_the_session_holding_it(bash, script, tmp_path):
+def test_the_refusal_names_the_session_holding_it(bash, script, tmp_path: Path) -> None:
     """An operator who HAS stopped the container must not be told to stop the container:
     the guard keys on the CONNECTION, so it also matches a backend orphaned by an abrupt
     stop, which lingers until TCP keepalive reaps it."""
@@ -532,7 +532,7 @@ def test_the_refusal_names_the_session_holding_it(bash, script, tmp_path):
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_it_fails_closed_when_the_count_cannot_be_read(bash, script, tmp_path):
+def test_it_fails_closed_when_the_count_cannot_be_read(bash, script, tmp_path: Path) -> None:
     """An empty answer is what a reset connection or a restarting server looks like.
 
     `if (( $(count) > 0 ))` would make that `(( > 0 ))` -- an arithmetic syntax error
@@ -547,7 +547,7 @@ def test_it_fails_closed_when_the_count_cannot_be_read(bash, script, tmp_path):
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_it_fails_closed_when_psql_answers_the_count_and_then_dies(bash, script, tmp_path):
+def test_it_fails_closed_when_psql_answers_the_count_and_then_dies(bash, script, tmp_path: Path) -> None:
     """psql prints the count and THEN exits non-zero: the row was transmitted and the
     connection went bad (failover, postmaster restart, PgBouncer drop).
 
@@ -595,7 +595,7 @@ def test_it_fails_closed_when_the_progress_rows_cannot_be_read(
 
 
 @pytest.mark.parametrize("script", ALL_REBUILDS, ids=lambda p: p.name)
-def test_it_refuses_when_a_processor_starts_during_the_replay(bash, script, tmp_path):
+def test_it_refuses_when_a_processor_starts_during_the_replay(bash, script, tmp_path: Path) -> None:
     """Clean at the pre-flight check, live at the re-check: the container came back under
     its restart policy mid-replay. The TRUNCATE has already happened by then -- that is
     why the message tells the operator to stop it and re-run rather than implying the
@@ -607,7 +607,7 @@ def test_it_refuses_when_a_processor_starts_during_the_replay(bash, script, tmp_
     assert "re-run this script" in proc.stderr
 
 
-def test_the_harness_sees_an_unguarded_script_truncate_under_a_live_processor(bash, tmp_path):
+def test_the_harness_sees_an_unguarded_script_truncate_under_a_live_processor(bash, tmp_path: Path) -> None:
     """A negative control for this file, committed rather than run once by hand.
 
     Every behavioural test above is only worth its green if the stub can tell a guarded
@@ -662,8 +662,8 @@ def test_the_harness_sees_an_unguarded_script_truncate_under_a_live_processor(ba
     (["1"] * 4, 0),
 ], ids=["count-unreadable", "psql-answers-then-dies", "processor-live"])
 def test_the_guard_exits_even_where_errexit_is_suppressed(
-    bash, tmp_path, context, answers, count_exit,
-):
+    bash, tmp_path: Path, context, answers, count_exit,
+) -> None:
     """The guard must not depend on `set -e` to stop the script.
 
     Bash suppresses errexit inside an `if` condition, the left side of `||`, and a command
@@ -711,7 +711,7 @@ def test_the_guard_exits_even_where_errexit_is_suppressed(
     'refuse_if_processor_started_during_rebuild ""',
     "refuse_if_processor_started_during_rebuild \"   \"",
 ], ids=["no-arguments", "one-empty-argument", "whitespace-only"])
-def test_the_recheck_refuses_a_call_with_nothing_to_say(bash, tmp_path, call):
+def test_the_recheck_refuses_a_call_with_nothing_to_say(bash, tmp_path: Path, call) -> None:
     """An empty argument passes an argument-COUNT check, the static "starts with a quote"
     check, and every behavioural test -- and then prints a blank line between "STARTED
     DURING the rebuild." and "Stop it and re-run this script.". That is a refusal that
@@ -747,8 +747,8 @@ RC_EXACT_REBUILDS = [SCRIPTS / "rebuild_custom_json.sh", SCRIPTS / "rebuild_netw
 
 @pytest.mark.parametrize("script", RC_EXACT_REBUILDS, ids=lambda p: p.name)
 @pytest.mark.parametrize("batch, refused", [("100000", False), ("100001", True)])
-def test_a_custom_json_rebuild_refuses_batches_too_big_to_keep_exact_rc(bash, script, tmp_path,
-                                                                        batch, refused):
+def test_a_custom_json_rebuild_refuses_batches_too_big_to_keep_exact_rc(bash, script, tmp_path: Path,
+                                                                        batch, refused) -> None:
     proc, statements = run_rebuild(bash, script, tmp_path, ["0"] * 6,
                                    env_extra={"BATCH_SIZE": batch})
     if refused:
