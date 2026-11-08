@@ -872,10 +872,10 @@ connections the massive sync spreads each batch over. With `1` every batch runs 
 session, as it always has. Above `1`, `process_blocks` runs `haf_app_driver.py` with
 `scripts/haf_stats_parallel.py` as its range processor: during `MASSIVE_PROCESSING` the
 batch's processors run in five groups (`haf_stats_app.processor_groups()`, described in
-`db/process_block_range.sql`), each on a connection of its own, and live sync stays on the
-driver's one session. A value that is not a positive integer is logged and treated as `1`.
-The legacy `CALL main()` loop ignores the setting. More than five adds nothing, because
-there are five groups.
+`db/process_block_range.sql`), dealt out to that many connections at most, which run at once,
+and live sync stays on the driver's one session. A value that is not a positive integer is
+logged and treated as `1`. The legacy `CALL main()` loop ignores the setting. More than five
+adds nothing, because there are five groups.
 
 Each group commits its writes together with a row in `haf_stats_app.processor_group_progress`.
 The driver's transaction moves the HAF context only after every group has committed. That
@@ -897,10 +897,20 @@ of a batch starts past its first block stages its own copy. The driver's transac
 marker rows with the progress rows; the next batch's first staging step replaces the rows. The
 shared tables are created once at install, with their keys and index, and their rows are replaced
 by `DELETE`, not `TRUNCATE` and index rebuilds: on a table that is not temporary those give it new
-files, which cost about 2 s a batch on the gate's HAF server, ten times a whole single-session
-early-history batch ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)). They are
+files every batch ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)). They are
 analyzed only when a batch's row count is an order of magnitude off the planner's estimate. The
 single-session path keeps its own session-local staging.
+
+A batch waits on four round trips to the server in a row: `begin_parallel_range` and
+`finish_parallel_range` on the driver's connection, and between them the staging and the groups.
+Each worker connection gets its whole share of a batch in one query string, a `BEGIN; ...; COMMIT`
+block per staging step or group, so each step and group still commits on its own
+([#147](https://gitlab.syncad.com/hive/haf_stats/-/issues/147)). Where a round trip is slow this
+is what a batch costs: in the gate, at about 0.14 s a round trip, the previous three round trips
+per step and per group (fourteen a batch) took about 2 s a batch, not the staging tables. With
+`haf_stats.processor_timings` on, each batch also logs a `haf_stats_batch_phases` line with the
+four phases' wall times, and `scripts/processor_timings_report.py` splits the sync's wall time
+into them and the driver's own work between batches.
 
 The rows outlive a crash on purpose. A `rebuild_*.sh` run that falls between such a crash and
 the processor's restart replays only up to the context's block. A progress row left for the
