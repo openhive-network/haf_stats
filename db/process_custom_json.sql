@@ -167,6 +167,24 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_monthly TO haf_stats_user;
 -- Staged like prepare_batch_exact_rc: transaction-local range key, ON COMMIT DROP table.
 -- ---------------------------------------------------------------------------
 
+-- Loads them into whatever haf_stats_batch_custom_json_ops names: the temp table below, or the
+-- shared staging of parallel massive sync (stage_shared_batch, db/process_block_range.sql).
+DROP FUNCTION IF EXISTS haf_stats_app.fill_batch_custom_json_ops();
+CREATE OR REPLACE FUNCTION haf_stats_app.fill_batch_custom_json_ops()
+RETURNS VOID
+LANGUAGE plpgsql
+SET jit = OFF
+AS $$
+BEGIN
+    INSERT INTO haf_stats_batch_custom_json_ops (op_id, day, custom_json_type_id, op_bytes, rc_exact)
+    SELECT ov.op_id, ov.day, ov.custom_json_type_id, ov.op_bytes, ex.rc_exact
+    FROM haf_stats_batch_ops AS ov
+    LEFT JOIN haf_stats_batch_exact_rc AS ex ON ex.op_id = ov.op_id
+    WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
+      AND ov.custom_json_type_id IS NOT NULL;
+END;
+$$;
+
 DROP FUNCTION IF EXISTS haf_stats_app.prepare_batch_custom_json_ops(INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.prepare_batch_custom_json_ops(
     _first_block INT,
@@ -197,12 +215,7 @@ BEGIN
 
     TRUNCATE haf_stats_batch_custom_json_ops;
 
-    INSERT INTO haf_stats_batch_custom_json_ops (op_id, day, custom_json_type_id, op_bytes, rc_exact)
-    SELECT ov.op_id, ov.day, ov.custom_json_type_id, ov.op_bytes, ex.rc_exact
-    FROM haf_stats_batch_ops AS ov
-    LEFT JOIN haf_stats_batch_exact_rc AS ex ON ex.op_id = ov.op_id
-    WHERE ov.op_type_id = 18   -- hive::protocol::custom_json_operation
-      AND ov.custom_json_type_id IS NOT NULL;
+    PERFORM haf_stats_app.fill_batch_custom_json_ops();
 
     ANALYZE haf_stats_batch_custom_json_ops;
     PERFORM set_config('haf_stats.batch_custom_json_ops_range', _range_key, TRUE);
