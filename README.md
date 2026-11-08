@@ -890,6 +890,10 @@ rebuilt group would then make that group skip the in-flight batch. So before reb
 a crash, start the processor until it logs a committed batch, or check that
 `SELECT * FROM haf_stats_app.processor_group_progress` is empty.
 
+The design, the alternatives it rejected (dblink, two-phase commit, disjoint block ranges,
+shared staging) and the speedup bound set by the custom_json group are recorded in
+[docs/decisions/0000-run-massive-sync-batches-as-concurrent-processor-groups.md](docs/decisions/0000-run-massive-sync-batches-as-concurrent-processor-groups.md).
+
 ## Redeploying against a node under load
 
 `install_app` re-runs on **every** `docker compose up -d` — `haf-stats-setup` starts
