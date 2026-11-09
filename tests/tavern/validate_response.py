@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import difflib
+import http.client
 import json
 import os
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 TEST_SUFFIX = ".tavern.yaml"
@@ -147,3 +150,52 @@ def _check_rows_present(actual: Any, expected: Any, ordered: bool = True) -> Non
             "Expected rows are present but out of order relative to the response "
             f"(positions {positions}); the endpoint's ORDER BY is not honoured."
         )
+
+
+def assert_head_then_get_framed(response: Any, **_kwargs: Any) -> None:
+    """Assert a HEAD of this stage's URL, then a GET on the same connection, answer as it did.
+
+    The HEAD must carry the stage's status and no body, and the GET after it must come
+    back with the stage's status and JSON. A body after a HEAD's headers is read as the
+    start of the next answer on a keep-alive connection; ``requests`` and a plain
+    ``http.client`` connection drop it with the HEAD's read buffer, so this sends both
+    requests at once over one socket and reads the bytes exactly as they arrive.
+    """
+
+    url = urlsplit(response.request.url)
+    target = url.path + (f"?{url.query}" if url.query else "")
+    pipelined = (
+        f"HEAD {target} HTTP/1.1\r\nHost: {url.netloc}\r\n\r\n"
+        f"GET {target} HTTP/1.1\r\nHost: {url.netloc}\r\nConnection: close\r\n\r\n"
+    )
+    with socket.create_connection((url.hostname, url.port or 80), timeout=30) as sock:
+        sock.sendall(pipelined.encode())
+        stream = b"".join(iter(lambda: sock.recv(65536), b""))
+
+    head_end = stream.find(b"\r\n\r\n")
+    assert head_end >= 0, f"no complete answer to a HEAD of {target}: {stream[:200]!r}"
+    head_line = stream.split(b"\r\n", 1)[0]
+    assert head_line.split(b" ")[1:2] == [str(response.status_code).encode()], (
+        f"HEAD of {target} answered {head_line!r}, the GET {response.status_code}"
+    )
+    after_head = stream[head_end + 4 :]
+    assert after_head.startswith(b"HTTP/1.1 "), (
+        f"the HEAD of {target} was followed by a body, not the GET's answer: "
+        f"{after_head[:120]!r}"
+    )
+
+    # http.client parses (and de-chunks) only from a socket: replay the received bytes
+    # through a local pair. They are one small answer, well within the pair's buffer.
+    replay, reader = socket.socketpair()
+    with replay, reader:
+        replay.sendall(after_head)
+        replay.shutdown(socket.SHUT_WR)
+        get = http.client.HTTPResponse(reader)
+        get.begin()
+        body = get.read()
+    assert get.status == response.status_code, (
+        f"the GET after a HEAD of {target} answered {get.status}, want {response.status_code}"
+    )
+    assert json.loads(body) == response.json(), (
+        f"the GET after a HEAD of {target} answered another body:\n{body!r}"
+    )

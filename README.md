@@ -88,10 +88,14 @@ db/
 
 Dockerfile                  App image (one image, three services, dispatched by verb)
 Dockerfile.rewriter         The public REST surface: nginx + endpoints/rewrite_rules.conf
+                            and endpoints/rpc_arguments.lua
 
 endpoints/
   endpoint_schema.sql       All PostgREST-exposed SQL functions
   rewrite_rules.conf        nginx URL → RPC function mappings
+  rpc_arguments.lua         Each RPC function's declared arguments, which the rewriter
+                            forwards as a form POST body (common-ci-configuration's
+                            hive.rpc_form), so a value like not.x is not read as a filter
 
 scripts/
   common.sh                 Shared variables and helpers

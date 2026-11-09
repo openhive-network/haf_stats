@@ -221,7 +221,7 @@ compose_validate() {
 openapi_drift() {
     local ref want copy
     ref="$(sed -n 's/^ *COMMON_CI_REF: *"\([0-9a-f]*\)" *$/\1/p' .gitlab-ci.yml)"
-    want="96889a650b3f45244cecc4bb3f250af439a71900"
+    want="1d952fd19118762d0e66f91953e194ff08e69bb0"
     if [ "$ref" != "$want" ]; then
         echo "STALE: .gitlab-ci.yml COMMON_CI_REF is '$ref'; the runtime image bakes process_openapi.py at $want: rebuild it (.aidev/README.md)"
         return 1

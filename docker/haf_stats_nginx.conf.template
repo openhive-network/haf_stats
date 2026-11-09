@@ -13,6 +13,13 @@ events {
 http {
     access_log /dev/stdout;
 
+    # hive.rpc_form ships in the base image (common-ci-configuration/nginx);
+    # rpc_arguments.lua is generated beside rewrite_rules.conf by scripts/openapi_rewrite.sh.
+    init_by_lua_block {
+        rpc_form = require "hive.rpc_form"
+        rpc_arguments = dofile(ngx.config.prefix() .. "conf/rpc_arguments.lua")
+    }
+
     server {
         listen 0.0.0.0:80 default_server;
         server_name _;
@@ -21,6 +28,13 @@ http {
             include rewrite_rules.conf;
             # ${REWRITE_LOG} is replaced by the entrypoint (rewrite logging on/off).
             ${REWRITE_LOG}
+
+            # A GET or HEAD of /rpc/<function> goes upstream as a form POST of the
+            # arguments the function declares, so PostgREST reads an argument value
+            # starting with an operator (not., eq., ...) as the value, not a filter;
+            # every other parameter (select, order, column filters) stays in the query.
+            rewrite_by_lua_block { rpc_form.forward(rpc_arguments) }
+            header_filter_by_lua_block { rpc_form.restore_head() }
 
             proxy_pass http://${POSTGREST_HOST}:${POSTGREST_PORT};
 

@@ -12,14 +12,18 @@ tests/tavern/
 │       └── validation.tavern.yaml
 └── rewriter/
     ├── rewriter_common.yaml
-    └── public_paths.tavern.yaml
+    ├── public_paths.tavern.yaml
+    └── operator_values.tavern.yaml
 ```
 
 `rewriter/` is the one directory not named after an RPC function, because it is
 the one suite that does not address PostgREST directly: it requests the public
 clean URLs through the nginx rewriter so that `endpoints/rewrite_rules.conf` --
 which every third-party caller depends on and no other test traverses -- cannot
-regress silently. Its variables are scoped to `rewriter_common.yaml` rather than
+regress silently, and so that an argument value starting with a PostgREST operator
+(`not.`, `eq.`), which `endpoints/rpc_arguments.lua` makes the rewriter forward as a
+form POST body, is checked to reach its function. Its variables are scoped to
+`rewriter_common.yaml` rather than
 `common.yaml` so that lanes without a rewriter are unaffected.
 
 The endpoint file contains successful real-replay requests. Validation and

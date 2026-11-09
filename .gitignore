@@ -16,13 +16,15 @@ tests/tavern/.pytest_cache/
 
 # Created by scripts/openapi_rewrite.sh: a private virtualenv for the pinned
 # generator dependencies, the generator's staging tree, and the rewrite_rules.conf
-# the generator drops in the CWD. All three are removed by the script's EXIT trap;
-# they are ignored as well because the repo-root one in particular lands where a
+# and rpc_arguments.lua the generator drops in the CWD. All are removed by the
+# script's EXIT trap;
+# they are ignored as well because the repo-root ones in particular land where a
 # `git add -A` would sweep it up, and the drift gate is scoped to endpoints/ so it
 # would not be seen there either.
 .openapi_venv/
 scripts/openapi_out/
 /rewrite_rules.conf
+/rpc_arguments.lua
 
 # Scratch output of the reinstall-test CI lane (.gitlab-ci.yml). Written to docker/
 # in CI, and by anyone reproducing the lane locally, where a `git add -A` would sweep
