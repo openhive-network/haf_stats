@@ -50,7 +50,7 @@ DECLARE
 BEGIN
     -- THREE CHECKS, because each one alone has a hole.
     --
-    -- to_regprocedure('hive.app_register(text, hive.contexts_group, text, text)') on its
+    -- to_regprocedure('hive.app_register(text, hive.contexts_group, ...)') on its
     -- own is the sibling form, and it RAISES rather than returning NULL when it cannot
     -- resolve the argument types: measured on PostgreSQL 14, a missing `hive` schema
     -- gives 3F000 and a missing hive.contexts_group gives 42704, because the types are
@@ -77,13 +77,21 @@ BEGIN
     _registry_available := to_regnamespace('hive') IS NOT NULL
                            AND to_regtype('hive.contexts_group') IS NOT NULL;
 
+    --
+    -- TWO SIGNATURES are accepted, both exactly: the four-parameter one of haf#341 and the
+    -- five-parameter one of haf#454, which added _health_function. Every parameter after
+    -- _contexts defaults to NULL in both, so the three-argument positional call below is
+    -- valid against either. Anything else still degrades to the warning, for the reason
+    -- above. Both lookups run only after the schema and type checks, so the order of the
+    -- OR between them does not matter.
     IF _registry_available THEN
         _registry_available :=
-            to_regprocedure('hive.app_register(text, hive.contexts_group, text, text)') IS NOT NULL;
+            to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') IS NOT NULL
+            OR to_regprocedure('hive.app_register(text, hive.contexts_group, text, text)') IS NOT NULL;
     END IF;
 
     IF NOT _registry_available THEN
-        RAISE WARNING 'HAF application registry not usable here: hive.app_register(text, hive.contexts_group, text, text) did not resolve. Either this HAF predates haf#341, or that signature changed upstream -- check which before assuming the version. haf_stats stays unregistered and block processing keeps using the legacy CALL main() loop';
+        RAISE WARNING 'HAF application registry not usable here: neither hive.app_register(text, hive.contexts_group, text, text, text) (haf#454) nor hive.app_register(text, hive.contexts_group, text, text) (haf#341) resolved. Either this HAF predates haf#341, or the signature changed upstream -- check which before assuming the version. haf_stats stays unregistered and block processing keeps using the legacy CALL main() loop';
         RETURN;
     END IF;
 
