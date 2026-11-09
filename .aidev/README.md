@@ -70,8 +70,8 @@ run `docker/docker_entrypoint.sh` over `/app` (a link the runtime image points a
 `db/`, `endpoints/` and `scripts/` the service mounts, else the tree's) with
 `/opt/venv` off `PATH`, so their `python3` is the system one with `psycopg2`, as in the
 app image (`tests/ci_driver_hivemind_retry.py` imports it); the rewriter
-is openresty over the tree's `docker/haf_stats_nginx.conf.template` and
-`endpoints/rewrite_rules.conf`, rendered as `docker/rewriter_entrypoint.sh` renders
+is openresty over the tree's `docker/haf_stats_nginx.conf.template`,
+`endpoints/rewrite_rules.conf` and `endpoints/rpc_arguments.lua`, rendered as `docker/rewriter_entrypoint.sh` renders
 them, on ports 18080/18081 instead of 80/81. A compose service shape the driver does
 not know fails the step with its name.
 

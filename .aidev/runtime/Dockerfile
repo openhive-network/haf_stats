@@ -3,8 +3,9 @@
 # start the test stack (.aidev/test-stack.compose.yml), on that stack's network.
 #
 #   the rewriter's own base, common-ci-configuration/nginx (openresty, Alpine; the
-#   tag Dockerfile.rewriter names), so endpoints/rewrite_rules.conf and
-#   docker/haf_stats_nginx.conf.template are served by the openresty production runs
+#   tag Dockerfile.rewriter names), so endpoints/rewrite_rules.conf,
+#   endpoints/rpc_arguments.lua and docker/haf_stats_nginx.conf.template are served by
+#   the openresty (and its hive.rpc_form module) production runs
 #   + bash, psql, python3, git, the psycopg2 module, and install_with_app_lock.py /
 #     haf_app_driver.py from common-ci-configuration/psql:14-3 (the app image's base),
 #     so scripts/install_app.sh runs as it does in the app image
@@ -35,7 +36,7 @@ FROM registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools@s
 RUN python3 -m pip freeze | grep -iE '^(pytest|tavern)==' > /test-tools.txt \
     && test "$(wc -l < /test-tools.txt)" -eq 2
 
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:9f5e12cd984bf12746ce9af081868e09ced8068f@sha256:1008ee680742d09b3542393f8c3c5212162fab2893a3f5e13c546100de821ebe
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:1d952fd19118762d0e66f91953e194ff08e69bb0@sha256:ca1b31e7818d68fe66e7d63b077668495cebe1c67e9b3d9776397f586262405b
 
 USER root
 COPY --from=test-tools /test-tools.txt /opt/test-tools.txt
@@ -50,8 +51,8 @@ RUN apk add --no-cache bash coreutils findutils grep sed gawk git curl postgresq
     && ln -s /tmp/aidev-app /app
 
 # scripts/openapi_rewrite.sh's generator at the COMMON_CI_REF .gitlab-ci.yml pins.
-ADD --checksum=sha256:292e8825e36117357983f8d669ba5d9805a33127ace28869feaa29731ecb6f0a \
-    https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/96889a650b3f45244cecc4bb3f250af439a71900/haf-app-tools/python/process_openapi.py \
+ADD --checksum=sha256:8d0db49d368e21b663a905ac363eb22d54547b72200e483ae30246374233b3aa \
+    https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/1d952fd19118762d0e66f91953e194ff08e69bb0/haf-app-tools/python/process_openapi.py \
     /opt/openapi/process_openapi.py
 
 COPY --from=postgrest /bin/postgrest /usr/local/bin/postgrest

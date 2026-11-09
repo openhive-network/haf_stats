@@ -2,12 +2,15 @@
 # It serves clean REST URLs that map to PostgREST /rpc/ calls, so the public API matches the
 # convention used by the other HAF apps (block_explorer, balance_tracker) rather than exposing
 # raw /rpc/<function> endpoints. The rewrite rules are generated from the OpenAPI annotations in
-# endpoints/endpoint_schema.sql via scripts/openapi_rewrite.sh (-> endpoints/rewrite_rules.conf).
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:9f5e12cd984bf12746ce9af081868e09ced8068f
+# endpoints/endpoint_schema.sql via scripts/openapi_rewrite.sh (-> endpoints/rewrite_rules.conf),
+# as is the map of each function's declared arguments (-> endpoints/rpc_arguments.lua) that the
+# base image's hive.rpc_form module forwards as a form POST body.
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:1d952fd19118762d0e66f91953e194ff08e69bb0
 
 COPY docker/haf_stats_nginx.conf.template /usr/local/openresty/nginx/conf/nginx.conf.template
 COPY docker/rewriter_entrypoint.sh /entrypoint.sh
 COPY endpoints/rewrite_rules.conf /usr/local/openresty/nginx/conf/rewrite_rules.conf
+COPY endpoints/rpc_arguments.lua /usr/local/openresty/nginx/conf/rpc_arguments.lua
 RUN chmod +x /entrypoint.sh
 
 CMD ["/entrypoint.sh"]

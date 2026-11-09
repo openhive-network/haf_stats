@@ -45,6 +45,15 @@ newest released heading here and `info.version` disagree.
 
 ## Unreleased
 
+### Corrected
+
+* Through the rewriter, an argument whose value starts with a PostgREST operator
+  (`not.`, `eq.`, `gt.`, ...) reaches the function as that value: `GET
+  /account/not.blocktrades/content-stats` had answered `PGRST100` and `eq.blocktrades`
+  `PGRST202`; both now answer like any account that does not exist. Every other
+  query parameter (`select`, `order`, `limit`, `offset`, column filters) keeps its
+  PostgREST meaning (#149).
+
 ## 2.0.0
 
 The first version issued under this policy. Everything below shipped under an unchanged

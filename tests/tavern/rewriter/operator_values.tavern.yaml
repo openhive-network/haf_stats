@@ -1,0 +1,161 @@
+---
+test_name: An argument value starting with a PostgREST operator reaches the function
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+  - !include rewriter_common.yaml
+
+# PostgREST reads a GET query value starting with an operator (`not.`, `eq.`, ...) as a
+# filter, never as an argument: `/account/not.blocktrades/content-stats` answered PGRST100
+# and `eq.blocktrades` PGRST202. The rewriter now forwards the arguments each function
+# declares (endpoints/rpc_arguments.lua) as a form POST body, through common-ci-
+# configuration's hive.rpc_form module, so the function receives the value as written.
+# Every stage goes through the rewriter; addressing PostgREST directly would skip the module.
+stages:
+  - name: dapp-footprint echoes a not.-prefixed account taken from the path
+    # The one account endpoint that echoes its argument, so this proves the function got
+    # "not.ixalice" itself rather than some value PostgREST derived from it.
+    request:
+      url: "{rewriter_url}/account/not.ixalice/dapp-footprint"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2020-06-30"}
+    response:
+      status_code: 200
+      json:
+        account: "not.ixalice"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        total_ops: !anyint
+        total_rc_estimated: !anyint
+        rc_source: !anything
+        rc_exact_ops: !anyint
+        top_category: !anything
+        top_dapp: !anything
+        categories: !anything
+        dapps: !anything
+
+  - name: dapp-footprint echoes an eq.-prefixed account taken from the path
+    request:
+      url: "{rewriter_url}/account/eq.ixalice/dapp-footprint"
+      method: GET
+      params: {from_date: "2020-06-01", to_date: "2020-06-30"}
+    response:
+      status_code: 200
+      json:
+        account: "eq.ixalice"
+        from_date: "2020-06-01"
+        to_date: "2020-06-30"
+        total_ops: !anyint
+        total_rc_estimated: !anyint
+        rc_source: !anything
+        rc_exact_ops: !anyint
+        top_category: !anything
+        top_dapp: !anything
+        categories: !anything
+        dapps: !anything
+
+  - name: content-stats for not.blocktrades is the empty result of an unknown account
+    request:
+      url: "{rewriter_url}/account/not.blocktrades/content-stats"
+      method: GET
+      params: {from_date: "2019-10-01", to_date: "2020-06-30"}
+    response: {status_code: 200, json: []}
+
+  - name: content-stats for eq.blocktrades is the empty result of an unknown account
+    request:
+      url: "{rewriter_url}/account/eq.blocktrades/content-stats"
+      method: GET
+      params: {from_date: "2019-10-01", to_date: "2020-06-30"}
+    response: {status_code: 200, json: []}
+
+  - name: interactions for not.ixtester is empty, though ixtester has rows in this window
+    # The window of the ixtester stage in public_paths.tavern.yaml, which yields eight
+    # rows: were the prefix stripped or the value read as a filter, this would not be [].
+    request:
+      url: "{rewriter_url}/account/not.ixtester/interactions"
+      method: GET
+      params: {from_date: "2021-03-01", to_date: "2021-03-01"}
+    response: {status_code: 200, json: []}
+
+  - name: an operator-prefixed query-string argument gets the function's own error
+    # A declared argument given in the query string, not the path: the function's own
+    # validation names the value it received.
+    request:
+      url: "{rewriter_url}/account/ixtester/interactions"
+      method: GET
+      params: {type_filter: "eq.vote"}
+    response:
+      status_code: 400
+      json:
+        code: "22023"
+        details: null
+        hint: "Must be one of: reply, vote, transfer, reblog, follow"
+        message: "invalid type_filter: eq.vote"
+
+  - name: a column filter, order and select stay PostgREST's beside forwarded arguments
+    # interaction_type, order and select are no argument of get_account_interactions, so
+    # they stay in the query string and keep their meaning: two of the eight rows, in
+    # descending partner order, reduced to three columns. (PostgREST 12.2.3 cannot
+    # filter on a column the select leaves out, GET or POST, hence interaction_type.)
+    request:
+      url: "{rewriter_url}/account/ixtester/interactions"
+      method: GET
+      params:
+        from_date: "2021-03-01"
+        to_date: "2021-03-01"
+        interaction_type: "eq.vote"
+        order: "partner.desc"
+        select: "interaction_type,partner,interaction_count"
+    response:
+      status_code: 200
+      json:
+        - {interaction_type: "vote", partner: "ixbob", interaction_count: 1}
+        - {interaction_type: "vote", partner: "ixalice", interaction_count: 2}
+
+---
+test_name: A HEAD answers with the GET's status and no body, and the connection stays framed
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+  - !include rewriter_common.yaml
+
+# The module forwards a HEAD as a POST too, and gives it its method back before nginx
+# writes the headers, so no body follows them. Without that, nginx sends the POST's
+# chunked body after the HEAD's headers and the next answer on the connection starts
+# inside it. A HEAD stage followed by a GET stage stays green with that bug, so the
+# GET stage's verifier sends HEAD then GET over one connection itself.
+stages:
+  - name: HEAD of interactions answers 200 with the JSON content type
+    request:
+      url: "{rewriter_url}/account/ixtester/interactions"
+      method: HEAD
+      params: {from_date: "2021-03-01", to_date: "2021-03-01", top_n: 10}
+    response:
+      status_code: 200
+      headers:
+        content-type: "application/json; charset=utf-8"
+
+  - name: a GET after a HEAD on the same connection is answered whole
+    request:
+      url: "{rewriter_url}/account/ixtester/interactions"
+      method: GET
+      params: {from_date: "2021-03-01", to_date: "2021-03-01", top_n: 10}
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:assert_head_then_get_framed
+      json:
+        - {interaction_type: "reply", partner: "ixalice", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "reply", partner: "ixbob", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "vote", partner: "ixalice", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "vote", partner: "ixbob", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "transfer", partner: "ixbob", interaction_count: 1, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "reblog", partner: "ixalice", interaction_count: 1, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "follow", partner: "ixbob", interaction_count: 2, partner_rank: 1, partners_merged: 1, covered_from: "2021-03-01"}
+        - {interaction_type: "follow", partner: "ixcarol", interaction_count: 1, partner_rank: 2, partners_merged: 1, covered_from: "2021-03-01"}

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Regenerates the embedded OpenAPI JSON in endpoint_schema.sql and rewrites
-# rewrite_rules.conf from the /** openapi:paths ... */ annotations.
+# rewrite_rules.conf and rpc_arguments.lua from the /** openapi:paths ... */
+# annotations.
 #
 # Run this after adding or changing endpoint annotations, then commit the result.
 #
@@ -27,11 +28,12 @@ OUTPUT_DIR="${SCRIPTDIR}/openapi_out"
 VENV_DIR="${REPO_ROOT}/.openapi_venv"
 OFFLINE="${COMMON_CI_OFFLINE:-0}"
 
-# The generator drops rewrite_rules.conf into the CWD it is run from, which is the
-# repo root; and OUTPUT_DIR is a staging tree. Neither is committed, and a failure
-# part-way through used to leave both behind for `git add -A` to pick up.
+# The generator drops rewrite_rules.conf and rpc_arguments.lua into the CWD it is
+# run from, which is the repo root; and OUTPUT_DIR is a staging tree. None of them is
+# committed, and a failure part-way through used to leave them behind for
+# `git add -A` to pick up.
 cleanup() {
-    rm -f "${REPO_ROOT}/rewrite_rules.conf"
+    rm -f "${REPO_ROOT}/rewrite_rules.conf" "${REPO_ROOT}/rpc_arguments.lua"
     rm -rf "${OUTPUT_DIR}"
 }
 trap cleanup EXIT
@@ -46,7 +48,7 @@ trap cleanup EXIT
 # is that they regenerate with the same generator CI validates against. An earlier
 # revision defaulted to the 1.28.6 TAG here, which silently made local and CI use
 # different refs: exactly the divergence this comment claims to prevent.
-COMMON_CI_REF="${COMMON_CI_REF:-96889a650b3f45244cecc4bb3f250af439a71900}"
+COMMON_CI_REF="${COMMON_CI_REF:-1d952fd19118762d0e66f91953e194ff08e69bb0}"
 COMMON_CI_URL="https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}"
 PROCESS_OPENAPI="${SCRIPTDIR}/process_openapi.py"
 
@@ -101,7 +103,8 @@ echo "Running process_openapi.py..."
 # `Path(out) / Path("/abs/...")` discards the left side and returns the absolute
 # path, passing an absolute input would make it open (and truncate) the source
 # file itself. A relative path keeps the output inside OUTPUT_DIR. The generator
-# also writes rewrite_rules.conf into the CWD, hence the repo-root cd.
+# also writes rewrite_rules.conf and rpc_arguments.lua into the CWD, hence the
+# repo-root cd.
 # PYTHONUTF8=1 forces UTF-8 for all file I/O regardless of the host locale. Without it,
 # process_openapi.py reads the UTF-8 source under the platform default (e.g. cp1252 on
 # Windows) and mangles non-ASCII in the regenerated JSON blob — em-dashes become mojibake
@@ -140,4 +143,10 @@ trap 'cleanup; rm -f "${GENERATED_RULES}"' EXIT
 } | sed -E 's#^(rewrite \^[^ ]*[^$]) #\1$ #' > "${GENERATED_RULES}"
 mv "${GENERATED_RULES}" "${ENDPOINTS_DIR}/rewrite_rules.conf"
 
-echo "Done. Review and commit endpoints/endpoint_schema.sql and endpoints/rewrite_rules.conf."
+# The parameters each /rpc/ function declares, which the rewriter's hive.rpc_form
+# module (docker/haf_stats_nginx.conf.template) forwards in a form POST body so a
+# value like "not.blocktrades" reaches the function instead of being read as a
+# PostgREST filter. Taken as the generator writes it.
+mv "${REPO_ROOT}/rpc_arguments.lua" "${ENDPOINTS_DIR}/rpc_arguments.lua"
+
+echo "Done. Review and commit endpoints/endpoint_schema.sql, endpoints/rewrite_rules.conf and endpoints/rpc_arguments.lua."

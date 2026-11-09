@@ -21,8 +21,9 @@ project adds to its CI lane runs here too), and runs each one as a local process
     image's is (common-ci-configuration/psql has no venv).
   - `postgrest` runs the postgrest binary with the service's environment.
   - `rewriter` (built from Dockerfile.rewriter) runs openresty over the tree's
-    docker/haf_stats_nginx.conf.template and endpoints/rewrite_rules.conf, rendered
-    as docker/rewriter_entrypoint.sh renders them, on unprivileged ports.
+    docker/haf_stats_nginx.conf.template, endpoints/rewrite_rules.conf and
+    endpoints/rpc_arguments.lua, rendered as docker/rewriter_entrypoint.sh renders
+    them, on unprivileged ports.
   - `tavern` runs /opt/venv's pytest over the mounted tests with the `-m` marker
     expression the service's command names (CI runs the same versions, from
     common-ci-configuration's python-test-tools image).
@@ -302,6 +303,7 @@ class Lane:
             conf = re.sub(r"(listen\s+[0-9.]*:?)" + port + r"\b", r"\g<1>" + local, conf)
         (prefix / "conf/nginx.conf").write_text(conf)
         shutil.copy(self.root / "endpoints/rewrite_rules.conf", prefix / "conf/rewrite_rules.conf")
+        shutil.copy(self.root / "endpoints/rpc_arguments.lua", prefix / "conf/rpc_arguments.lua")
         mime = Path("/usr/local/openresty/nginx/conf/mime.types")
         if mime.exists():
             shutil.copy(mime, prefix / "conf/mime.types")
