@@ -4,9 +4,10 @@
 --
 -- Left out: the two snapshot tables block processing never writes. They are refreshed by
 -- install_app.sh and by cron, and stamped with now() (computed_at). Also the shared batch
--- staging of parallel sync, which keeps the last staged batch's rows until the next batch
--- replaces them (db/process_block_range.sql); its marker table, empty once a batch commits, is
--- compared.
+-- staging of parallel sync (db/process_block_range.sql): its slots keep the last staged batches'
+-- rows until a later batch replaces them, and its marker table keeps the range staged ahead of
+-- the last batch (tests/ci_parallel_sync_equality.sh checks that no marker is left for a range
+-- the sync committed).
 --
 --   psql -X -At -v ON_ERROR_STOP=1 -f tests/ci_table_checksums.sql
 SELECT format(
@@ -21,10 +22,8 @@ WHERE n.nspname IN ('haf_stats_app', 'haf_stats_backend')
   AND (n.nspname, c.relname) NOT IN (
       ('haf_stats_backend', 'governance_concentration_snapshot'),
       ('haf_stats_backend', 'hp_distribution_snapshot'),
-      ('haf_stats_app', 'shared_batch_ops'),
-      ('haf_stats_app', 'shared_batch_authored_ops'),
-      ('haf_stats_app', 'shared_batch_exact_rc'),
-      ('haf_stats_app', 'shared_batch_custom_json_ops')
+      ('haf_stats_app', 'shared_batch_marker')
   )
+  AND c.relname !~ '^shared_batch_(ops|authored_ops|exact_rc|custom_json_ops)_[01]$'
 ORDER BY n.nspname, c.relname
 \gexec

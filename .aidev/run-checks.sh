@@ -57,7 +57,7 @@
 #                     tests/ci_parallel_sync_equality.sh, on three clones of its own:
 #                     blocks 1..3,000,000 synced at parallelism 1, and at 4 through an
 #                     injected group failure and a partly applied batch then resumed at 4
-#                     and at 1, give identical tables (parallel-equality/; .gitlab-ci.yml's
+#                     (after an emulated crash) and at 1, give identical tables (parallel-equality/; .gitlab-ci.yml's
 #                     sync job runs it too, with the same blocks)
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit

@@ -875,7 +875,7 @@ batch's processors run in five groups (`haf_stats_app.processor_groups()`, descr
 `db/process_block_range.sql`), dealt out to that many connections at most, which run at once,
 and live sync stays on the driver's one session. A value that is not a positive integer is
 logged and treated as `1`. The legacy `CALL main()` loop ignores the setting. More than five
-adds nothing, because there are five groups.
+adds nothing, because there are five groups. One more connection stages the next batch (below).
 
 Each group commits its writes together with a row in `haf_stats_app.processor_group_progress`.
 The driver's transaction moves the HAF context only after every group has committed. That
@@ -884,33 +884,60 @@ If a group fails, or the process dies mid-batch, the context stays before the ba
 batch is delivered again. Groups that already applied it skip it, so nothing is counted twice.
 The single-session path honours the same rows, so switching back to `1` after a crash is safe.
 
-Each batch is staged once, before its groups start
+Each batch is staged once for all its groups
 ([#145](https://gitlab.syncad.com/hive/haf_stats/-/issues/145)). The batch's operations, authored
 ops, exact RC shares and custom_json ops go into UNLOGGED `haf_stats_app.shared_batch_*` tables.
 Each staging step runs on a worker connection and commits on its own, never in the driver's
 transaction, because that commit is what moves the HAF context. The groups then read those
-rows instead of staging their own copies. A row in `haf_stats_app.shared_batch_stage` marks a
-stage as complete for one block range. It commits with the stage's rows and, being UNLOGGED
-too, is emptied with them by crash recovery. So a batch delivered again after a crash is staged
-again, and one delivered again after a failed group reuses the staged rows. A group whose share
-of a batch starts past its first block stages its own copy. The driver's transaction deletes the
-marker rows with the progress rows; the next batch's first staging step replaces the rows. The
-shared tables are created once at install, with their keys and index, and their rows are replaced
-by `DELETE`, not `TRUNCATE` and index rebuilds: on a table that is not temporary those give it new
-files every batch ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)). They are
-analyzed only when a batch's row count is an order of magnitude off the planner's estimate. The
-single-session path keeps its own session-local staging.
+rows instead of staging their own copies.
 
-A batch waits on four round trips to the server in a row: `begin_parallel_range` and
-`finish_parallel_range` on the driver's connection, and between them the staging and the groups.
-Each worker connection gets its whole share of a batch in one query string, a `BEGIN; ...; COMMIT`
-block per staging step or group, so each step and group still commits on its own
+The staging is pipelined ([#148](https://gitlab.syncad.com/hive/haf_stats/-/issues/148)). While a
+batch's groups run, one more connection stages the range the next batch is likely to be: right
+after this one, as long as the longest batch so far. When the driver then delivers that range,
+its groups start at once. Otherwise (the first batch, a shorter final batch, a staging ahead that
+failed and was logged) the batch is staged before its groups, as before. So a batch takes the
+longer of its slowest group and the next batch's staging, where it used to take their sum: with
+#146 the whole staging ran on one connection before any group, and at around 56M blocks it was
+most of each batch while the other connections sat idle. Splitting the staging across the group
+connections would not have helped much: the ops step, which every other step reads, was the
+largest part of it.
+
+Two batches' stages are in the tables at once, so they come in two slots, `shared_batch_<stage>_0`
+and `_1`, and a batch is staged into the slot that does not hold the batch before it. A row in
+`haf_stats_app.shared_batch_marker` marks a stage of a slot as complete for one block range, and a
+group reads a stage only for exactly its own range. The marker commits with the stage's rows and,
+being UNLOGGED too, is emptied with them by crash recovery. So a batch delivered again after a
+crash is staged again, and one delivered again after a failed group reuses the staged rows. A
+group whose share of a batch starts past its first block stages its own copy. A range that reaches
+past HAF's irreversible block is not staged ahead, since its blocks are not all in `hafd.blocks`
+yet. The driver's transaction deletes the progress rows and the markers of every range the batch
+moves the HAF context past; the markers of the range staged ahead stay.
+
+A slot's first staging step empties its four tables with `TRUNCATE` in the transaction that loads
+them, and each load is analyzed, as the session-local staging is. #146 replaced the rows with
+`DELETE`, because `TRUNCATE` gives a table new files every batch, whose commit drops the old
+files' pages from `shared_buffers` ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)).
+That kept the staging on the critical path and left about 3.4 million dead rows and 3 GB in
+`shared_batch_ops` by 56M blocks. Pipelined, the `TRUNCATE` runs beside the previous batch's
+groups, and leaves autovacuum nothing to do, so the tables have it off. The single-session path
+keeps its own session-local staging.
+
+A batch whose range was staged ahead waits on three round trips to the server in a row:
+`begin_parallel_range` and `finish_parallel_range` on the driver's connection, and the groups
+between them; one that was not also waits on its staging before the groups. Each worker connection
+gets its whole share of a batch in one query string, a `BEGIN; ...; COMMIT` block per staging step
+or group, so each step and group still commits on its own
 ([#147](https://gitlab.syncad.com/hive/haf_stats/-/issues/147)). Where a round trip is slow this
 is what a batch costs: in the gate, at about 0.14 s a round trip, the previous three round trips
 per step and per group (fourteen a batch) took about 2 s a batch, not the staging tables. With
 `haf_stats.processor_timings` on, each batch also logs a `haf_stats_batch_phases` line with the
-four phases' wall times, and `scripts/processor_timings_report.py` splits the sync's wall time
-into them and the driver's own work between batches.
+four phases' wall times ("staging" is the wait for the staging ahead, and the batch's own staging
+when it needs one), and `scripts/processor_timings_report.py` splits the sync's wall time into them
+and the driver's own work between batches. The staging ahead logs its steps' timings under the
+range it staged; the report leaves out a range that only has those and was never delivered.
+
+The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database
+snapshot over blocks 56.0–57.0M and 58–62M, is recorded on that issue once it has run on steem-20.
 
 The rows outlive a crash on purpose. A `rebuild_*.sh` run that falls between such a crash and
 the processor's restart replays only up to the context's block. A progress row left for the
@@ -941,10 +968,8 @@ CPU rather than wall time. Measured on steem-20 at blocks 61.2–61.9M with para
 `prepare_batch_authored_ops` 17.1 %, `exact_rc_for_range` 8.1 % (twice per batch) and
 `prepare_batch_custom_json_ops` 6.4 %. It was also on the critical path, because each group
 staged before its own work. The custom_json group, the slowest, was the only one still running
-in about 40 % of `pg_stat_activity` samples. Hence the shared staging above. It still runs before
-the groups, so a batch takes its staging plus the slowest group's own work. The staging is done
-once, though, with the authored-ops and exact-RC steps at once, instead of once per group
-competing for the same cores.
+in about 40 % of `pg_stat_activity` samples. Hence the shared staging above, done once instead of
+once per group competing for the same cores, and since #148 beside the previous batch's groups.
 
 The custom_json group bounds the speedup: at block 60M it takes about 15.6 s of a roughly
 35 s single-session batch, so expect a little over 2x at most in that part of the history.
