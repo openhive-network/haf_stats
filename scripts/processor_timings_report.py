@@ -13,6 +13,8 @@ line is ignored. The batches must cover blocks N..M exactly, each with every pro
 timed once and its operations counted once; anything else -- no timings at all, a line
 that is not JSON, a negative time, a missing or unknown step, a refresh credited to the
 wrong processor, a gap or an overlap -- exits 1 naming the problem and writes no report.
+A range with only shared staging steps timed (STAGING_STEPS) and no operation counts is not a
+batch: the parallel path staged it ahead, and the driver delivered another range or none.
 
 The report holds each processor's and each refresh's wall time over the whole run and per
 1,000,000 blocks (a batch counts towards the million its first block is in), the rows
@@ -65,6 +67,11 @@ PROCESSORS: tuple[str, ...] = (
     "process_network_custom_json",
     "process_witness_blocks",
     "process_daily_retention",
+)
+
+#: The steps the parallel path's shared staging times, also for a range it stages ahead.
+STAGING_STEPS: frozenset[str] = frozenset(
+    {"prepare_batch_ops", "prepare_batch_authored_ops", "prepare_batch_exact_rc", "prepare_batch_custom_json_ops"}
 )
 
 #: Each rollup/period/retention refresh, and the processor it runs inside. A refresh runs
@@ -282,6 +289,8 @@ def _batches(timings: list[_Timing], counts: list[_Counts], first_block: int, la
         if key in counts_by_batch:
             raise TimingsError(f"batch {key[0]}..{key[1]}: operations are counted twice")
         counts_by_batch[key] = c
+    for key in [k for k, steps in by_batch.items() if k not in counts_by_batch and steps.keys() <= STAGING_STEPS]:
+        del by_batch[key]
     if not by_batch:
         raise TimingsError("no processor timings: was haf_stats.processor_timings on, and the driver's "
                            "--server-messages INFO, for the run?")

@@ -195,6 +195,36 @@ def test_the_wall_time_is_split_by_where_it_went(tmp_path: Path, capsys: pytest.
             " with the driver's, 99.8% of the sync wall") in table
 
 
+def _staged_ahead(first: int, last: int) -> list[str]:
+    """The parallel path's staging of a range ahead of its batch: only the staging steps."""
+    return [_line("haf_stats_processor_timing", {
+        "first_block": first, "last_block": last, "step": step, "within": None, "seconds": 0.2, "reads": [],
+    }) for step in sorted(report_script.STAGING_STEPS)]
+
+
+def test_a_range_staged_ahead_but_never_delivered_is_not_a_batch(tmp_path: Path) -> None:
+    # 1_500_001..2_500_000 was staged ahead, but the driver delivered 1_500_001..2_000_000, the
+    # range's end; 2_000_001..3_000_000 was staged ahead after the last batch.
+    lines = (_batch(1, 1_000_000, 1.0) + _batch(1_000_001, 1_500_000, 1.0) + _staged_ahead(1_500_001, 2_500_000)
+             + _batch(1_500_001, 2_000_000, 1.0) + _staged_ahead(2_000_001, 3_000_000))
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["batches"] == 3
+    assert report["processors"]["prepare_batch_ops"]["calls"] == 3
+
+
+def test_a_batch_with_only_its_staging_timed_is_still_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Its operation counts were logged, so it was delivered and its processors must be timed.
+    counts = [line for line in _batch(1_000_001, 2_000_000, 1.0) if "haf_stats_operation_counts" in line]
+    rc, out = _run(tmp_path, _batch(1, 1_000_000, 1.0) + _staged_ahead(1_000_001, 2_000_000) + counts)
+
+    assert rc == 1
+    assert not out.exists()
+    assert "batch 1000001..2000000: no timing for process_financial" in capsys.readouterr().err
+
+
 def test_a_single_session_run_has_no_phases(tmp_path: Path) -> None:
     rc, out = _run(tmp_path, _three_batches())
 
@@ -304,6 +334,14 @@ def test_every_step_the_dispatcher_calls_is_timed_in_order() -> None:
 
     assert called == list(PROCESSORS)
     assert timed == list(PROCESSORS)
+
+
+def test_the_staging_steps_are_what_the_shared_staging_times() -> None:
+    text = _sql("process_block_range.sql")
+    body = text[text.index("CREATE OR REPLACE FUNCTION haf_stats_app.stage_shared_batch("):]
+    body = body[:body.index("\n$$;")]
+
+    assert {m.group(1) for m in _TIMING_CALL.finditer(body)} == report_script.STAGING_STEPS
 
 
 def test_every_refresh_is_timed_inside_its_processor() -> None:
