@@ -1633,7 +1633,10 @@ endpoint-tests:
     # go green on the old rules -- exactly the failure this lane exists to catch.
     # In CI's ephemeral dind nothing is cached, so it changes nothing there.
   - docker compose -f docker/docker-compose-ci.yml up --detach --build
-  - docker compose -f docker/docker-compose-ci.yml wait tavern
+    # Not `docker compose wait tavern`: that finds only RUNNING containers, and `up`
+    # returns only after setup completes and the rewriter is healthy, so a tavern that
+    # has already exited would read as "no containers" (#154).
+  - timeout 600 sh scripts/ci-helpers/wait_service_exit.sh docker/docker-compose-ci.yml tavern
   after_script:
   - docker compose -f docker/docker-compose-ci.yml logs setup
   - docker compose -f docker/docker-compose-ci.yml logs tavern
@@ -1793,7 +1796,12 @@ install-test:
     # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> break-schema -> install-again -> lock-holder + install-under-lock
     # -> verify -> driver-retry -> uninstall -> verify-gone), so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
-  - timeout 600 docker compose -f docker/docker-compose-ci-install.yml wait verify-gone
+    # Not `docker compose wait verify-gone`: `up` blocks until the
+    # service_completed_successfully chain has run, so verify-gone has usually exited
+    # by now and `wait`, which finds only running containers, reported "no containers"
+    # on a green lane (#154). The helper reads the exit code of an exited container too,
+    # and fails naming verify-gone when it never ran.
+  - timeout 600 sh scripts/ci-helpers/wait_service_exit.sh docker/docker-compose-ci-install.yml verify-gone
   after_script:
     # All FIVE installs (baseline, upgrade, install, install-again, install-under-lock): the repeats are
     # where a non-idempotent step or a shim that quietly does nothing shows up, and
