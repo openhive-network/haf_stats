@@ -21,8 +21,9 @@
 -- create_context_if_not_exists() makes, plus three more -- app_context_attach,
 -- app_get_current_block_num and app_remove_context -- which the shim's own smoke test,
 -- tests/ci_install_verify.sql and the teardown step use, plus hive.can_impersonate,
--- which scripts/uninstall_app.sh calls directly, and hafd.live_stage(). 13 functions,
--- and the invariants they reason about. A processor cannot run against it: there is no
+-- which scripts/uninstall_app.sh calls directly, hafd.live_stage(), and
+-- app_context_set_early_block_processing, which enable_early_block_processing() calls. 14
+-- functions, and the invariants they reason about. A processor cannot run against it: there is no
 -- block streaming here, only context bookkeeping.
 --
 -- ON FIDELITY. A shim that accepts everything makes the lane green while the real thing
@@ -214,6 +215,8 @@ $$;
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS is_attached  BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS is_forking   BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS app_schema   TEXT;
+-- HAF's own default: a context processes blocks early only once it opts in.
+ALTER TABLE hafd.contexts ADD COLUMN IF NOT EXISTS early_block_processing BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ---------------------------------------------------------------------------
 -- Privileges on hafd.contexts
@@ -453,6 +456,25 @@ BEGIN
 END
 $$;
 
+-- Transcribed from hive/haf app_api.sql, including the signature (the group domain, and the
+-- defaulted flag) and the RAISE when any named context is missing: without it a misspelt
+-- context name would update nothing and the install would report success.
+CREATE OR REPLACE FUNCTION hive.app_context_set_early_block_processing(
+    _contexts hive.contexts_group, _enabled BOOLEAN DEFAULT TRUE)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    _updated INT;
+BEGIN
+    UPDATE hafd.contexts SET early_block_processing = _enabled WHERE name = ANY(_contexts);
+    GET DIAGNOSTICS _updated = ROW_COUNT;
+    IF _updated <> (SELECT COUNT(DISTINCT c) FROM unnest(_contexts) AS c) THEN
+        RAISE EXCEPTION 'Some contexts from group % do not exist', _contexts;
+    END IF;
+END
+$$;
+
 -- RAISES on a missing context rather than returning NULL. HAF's app_context_are_attached
 -- raises 'No contexts or attached and detached contexts are present in the same group %'.
 -- The difference is reachable: db/haf_stats_app.sql's repair branch calls this, and a NULL
@@ -663,6 +685,19 @@ BEGIN
     IF (SELECT c.is_forking FROM hafd.contexts AS c WHERE c.name = _probe) THEN
         RAISE EXCEPTION 'shim: app_context_set_non_forking did not clear the flag';
     END IF;
+
+    PERFORM hive.app_context_set_early_block_processing(ARRAY[_probe]::hive.contexts_group);
+    IF NOT (SELECT c.early_block_processing FROM hafd.contexts AS c WHERE c.name = _probe) THEN
+        RAISE EXCEPTION 'shim: app_context_set_early_block_processing did not set the flag';
+    END IF;
+    BEGIN
+        PERFORM hive.app_context_set_early_block_processing(
+            ARRAY[_probe, 'ci_shim_no_such_context']::hive.contexts_group);
+        RAISE EXCEPTION 'shim: app_context_set_early_block_processing accepted a missing context';
+    EXCEPTION
+        WHEN SQLSTATE 'P0001' THEN
+            IF SQLERRM LIKE '%accepted a missing context%' THEN RAISE; END IF;
+    END;
 
     PERFORM hive.app_remove_context(_probe);
     IF hive.app_context_exists(_probe) THEN

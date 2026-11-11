@@ -978,6 +978,41 @@ once per group competing for the same cores, and since #148 beside the previous 
 The custom_json group bounds the speedup: at block 60M it takes about 15.6 s of a roughly
 35 s single-session batch, so expect a little over 2x at most in that part of the history.
 
+## Processing blocks while hived replays
+
+`install_app` opts the `haf_stats` context into HAF's early block processing
+(`haf_stats_app.enable_early_block_processing`, which calls
+`hive.app_context_set_early_block_processing`; see HAF's `src/hive_fork_manager/Readme.md`,
+"Processing blocks while hived replays"). It does so on every install, so a context created by
+an earlier release is opted in on upgrade, and `hafd.contexts.early_block_processing` reads
+`true` afterwards. On a HAF without that function the install logs a WARNING and haf_stats
+waits for the end of the replay, as before.
+
+With hived run with `--psql-massive-index-policy=keep-monotonic`, HAF delivers haf_stats
+irreversible blocks from the start of the replay: `hive.app_next_iteration` gates the context on
+`hive.is_instance_ready_for_block_processing()` instead of `hive.is_instance_ready()`, for the
+legacy `CALL main()` loop and the driver alike. The block-processing container and its
+healthcheck have no readiness gate of their own. Under the default `drop-all` policy nothing
+changes. Either way each irreversible block is processed once, in order, from the same HAF
+rows, through the same `MASSIVE_PROCESSING` path.
+
+No block-processing read needs an index that keep-monotonic defers: every one is keyed by
+operation id, block number or time, `(block_num, trx_in_block)`, or account name or id. The
+list is in `db/haf_stats_app.sql`, above `enable_early_block_processing`. A new read in the block
+path that needs a deferred index (an account's operation history, a transaction hash) has to
+call `hive.wait_for_core_indexes` first.
+
+**On the hivemind content source haf_stats tracks hivemind** (see "Content source"): a batch
+waits until hivemind has made its blocks readable. While hivemind's own massive sync has
+dropped the `hive_posts` `block_num_created` index, that is nothing. So early processing lets
+haf_stats start at the start of the replay, but it gets only as far as hivemind allows. The
+internal source has no such limit.
+
+The reference stack (`docker/docker-compose.yml`) still starts `haf-stats-setup` once the
+`haf` service is healthy, which its healthcheck reads as `hive.is_instance_ready()`. Starting
+haf_stats at the start of the replay is the deployment's job, e.g. haf_api_node's
+early-app-start overlay.
+
 ## Redeploying against a node under load
 
 `install_app` re-runs on **every** `docker compose up -d` — `haf-stats-setup` starts

@@ -22,6 +22,7 @@ function haf_stats_app.daily_retention_keep_from(_day date) | owner=haf_stats_ow
 function haf_stats_app.defer_rollup_refresh(_processor text, _dirty_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.detach_shared_batch_stage(_stages text[]) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.drain_deferred_engagement_refresh() | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.enable_early_block_processing() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.exact_rc_for_ops(_op_ids bigint[]) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_for_range(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE
 function haf_stats_app.exact_rc_op_cap() | owner=haf_stats_owner | secdef=false | acl=PUBLIC:EXECUTE,haf_stats_user:EXECUTE

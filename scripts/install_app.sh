@@ -318,6 +318,11 @@ run_sql_file "${SCRIPT_DIR}/../db/sync_status.sql"
 #    ordinary redeploy a request can land between the two steps.
 psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.create_context_if_not_exists(); RESET ROLE;"
 
+# 5a. Opt the context into early block processing (db/haf_stats_app.sql,
+#     enable_early_block_processing), on every install so an existing context is opted in too.
+#     As haf_stats_owner for the same RLS reason as step 5. Warns and skips on a HAF without it.
+psql_cmd -c "SET ROLE haf_stats_owner; SELECT haf_stats_app.enable_early_block_processing(); RESET ROLE;"
+
 # 5b. Register in the HAF application registry (haf#341), so haf_app_driver.py can run
 #     this app. Must follow step 5 -- hive.app_register requires the context -- and
 #     db/haf_stats_app.sql, which defines the entry procedure it resolves.
