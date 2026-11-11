@@ -211,9 +211,15 @@ BEGIN
         RAISE EXCEPTION 'install: the context was left ATTACHED; install detaches so the '
                         'block pointer can be seeded';
     END IF;
+    -- Asserted after install #2, which finds the context already there: the opt-in has to
+    -- run on that path too, or a node upgraded into this release never processes early.
+    IF NOT (SELECT c.early_block_processing FROM hafd.contexts AS c WHERE c.name = 'haf_stats') THEN
+        RAISE EXCEPTION 'install: haf_stats is not opted into early block processing -- HAF '
+                        'would hold its blocks back until hived''s replay ends';
+    END IF;
 
     RAISE NOTICE 'install verified: 3 schemas, % endpoint functions, context at block % '
-                 '(detached, non-forking, owner %)',
+                 '(detached, non-forking, early block processing, owner %)',
                  (SELECT count(*) FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                    WHERE ns.nspname = 'haf_stats_endpoints'), _ctx_block, _owner;
 END

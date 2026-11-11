@@ -46,8 +46,10 @@
 #
 # BE HONEST ABOUT THE CONVERSE. This proves the loop is ITERATING, not ADVANCING. The
 # heartbeat UPDATE and its COMMIT sit BEFORE every early return in app_next_iteration
-# (loop.sql: the app_is_paused and NOT is_instance_ready branches both pg_sleep and
-# RETURN afterwards). So with hived down, or the app paused by hive.app_pause, the loop
+# (loop.sql: the app_is_paused and NOT is_instance_ready_for_contexts branches both pg_sleep
+# and RETURN afterwards; the latter is hive.is_instance_ready_for_block_processing() for this
+# context, which opts into early block processing). So with hived down, or the app paused by
+# hive.app_pause, the loop
 # spins twice a second writing a fresh heartbeat and this check reports HEALTHY while
 # zero blocks are processed. The `OR is_app_in_sync` arm has the same blindness for a
 # frozen chain.

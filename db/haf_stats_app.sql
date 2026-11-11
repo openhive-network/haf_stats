@@ -323,6 +323,55 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Early block processing (haf#378/#379; HAF src/hive_fork_manager/Readme.md, "Processing
+-- blocks while hived replays"). Called at install right after create_context_if_not_exists,
+-- on every install, so a context created by an earlier release is opted in too. Setting the
+-- flag again is a no-op.
+--
+-- With hived on psql-massive-index-policy=keep-monotonic, HAF then delivers the context
+-- irreversible blocks while hived still replays, once hive.is_instance_ready_for_block_processing()
+-- holds, instead of only once hive.is_instance_ready() does. hive.app_next_iteration applies
+-- that gate itself, so neither main() nor the driver path needs one. Under the default
+-- drop-all policy the kept indexes are dropped too and nothing changes.
+--
+-- What makes the opt-in safe: no block-processing read needs an index keep-monotonic defers
+-- (massive_sync_class = 'defer'). Every hafd read in the block path is keyed by
+--   * hafd.operations id range (pk_hive_operations) -- prepare_batch_ops and the op counts.
+--     Its few-types arm can also use hive_operations_op_type_id_block_num, which is deferred,
+--     but it is bounded by the same id range, so without the index it scans the batch's ids;
+--   * hafd.blocks num or created_at (pk_hive_blocks, hive_blocks_created_at_idx);
+--   * hafd.transactions (block_num, trx_in_block) (hive_transactions_block_num_trx_in_block_idx)
+--     -- exact RC and daily retention, never trx_hash (pk_hive_transactions);
+--   * hafd.accounts name or id (uq_hive_accounst_name, pk_hive_accounts_id), directly and
+--     through hive.accounts_view.
+-- hive.account_operations_view (hive_account_operations_uq1) is read only by
+-- account_op_seq_range, which the endpoints call and the block path does not. So no step
+-- waits in hive.wait_for_core_indexes. A new block-path read that needs a deferred index has
+-- to call it first, on the connection that reads -- the parallel groups each have their own.
+--
+-- A HAF that predates the opt-in keeps the old behaviour, with a WARNING.
+-- ---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS haf_stats_app.enable_early_block_processing;
+CREATE OR REPLACE FUNCTION haf_stats_app.enable_early_block_processing()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- The type first: to_regprocedure raises, rather than returning NULL, on an argument type
+    -- that does not exist.
+    IF to_regtype('hive.contexts_group') IS NULL
+       OR to_regprocedure('hive.app_context_set_early_block_processing(hive.contexts_group, boolean)') IS NULL THEN
+        RAISE WARNING 'This HAF has no hive.app_context_set_early_block_processing (haf#378/#379): haf_stats starts processing blocks only once hive.is_instance_ready() holds, after hived''s replay.';
+        RETURN;
+    END IF;
+
+    PERFORM hive.app_context_set_early_block_processing(ARRAY['haf_stats']::hive.contexts_group);
+    RAISE NOTICE 'HAF context haf_stats opted into early block processing.';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Main block-processing loop (PROCEDURE so CALL works and transactions commit).
 -- Uses hive.app_next_iteration() which automatically advances the context block
 -- pointer — unlike the older hive.app_next_block() function which does not.
