@@ -195,6 +195,45 @@ esac
 
 wait_for_postgres
 
+# HAF's install lock (#157). The block processor holds a SHARED advisory lock on haf_stats for
+# as long as it runs (process_blocks.sh: the driver's --lock, or the legacy loop's own call);
+# this takes it EXCLUSIVELY, so an install cannot run over a live processor. Before, it raced
+# one: the retention upgrade in db/daily_retention.sql copies a table and drops the original,
+# losing whatever the processor committed in between.
+#
+# The lock is session-level and this script runs many psql sessions, so it is held by the psql
+# base image's install_with_app_lock.py on a connection of its own, which then runs this script
+# again as its child. The re-run sees HAF_INSTALL_LOCK_HELD and goes straight on. When a
+# processor holds the lock the wrapper logs who, skips the install and exits 0: stop the block
+# processor before re-installing (README, "Install lock"). The same wrapper as balance_tracker,
+# reputation_tracker, nft_tracker, haf_block_explorer, hivesense, haf_fyp and proxy-whitelist.
+#
+# Here, after the flags are checked and the server is up: earlier, a bad flag would be masked
+# by a skip, and the wrapper's own connect would fail before PostgreSQL is ready. Without the
+# wrapper (a checkout run by hand) the install runs unlocked, as it always has; on a HAF without
+# the lock functions the wrapper does the same itself.
+INSTALL_LOCK_WRAPPER="${HAF_STATS_INSTALL_LOCK_WRAPPER:-/usr/local/bin/install_with_app_lock.py}"
+
+# One libpq keyword value, quoted: a space or quote in a value would otherwise split or end it.
+# Inside single quotes libpq takes \' and \\ as escapes.
+dsn_value() {
+    local v="${1//\\/\\\\}"
+    printf "'%s'" "${v//\'/\\\'}"
+}
+
+if [ -z "${HAF_INSTALL_LOCK_HELD:-}" ]; then
+    export HAF_INSTALL_LOCK_HELD=1
+    if command -v python3 >/dev/null 2>&1 && [ -f "${INSTALL_LOCK_WRAPPER}" ]; then
+        log "Taking HAF's install lock on haf_stats..."
+        # `bash "$0"`, not "$0": the script is not executable in a checkout.
+        exec python3 "${INSTALL_LOCK_WRAPPER}" haf_stats \
+            "host=$(dsn_value "${POSTGRES_HOST}") port=$(dsn_value "${POSTGRES_PORT}") user=$(dsn_value "${POSTGRES_USER}") dbname=$(dsn_value "${POSTGRES_DB}") application_name=haf_stats-install" \
+            bash "$0" "$@"
+    fi
+    log "WARNING: python3 or ${INSTALL_LOCK_WRAPPER} not found; installing WITHOUT HAF's install lock,"
+    log "         so nothing stops this install running over a live block processor."
+fi
+
 log "Installing haf_stats schema..."
 
 # 1. Roles (must run as postgres superuser or haf_admin)

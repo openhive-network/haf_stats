@@ -467,6 +467,21 @@ def test_install_test_wires_the_runtime_checks() -> None:
     assert svc["install-under-lock"]["command"] == ["bash", "/ci_install_no_upgrade.sh"]
     assert "../tests/ci_install_no_upgrade.sh:/ci_install_no_upgrade.sh:ro" in svc["install-under-lock"]["volumes"]
 
+    # HAF's application lock (#157): the holder after every other user of the installed app,
+    # the install under it only once the lock is HELD, and the teardown only after its verdict.
+    assert deps("app-lock-holder") == {"driver-retry": done}
+    assert deps("install-skips-under-app-lock") == {"app-lock-holder": "service_healthy"}
+    assert deps("uninstall").get("install-skips-under-app-lock") == done
+    holder = " ".join(svc["app-lock-holder"]["command"])
+    assert "-f /ci_app_locks.sql" in holder
+    assert "SELECT hive.acquire_app_block_processor_locks(ARRAY['haf_stats'])" in holder, (
+        "app-lock-holder must take the SHARED block-processor lock, as the processor does"
+    )
+    assert "../tests/ci_app_locks_haf_1_28_8.sql:/ci_app_locks.sql:ro" in svc["app-lock-holder"]["volumes"]
+    assert svc["install-skips-under-app-lock"]["command"] == ["bash", "/ci_install_skips_under_app_lock.sh"]
+    assert ("../tests/ci_install_skips_under_app_lock.sh:/ci_install_skips_under_app_lock.sh:ro"
+            in svc["install-skips-under-app-lock"]["volumes"])
+
 
 def test_the_no_upgrade_check_greps_for_what_the_helper_prints() -> None:
     script = NO_UPGRADE.read_text(encoding="utf-8")

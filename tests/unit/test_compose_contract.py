@@ -139,6 +139,13 @@ def test_the_processor_still_waits_for_the_install(services):
     assert services[PROCESS]["depends_on"][SETUP]["condition"] == "service_completed_successfully"
 
 
+def test_the_processor_restarts_with_a_changed_install(services):
+    """The processor holds the shared haf_stats lock the install takes exclusively (#157).
+    Without `restart: true`, compose reruns a changed setup while the old processor still holds
+    it, the install skips, and the upgrade never applies."""
+    assert services[PROCESS]["depends_on"][SETUP].get("restart") is True
+
+
 # --- CI assertions that cannot fail ------------------------------------------------
 
 def test_no_inverted_pipeline_assertions_in_ci():

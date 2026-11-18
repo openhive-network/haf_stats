@@ -117,6 +117,11 @@ services:
     depends_on:
       haf-stats-setup:
         condition: service_completed_successfully
+        # This processor holds the shared haf_stats lock that the install takes exclusively
+        # (#157). A new image recreates both, and compose stops this one first anyway; this
+        # covers a change to the setup alone (its environment or command), which would
+        # otherwise find the lock held, skip, and never apply.
+        restart: true
 
   # Removes haf_stats from the database: HAF context, all three schemas (CASCADE), both
   # roles. Behind a profile, so `docker compose up` never starts it.
@@ -249,7 +254,8 @@ services:
     # missing --is_forking is a WARN rather than a failure. A restart policy on the proxy
     # alone would falsify those two comments and leave a restarting proxy in front of a
     # dead PostgREST. If this stack wants restart policies it should get them everywhere,
-    # as its own change.
+    # as its own change. (haf-stats-process's `depends_on: ... restart: true` is a different
+    # thing: a restart when its dependency is recreated, not a restart policy.)
     ports:
       # The rewriter is the front door; haf-stats-api stays published on 3000 for raw
       # /rpc/ access and for anyone already depending on it.

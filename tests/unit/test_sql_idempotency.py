@@ -70,6 +70,7 @@ STABLE_SIGNATURE_MARKER = "-- idempotency: stable signature"
 NOT_INSTALLED: dict[str, str] = {
     "docker/block-processing-healthcheck.sql": "read-only probe run by the container healthcheck",
     "scripts/uninstall_verify.sql": "run by uninstall_app.sh after the schemas are dropped",
+    "db/legacy_loop_lock.sql": "run by process_blocks.sh in the legacy loop's session (#157)",
 }
 # `.sql` tokens in install_app.sh's code that name a file without building a path to it
 # (log text, RAISE messages, SQL comments in a heredoc), each with where it appears.

@@ -420,7 +420,9 @@ vocabulary they hold (issue #26 changed it) -- **drops it and creates it again, 
 and says so with a warning: no row is converted. Until it is repopulated the financial
 endpoints, author rewards in `get_account_content_stats` and the bounded-range reward and
 transfer leaderboards report nothing for history. Stop the block processor first, run
-`install_app.sh`, then:
+`install_app.sh` (with the processor up it skips; see [Install lock](#install-lock)), then,
+with the processor still stopped -- on a compose stack, `docker compose up -d` installs and
+starts `haf-stats-process` again straight away, so stop it once more:
 
 ```bash
 ./scripts/rebuild_financial.sh
@@ -541,7 +543,7 @@ The community classification needs a populated `community_registry`, which
 **`install_app.sh` has already backfilled** (step 8a, batched). So the upgrade recipe is:
 
 ```bash
-./scripts/install_app.sh                     # backfills community_registry, batched
+./scripts/install_app.sh                     # processor stopped (with it up this skips); backfills community_registry, batched
 psql -c "SELECT COUNT(*) FROM haf_stats_backend.community_registry"   # expect > 0
 ./scripts/rebuild_content_volume.sh          # derives the per-comment community dimension
 ```
@@ -652,7 +654,8 @@ install, and it does **not** report success. Fix the cause and unset it.
 pass-through for the variable — so setting it on the host leaves the container at the default and
 the install aborts again with the same message. Measured: with the variable exported on the host, a
 `compose up` of that service still saw `HAF_STATS_SKIP_OP_TYPE_ASSERT=0`. It has to reach the
-container:
+container, with the block processor stopped (while it runs, the install skips; see
+[Install lock](#install-lock)):
 
 ```bash
 docker compose -p haf -f <compose-file> run --rm \
@@ -691,7 +694,7 @@ path.
 
 | Verb | Runs | Notes |
 |------|------|-------|
-| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; safe to re-run |
+| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; skips (exit 0) while the block processor holds the [install lock](#install-lock) |
 | `process_blocks [--host=] [--port=] [--user=]` | `scripts/process_blocks.sh` | infinite loop |
 | `uninstall_app [--force] [--host=] [--port=] [--user=]` | `scripts/uninstall_app.sh` | destructive |
 
@@ -855,9 +858,9 @@ registry image.)
 **A rebuild on its own changes nothing on a running node.** `GIT_HASH` is baked into
 `db/version.sql` at build time, but the value an endpoint serves is written to
 `haf_stats_app.app_version` by `install_app` (step 2b). Correcting a version is therefore a
-rebuild **and** a re-install — which an ordinary `docker compose up -d` does for you,
-because `haf-stats-setup` starts unconditionally (see "Redeploying against a node under
-load").
+rebuild **and** a re-install — which `docker compose up -d` does for you once the image
+changed: the new image recreates `haf-stats-setup`, and compose stops `haf-stats-process`
+first so the install can take its lock (see [Install lock](#install-lock)).
 
 If a node already reports `unspecified`, or a hash that is not eight characters, that is
 this defect rather than a mystery: it was built without the argument, with a value the
@@ -1016,8 +1019,10 @@ early-app-start overlay.
 ## Redeploying against a node under load
 
 `install_app` re-runs on **every** `docker compose up -d` — `haf-stats-setup` starts
-unconditionally, while PostgREST is *not* restarted with it. So an ordinary redeploy
-replays the schema underneath live traffic. ([#79](https://gitlab.syncad.com/hive/haf_stats/-/issues/79))
+unconditionally. While `haf-stats-process` runs, that re-run skips ([Install lock](#install-lock));
+when the image changed, compose stops the processor first and the install runs — while
+PostgREST is *not* restarted with it. So a redeploy that installs replays the schema
+underneath live traffic. ([#79](https://gitlab.syncad.com/hive/haf_stats/-/issues/79))
 
 **Every function a request can reach is now replaced atomically.** `install_app` loads
 these with `--single-transaction`:
@@ -1079,12 +1084,68 @@ HAProxy backend or stop the API container first:
 ```bash
 cd docker
 docker compose stop haf-stats-api   # or drain the backend at the proxy
-docker compose up -d                # replays the schema, and restarts the API itself
+docker compose up -d                # installs if the image changed, and restarts the API itself
 ```
 
 A request that lands in one of the remaining windows gets `function ... does not exist`,
 which PostgREST returns as **500** — not a retryable 503, so clients will not back off
 and retry on their own.
+
+## Install lock
+
+The install and the block processor coordinate through HAF's application lock (#157). The
+processor holds a **shared** lock on `haf_stats` for as long as it runs (the driver's
+`--lock`, or the legacy `CALL main()` loop's own call in the same session); `install_app.sh`
+takes it **exclusively**, through the psql base image's `install_with_app_lock.py`, for the
+whole install. An install therefore cannot run over a live processor. It used to race one:
+the retention upgrade in `db/daily_retention.sql` copies a table and drops the original, and
+lost whatever the processor committed in between.
+
+While the processor runs, an install **skips and exits 0**. Its log has lines like:
+
+```
+... INFO  install_with_app_lock  NOTICE:  Skipping install: lock on haf_stats held by haf_stats_block_processing (pid=...)
+... INFO  install_with_app_lock  Skipping haf_stats install — lock held by an active block-processor.
+```
+
+(On HAF develop, a second install running at the same time skips with "another installer of
+haf_stats is running".)
+
+A plain `docker compose up -d` with an unchanged image reruns `haf-stats-setup` without
+restarting the processor, so that rerun skips; only a changed (recreated) setup makes compose
+stop the processor first. That is compose's `depends_on: restart: true`, measured on compose
+v5.1.3 for hive/haf_api_node!296.
+
+So every recipe here that says "stop the block processor first" means it: an install run
+with the processor up does nothing.
+
+An image upgrade is unaffected: setup and the processor run the same image, so a new image
+recreates both, and compose stops the old processor before it runs the new install.
+`restart: true` (on `haf-stats-process` here) covers what recreates the setup alone -- a
+change to its own environment or command -- which would otherwise find the lock held and skip.
+`up -d haf-stats-setup` alone never stops the processor, and skips. hive/haf_api_node's
+`haf-stats-block-processing` wants the same `restart: true` on `haf-stats-install`, for the same
+setup-only changes. Any other holder of the lock — a PostgREST holding it while the API serves,
+as hive/haf_api_node!296 proposes — has to be stopped too.
+
+If an install keeps skipping with no processor running, a leftover session still holds the
+lock; its holder is named in the skip line, and `pg_stat_activity` shows it by that
+`application_name`. The legacy loop sets `client_connection_check_interval`, so its backend
+ends within seconds of a killed container on PostgreSQL 14+; anything else can be ended with
+`SELECT pg_terminate_backend(<pid>)`.
+
+What a held lock does depends on the HAF version:
+
+| HAF | install while the lock is held |
+|---|---|
+| 1.28.6, 1.28.7 | no lock functions: installs unlocked, as before |
+| 1.28.8 | skips, exit 0 |
+| develop, `haf_stats` registered and healthy | skips, exit 0 |
+| develop, registered but broken (its process procedure is gone) | waits ~10 s for the holders, then fails naming them |
+| develop, not registered | waits ~10 s, then installs **without the lock**, under the live processor -- the race this lock exists to prevent. The wrapper still logs "Acquired install lock". A haf_stats that runs but is not registered (the install warned and skipped `register_app.sql`) needs its registration fixed |
+
+A checkout run by hand, without the wrapper at `/usr/local/bin/install_with_app_lock.py`
+(`HAF_STATS_INSTALL_LOCK_WRAPPER` overrides the path), installs unlocked and warns.
 
 ## Uninstalling
 
@@ -1196,9 +1257,9 @@ every HAF app identically (#55).
 They are one clock: `haf_stats_app.main()` writes both from the same variable in the same
 transaction, so on a node the processor drives they agree exactly. A persistent
 disagreement means the HAF context was reset out from under the data — re-running
-`scripts/install_app.sh` repairs the pointer — **stop the block processor first**: the repair
-declines with a warning while the context is attached, which it is on any redeploy against a
-running stack, so an install with `haf-stats-process` up exits 0 without fixing anything. Note
+`scripts/install_app.sh` repairs the pointer — **stop the block processor first**: an install
+with `haf-stats-process` up skips entirely and exits 0 without fixing anything (see
+[Install lock](#install-lock)). Note
 it *raises* a lagging pointer and cannot lower one, so it is not a way to force a replay (the
 warning the function itself emits names that procedure). `tests/parity/context_vs_app_status.sql`
 (guard 6 in `scripts/run_verification.sh`) fails if the two ever drift.

@@ -1794,7 +1794,8 @@ install-test:
     fi
   - timeout 600 docker compose -f docker/docker-compose-ci-install.yml up --detach
     # verify-gone is LAST in the chain (db-setup -> install-baseline -> install-upgrade -> reset-app -> install -> seed-repair -> break-schema -> install-again -> lock-holder + install-under-lock
-    # -> verify -> driver-retry -> uninstall -> verify-gone), so waiting on it gates the whole lane.
+    # -> verify -> driver-retry -> app-lock-holder + install-skips-under-app-lock -> uninstall -> verify-gone),
+    # so waiting on it gates the whole lane.
     # Waiting on `verify` would let a teardown failure pass unnoticed.
     # Not `docker compose wait verify-gone`: `up` blocks until the
     # service_completed_successfully chain has run, so verify-gone has usually exited
@@ -1832,6 +1833,10 @@ install-test:
     || true
   - docker compose -f docker/docker-compose-ci-install.yml logs verify || true
   - docker compose -f docker/docker-compose-ci-install.yml logs driver-retry || true
+    # #157: the install's verdicts under HAF's application lock, and the lock's holder.
+  - docker compose -f docker/docker-compose-ci-install.yml logs app-lock-holder || true
+  - docker compose -f docker/docker-compose-ci-install.yml logs install-skips-under-app-lock
+    || true
   - docker compose -f docker/docker-compose-ci-install.yml logs uninstall || true
   - docker compose -f docker/docker-compose-ci-install.yml logs verify-gone || true
   - docker compose -f docker/docker-compose-ci-install.yml down -v || true

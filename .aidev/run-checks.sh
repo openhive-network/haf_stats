@@ -32,7 +32,8 @@
 #   - install         install-test: docker/docker-compose-ci-install.yml (baseline
 #                     install from .baseline/, upgrade, reset, install, seed repair,
 #                     break-schema + install-again, install under a lock holder,
-#                     verify, uninstall --force, verify-gone), replayed the same way;
+#                     verify, driver-retry, an install under HAF's app lock (skip, then
+#                     run), uninstall --force, verify-gone), replayed the same way;
 #                     install.xml per service
 #
 # CI's synced lane, over this run's copy-on-write clone of the shared 5M-block HAF

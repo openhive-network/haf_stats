@@ -20,7 +20,9 @@
 #
 # WHAT IT DELIBERATELY DOES NOT COVER. No block processing -- tests/ci_haf_stub.sql
 # is context bookkeeping only, not a HAF emulator. Op-type assertion is skipped (see the
-# install service). Chain-data correctness stays with `sync` and the tavern suites.
+# install service). Chain-data correctness stays with `sync` and the tavern suites. The
+# app-lock lanes (#157) stand a psql session in for the processor's lock; process_blocks.sh's
+# own lock calls are pinned by tests/unit/test_app_lock.py.
 
 # Its own project name. Both this file and docker-compose-ci.yml live in docker/, so both
 # would otherwise default to the Compose project `docker` AND both define a service called
@@ -358,6 +360,49 @@ services:
         condition: service_completed_successfully
       driver-retry:
         condition: service_completed_successfully
+      install-skips-under-app-lock:
+        condition: service_completed_successfully
+
+  # #157: HAF's APPLICATION lock (an advisory lock), not the table locks of lock-holder above.
+  # Loads HAF 1.28.8's lock functions into the stub, which has none, then holds the SHARED
+  # haf_stats lock the way a block processor does, until install-skips-under-app-lock
+  # terminates it (or 300 s pass). The healthcheck gates the install on the lock being HELD.
+  # Exits 0 either way: its verdict is the healthcheck, and the install's own checks.
+  app-lock-holder:
+    image: postgres:14-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1 -f /ci_app_locks.sql
+        && { PGPASSWORD=postgres PGAPPNAME=ci_app_lock_holder psql -h postgres -U postgres -d haf_block_log -v ON_ERROR_STOP=1
+        -c "SELECT hive.acquire_app_block_processor_locks(ARRAY['haf_stats'])" -c "SELECT pg_sleep(300)"; exit 0; }
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h postgres -U postgres -d haf_block_log -Atc \"SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.locktype = 'advisory' AND l.mode = 'ShareLock' AND l.granted AND a.application_name = 'ci_app_lock_holder'\" | grep -qx 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - ../tests/ci_app_locks_haf_1_28_8.sql:/ci_app_locks.sql:ro
+    depends_on:
+      driver-retry:
+        condition: service_completed_successfully
+
+  # #157: the install under that lock must skip and change nothing; then, the holder released,
+  # it must take the exclusive lock and run. See tests/ci_install_skips_under_app_lock.sh.
+  install-skips-under-app-lock:
+    image: ${HAF_STATS_IMAGE:-haf-stats-image-not-set-by-install-test-job:invalid}
+    command: ["bash", "/ci_install_skips_under_app_lock.sh"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: haf_block_log
+      PGPASSWORD: postgres
+      HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+    volumes:
+      - ../tests/ci_install_skips_under_app_lock.sh:/ci_install_skips_under_app_lock.sh:ro
+    depends_on:
+      app-lock-holder:
+        condition: service_healthy
 
   # #123: while hivemind is behind a range, the installed process_blocks raises 55R23 at once,
   # the haf_app_driver.py this image ships rolls the range back and retries it, and the legacy

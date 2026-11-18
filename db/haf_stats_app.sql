@@ -507,8 +507,10 @@ $$;
 -- running function be dropped; the driver CALLs this one FRESH on every range, so a
 -- re-install against a live driver can land a range in the window and take 42883 --
 -- which haf_app_driver.py does not catch, so PID 1 exits. Self-healing where a restart
--- policy exists, a stopped container where there is none. Stop the processor before
--- re-installing on a registry-capable HAF.
+-- policy exists, a stopped container where there is none. Since #157 the driver holds HAF's
+-- application lock (--lock=haf_stats) and the install takes it exclusively, so an install
+-- skips while a driver runs and this window is no longer reachable that way; a registry-capable
+-- HAF has the lock functions.
 DROP PROCEDURE IF EXISTS haf_stats_app.process_blocks;
 CREATE OR REPLACE PROCEDURE haf_stats_app.process_blocks(
     _block_range hive.BLOCKS_RANGE

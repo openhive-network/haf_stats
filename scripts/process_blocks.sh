@@ -251,9 +251,11 @@ if command -v haf_app_driver.py >/dev/null 2>&1 \
    && [ "${_haf_stats_force_legacy}" = "0" ]; then
     if registry_has_haf_stats; then
         log "haf_stats is registered in the HAF application registry; running haf_app_driver.py (massive-sync parallelism ${_haf_stats_parallelism})"
+        # --lock: the shared HAF lock install_app.sh tries exclusively (#157), held for the
+        # driver's session and re-taken on every reconnect; it waits while an install runs.
         exec haf_app_driver.py --app=haf_stats \
             --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing" \
-            --startup-marker= "${_haf_stats_driver_args[@]}"
+            --lock=haf_stats --startup-marker= "${_haf_stats_driver_args[@]}"
     fi
     # Deliberately does not name a cause. Every psql failure in the probe above is
     # swallowed, so "not registered" and "could not reach PostgreSQL" are indistinguishable
@@ -278,6 +280,11 @@ if [ "${_haf_stats_parallelism}" -gt 1 ]; then
     log "WARNING: HAF_STATS_SYNC_PARALLELISM=${_haf_stats_parallelism} applies only to haf_app_driver.py;"
     log "         the legacy CALL main() loop syncs on one session"
 fi
-psql_cmd -c "CALL haf_stats_app.main('haf_stats');"
+# The same shared lock as the driver's --lock (#157), taken by db/legacy_loop_lock.sql in the
+# session that then runs main(), so it is held for as long as the loop runs (the file says
+# why, and what else it sets). psql runs -f and -c in order, each statement its own
+# transaction: one -c holding the lock and the CALL would be one transaction, and main()
+# commits inside.
+psql_cmd -f "${SCRIPT_DIR}/../db/legacy_loop_lock.sql" -c "CALL haf_stats_app.main('haf_stats');"
 
 log "Block processing loop exited."

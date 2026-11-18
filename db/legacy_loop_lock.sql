@@ -1,0 +1,23 @@
+-- The legacy CALL haf_stats_app.main() loop's half of HAF's application lock (#157). Run by
+-- scripts/process_blocks.sh in the SAME psql session as the CALL, before it, so the session
+-- holds the lock for as long as the loop runs. Each statement is its own transaction (psql
+-- autocommit); a session-level advisory lock outlives them. The install-test lane runs this
+-- file against a real server, with and without HAF's lock functions.
+
+-- bash is PID 1 in the processor container and ignores SIGTERM, so `docker stop` ends in
+-- SIGKILL, and a backend busy in main() does not notice its client is gone: it would keep
+-- the lock, and every later install would skip, exit 0 and apply nothing. With this the
+-- backend ends within seconds of its client. PostgreSQL 14+ only, hence the guard.
+SELECT SET_CONFIG('client_connection_check_interval', '10s', FALSE)
+WHERE CURRENT_SETTING('server_version_num')::INT >= 140000;
+
+-- The shared lock install_app.sh takes exclusively, the same as the driver's --lock. Waits
+-- while an install holds it. HAF before 1.28.8 has no lock functions: there the loop runs
+-- unlocked, as it always has.
+DO $$
+BEGIN
+    IF TO_REGPROCEDURE('hive.acquire_app_block_processor_locks(text[])') IS NOT NULL THEN
+        PERFORM hive.acquire_app_block_processor_locks(ARRAY['haf_stats']);
+    END IF;
+END
+$$;

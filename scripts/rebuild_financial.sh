@@ -6,7 +6,9 @@
 # that finds the earlier TEXT category/direction shape (either vocabulary -- the issue #26
 # rename or the one before it) drops the table and creates it again EMPTY, with a warning.
 # No row is converted; this TRUNCATE + reprocess (or a replay) is what restores history.
-# Stop the processor first, run install_app.sh, then run this script.
+# Stop the processor first, run install_app.sh (it skips while a processor holds HAF's install
+# lock, #157; a compose `up -d` installs and starts the processor again, so stop it once more),
+# then run this script.
 #
 # Stop the haf_stats processor before running this script -- stop the haf-stats-process
 # container, which is the only thing that works under both the legacy loop and the HAF
