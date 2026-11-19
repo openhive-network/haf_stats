@@ -3,8 +3,8 @@
 #
 # app-lock-holder holds the SHARED haf_stats lock, as a block processor does (the driver's
 # --lock, or the legacy loop's own call). An install now must not run, and must change
-# nothing, instead of racing it: it skips with exit 0, or, with a wrapper that detects
-# upgrades, fails a blocked upgrade and skips a same-version rerun. Then this releases the
+# nothing, instead of racing it: it fails a blocked upgrade (exit 1) and skips a same-version
+# rerun (exit 0). Then this releases the
 # holder, and the same install must take the exclusive lock and run.
 #
 # "Changed nothing" is read off haf_stats_app.app_version: every install that runs rewrites it
@@ -40,20 +40,32 @@ log="$(mktemp)"
 set_sentinel
 
 # 1. Under the processor's lock: the install must not run. The sentinel is not the version this
-#    image installs, so this is an upgrade as far as the wrapper can tell. The psql:14-3 wrapper
-#    skips it with exit 0. A wrapper with hive/common-ci-configuration#85's upgrade detection
-#    (it reads HAF_APP_INSTALL_VERSION, which install_app.sh sets) must fail it instead, and
-#    still skip a rerun of the installed version with exit 0 (1b).
+#    image installs, so this is an upgrade. install_app.sh waits HAF_STATS_INSTALL_LOCK_WAIT
+#    seconds for the holder, then fails the blocked upgrade (exit 1) rather than skip it with
+#    exit 0, whichever wrapper the image has: the psql:14-3 wrapper skips and install_app.sh's
+#    own check fails it ("was NOT installed"); a wrapper with hive/common-ci-configuration#85's
+#    upgrade detection (it reads HAF_APP_INSTALL_VERSION) fails it itself. An image built
+#    without a usable GIT_HASH ("unspecified") cannot tell an upgrade from a rerun and skips.
+#    1b: a rerun of the installed version skips with exit 0.
 detects_upgrades=0
 grep -q HAF_APP_INSTALL_VERSION /usr/local/bin/install_with_app_lock.py && detects_upgrades=1
+image_version="$(sed -n "s/.*VALUES ('\([A-Za-z0-9._-]*\)').*/\1/p" /app/db/version.sql)"
 /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
-if [ "${detects_upgrades}" = "1" ]; then
-    [ "$rc" = "1" ] || fail "install_app exited ${rc} on an upgrade blocked by the lock; it must fail (1)"
-    grep -q "Cannot install haf_stats version" "$log" || fail "the wrapper did not report the blocked upgrade"
-else
-    [ "$rc" = "0" ] || fail "install_app exited ${rc} while a processor held the lock; a skip exits 0"
+if [ "${image_version}" = "unspecified" ] || [ -z "${image_version}" ]; then
+    [ "$rc" = "0" ] || fail "install_app exited ${rc} under the lock with an unversioned image; a skip exits 0"
     grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a skip"
+else
+    [ "$rc" = "1" ] || fail "install_app exited ${rc} on an upgrade blocked by the lock; it must fail (1)"
+    grep -q "waiting up to ${HAF_STATS_INSTALL_LOCK_WAIT:-60}s for the block processor" "$log" ||
+        fail "install_app did not wait for the holder before giving up"
+    if [ "${detects_upgrades}" = "1" ]; then
+        grep -q "Cannot install haf_stats version" "$log" || fail "the wrapper did not report the blocked upgrade"
+    else
+        grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a skip"
+        grep -q "version ${image_version} was NOT installed" "$log" ||
+            fail "install_app did not fail the upgrade the wrapper skipped"
+    fi
 fi
 if grep -q "Installing haf_stats schema" "$log"; then
     fail "the install ran while a processor held the shared haf_stats lock"
@@ -62,19 +74,20 @@ fi
     fail "app_version was rewritten: the install ran under the lock"
 echo "install-skips-under-app-lock: ok - under a processor's shared lock the install did not run and changed nothing"
 
-if [ "${detects_upgrades}" = "1" ]; then
-    # 1b. The installed version is this image's (db/version.sql writes exactly what the install
-    #     would): a rerun, which skips with exit 0.
-    q -f /app/db/version.sql >/dev/null || fail "could not record this image's version"
-    /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
-    rc=${PIPESTATUS[0]}
-    [ "$rc" = "0" ] || fail "install_app exited ${rc} rerunning the installed version under the lock; a skip exits 0"
-    grep -q "Skipping haf_stats install — version" "$log" || fail "the wrapper did not report a same-version skip"
-    if grep -q "Installing haf_stats schema" "$log"; then
-        fail "the install ran while a processor held the shared haf_stats lock"
-    fi
-    echo "install-skips-under-app-lock: ok - a rerun of the installed version skipped"
+# 1b. The installed version is this image's (db/version.sql writes exactly what the install
+#     would): a rerun, which skips with exit 0 and does not wait.
+q -f /app/db/version.sql >/dev/null || fail "could not record this image's version"
+/app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
+rc=${PIPESTATUS[0]}
+[ "$rc" = "0" ] || fail "install_app exited ${rc} rerunning the installed version under the lock; a skip exits 0"
+grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a same-version skip"
+if grep -q "waiting up to" "$log"; then
+    fail "install_app waited for the holder on a rerun of the installed version"
 fi
+if grep -q "Installing haf_stats schema" "$log"; then
+    fail "the install ran while a processor held the shared haf_stats lock"
+fi
+echo "install-skips-under-app-lock: ok - a rerun of the installed version skipped"
 
 # 2. Holder gone: run.
 q -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'ci_app_lock_holder'" >/dev/null

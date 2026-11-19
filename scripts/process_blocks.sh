@@ -118,6 +118,22 @@ done
 
 wait_for_postgres
 
+# Never process blocks with an image's code on another version's schema (#157 review). The
+# install skips while a processor holds HAF's lock; it fails when that skip leaves an upgrade
+# unapplied, but a processor started by other means (`up -d haf-stats-process`, a manual run)
+# would still find the old schema. Only a recorded version that differs stops it: none
+# recorded is a fresh or unreadable database, which the processing itself reports.
+_image_version="$(image_app_version)"
+if [ -n "${_image_version}" ]; then
+    _installed_version="$(installed_app_version)"
+    if [ -n "${_installed_version}" ] && [ "${_installed_version}" != "${_image_version}" ]; then
+        log "ERROR: this image is version ${_image_version}, but the database has ${_installed_version}"
+        log "       installed. Run the install for this image first (docker compose up -d, with"
+        log "       the block processor stopped), then start block processing. README, \"Install lock\"."
+        exit 1
+    fi
+fi
+
 # When block processing started, for docker/block-processing-healthcheck.sh (#57).
 # That check reports healthy only if hafd.contexts.last_active_at is BOTH recent and
 # later than this timestamp; without the second half, a container that has just

@@ -358,3 +358,31 @@ refuse_if_parallel_batch_pending() {
         exit 2
     fi
 }
+
+# The version this image installs: the git hash db/version.sql writes into app_version
+# (Dockerfile). Empty without the file (a checkout: the build generates it) and for an image
+# built without a usable GIT_HASH ("unspecified"): versions cannot tell an upgrade apart then.
+image_app_version() {
+    local f="${HAF_STATS_VERSION_SQL:-${SCRIPT_DIR}/../db/version.sql}" v
+    [ -f "$f" ] || return 0
+    v="$(sed -n "s/.*VALUES ('\([A-Za-z0-9._-]*\)').*/\1/p" "$f")"
+    [ "$v" = "unspecified" ] || printf '%s' "$v"
+}
+
+# The version recorded by the last install. Empty when there is none (a fresh database) and
+# when the query fails.
+installed_app_version() {
+    psql_cmd -Atq -c "SELECT git_hash FROM haf_stats_app.app_version LIMIT 1" 2>/dev/null || true
+}
+
+# How many sessions hold HAF's application lock on haf_stats (#157): the block processor's
+# shared one. The key is hive._try_app_lock's. Empty when the query fails.
+app_lock_holders() {
+    psql_cmd -Atq -c "
+        SELECT COUNT(*)
+        FROM pg_locks
+        WHERE locktype = 'advisory'
+          AND classid = hashtext('hive_fork_manager_app_lock')
+          AND objid = hashtext('haf_stats')
+          AND granted" 2>/dev/null || true
+}

@@ -398,6 +398,8 @@ services:
       POSTGRES_DB: haf_block_log
       PGPASSWORD: postgres
       HAF_STATS_SKIP_OP_TYPE_ASSERT: "1"
+      # The bounded wait for the holder before a blocked upgrade fails; the holder stays.
+      HAF_STATS_INSTALL_LOCK_WAIT: "4"
     volumes:
       - ../tests/ci_install_skips_under_app_lock.sh:/ci_install_skips_under_app_lock.sh:ro
     depends_on:

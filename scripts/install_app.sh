@@ -237,11 +237,59 @@ if [ -z "${HAF_INSTALL_LOCK_HELD:-}" ]; then
             export HAF_APP_INSTALL_VERSION
             export HAF_APP_INSTALLED_VERSION_QUERY="SELECT git_hash FROM haf_stats_app.app_version LIMIT 1"
         fi
+        # An UPGRADE must not be skipped, with today's wrapper too. psql:14-3's ignores the
+        # variables above, and every wrapper tries the lock once, while on an image
+        # upgrade compose starts this install seconds after it stops the old processor,
+        # whose backend can hold the shared lock a while longer: the legacy loop's until
+        # its next client_connection_check_interval tick after the SIGKILL, the driver's
+        # until its current range ends. A skip there exited 0, and the new processor ran
+        # on the old schema with nothing but an INFO line to show for it. So when this
+        # image's version is not the installed one, wait (bounded) for the holders to
+        # go, and if the wrapper skips anyway, fail: compose then does not start the new
+        # processor, and the log says why. Re-running the same version still skips with
+        # exit 0, as before: there is nothing to apply. An image without a version
+        # (a checkout, or GIT_HASH "unspecified") cannot tell, and keeps the old behaviour.
+        _image_version="$(image_app_version)"
+        _upgrade=""
+        if [ -n "${_image_version}" ] && [ "$(installed_app_version)" != "${_image_version}" ]; then
+            _upgrade=1
+            _lock_wait="${HAF_STATS_INSTALL_LOCK_WAIT:-60}"
+            case "${_lock_wait}" in
+                ''|*[!0-9]*) log "WARNING: HAF_STATS_INSTALL_LOCK_WAIT='${_lock_wait}' is not a number of seconds; using 60"
+                             _lock_wait=60 ;;
+            esac
+            _waited=0
+            while _holders="$(app_lock_holders)" \
+                  && [ -n "${_holders}" ] && [ "${_holders}" -gt 0 ] \
+                  && [ "${_waited}" -lt "${_lock_wait}" ]; do
+                if [ "${_waited}" -eq 0 ]; then
+                    log "Installing version ${_image_version}: waiting up to ${_lock_wait}s for the block processor to release HAF's lock on haf_stats..."
+                fi
+                sleep 2
+                _waited=$((_waited + 2))
+            done
+        fi
         log "Taking HAF's install lock on haf_stats..."
-        # `bash "$0"`, not "$0": the script is not executable in a checkout.
-        exec python3 "${INSTALL_LOCK_WRAPPER}" haf_stats \
+        # `bash "$0"`, not "$0": the script is not executable in a checkout. Not exec'd:
+        # the version is checked again after it.
+        _rc=0
+        python3 "${INSTALL_LOCK_WRAPPER}" haf_stats \
             "host=$(dsn_value "${POSTGRES_HOST}") port=$(dsn_value "${POSTGRES_PORT}") user=$(dsn_value "${POSTGRES_USER}") dbname=$(dsn_value "${POSTGRES_DB}") application_name=haf_stats-install" \
-            bash "$0" "$@"
+            bash "$0" "$@" || _rc=$?
+        if [ "${_rc}" -ne 0 ]; then
+            exit "${_rc}"
+        fi
+        if [ -n "${_upgrade}" ]; then
+            _installed="$(installed_app_version)"
+            if [ "${_installed}" != "${_image_version}" ]; then
+                log "ERROR: version ${_image_version} was NOT installed (installed: ${_installed:-none}):"
+                log "       a block processor still holds HAF's lock on haf_stats. Stop it"
+                log "       (docker compose stop haf-stats-process), then run the install again."
+                log "       README, \"Install lock\"."
+                exit 1
+            fi
+        fi
+        exit 0
     fi
     log "WARNING: python3 or ${INSTALL_LOCK_WRAPPER} not found; installing WITHOUT HAF's install lock,"
     log "         so nothing stops this install running over a live block processor."

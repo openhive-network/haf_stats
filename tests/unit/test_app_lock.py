@@ -129,7 +129,10 @@ def test_the_image_hands_the_wrapper_its_version_and_how_to_read_the_installed_o
     (app / "db" / "version.sql").write_text(_bake(bash, tmp_path, git_hash), encoding="utf-8")
     _, argv, wrapper = make_install_stubs(tmp_path)
     r = run_install(bash, tmp_path, wrapper, script=app / "scripts" / "install_app.sh")
-    assert r.returncode == 0, r.stdout + r.stderr
+    # The stub wrapper installs nothing, so a versioned image's upgrade was skipped, which
+    # install_app.sh fails (test_an_upgrade_the_wrapper_skips_fails); the placeholder cannot
+    # tell an upgrade apart and keeps the plain skip.
+    assert r.returncode == (0 if git_hash is None else 1), r.stdout + r.stderr
     assert argv.read_text().splitlines()[1] == "haf_stats", "it must still hand off"
     version, query = (tmp_path / "version.env").read_text().split("\n")
     assert version == (PLACEHOLDER if git_hash is None else git_hash)
@@ -248,3 +251,149 @@ def test_the_legacy_lock_file_names_the_lock_and_the_session_check():
     sql = (REPO / "db" / "legacy_loop_lock.sql").read_text(encoding="utf-8")
     assert LOCK_CALL in sql
     assert "client_connection_check_interval" in sql
+
+
+# --- an upgrade is never skipped silently ---------------------------------------------
+#
+# On an image upgrade compose starts the install seconds after it stops the old processor,
+# whose backend can still hold the shared lock. The wrapper tries once and skips with exit 0,
+# so the install waits (bounded) for the holders when this image's version is not the
+# installed one, and fails if the wrapper skips anyway.
+
+IMAGE = "abcd1234"
+OLD = "0000beef"
+
+
+def make_upgrade_stubs(tmp_path, *, installed, holders, wrapper_installs, wrapper_exit=0):
+    """psql answering the installed version and the lock holders from files; python3 (the
+    wrapper) that, when wrapper_installs, records the image's version as an install would;
+    sleep that returns at once. version.sql holds the image's version."""
+    bindir = stub_bin(tmp_path)
+    installed_file = tmp_path / "installed.txt"
+    installed_file.write_text(installed)
+    holders_file = tmp_path / "holders.txt"
+    holders_file.write_text(str(holders))
+    sleeps = tmp_path / "sleeps.log"
+    write_exec(
+        bindir / "psql",
+        "#!/bin/sh\ncmd=''\nprev=''\n"
+        'for a in "$@"; do case "$prev" in -c) cmd="$cmd$a" ;; esac; prev="$a"; done\n'
+        'case "$cmd" in\n'
+        f'  *app_version*) cat "{installed_file.as_posix()}" ;;\n'
+        f'  *pg_locks*) cat "{holders_file.as_posix()}" ;;\n'
+        "esac\nexit 0\n",
+    )
+    write_exec(bindir / "sleep", f'#!/bin/sh\necho "$1" >> "{sleeps.as_posix()}"\nexit 0\n')
+    body = "#!/bin/sh\n"
+    if wrapper_installs:
+        body += f'printf "%s" "{IMAGE}" > "{installed_file.as_posix()}"\n'
+    body += f"exit {wrapper_exit}\n"
+    write_exec(bindir / "python3", body)
+    version_sql = tmp_path / "version.sql"
+    version_sql.write_text(
+        "TRUNCATE haf_stats_app.app_version; "
+        f"INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('{IMAGE}');\n"
+    )
+    wrapper_path = tmp_path / "install_with_app_lock.py"
+    wrapper_path.write_text("# stand-in; python3 is stubbed\n")
+    return wrapper_path, version_sql, sleeps
+
+
+def run_upgrade(bash, tmp_path, wrapper, version_sql, **env):
+    return run_install(bash, tmp_path, wrapper, env_extra={
+        "HAF_STATS_VERSION_SQL": str(version_sql), "HAF_STATS_INSTALL_LOCK_WAIT": "6", **env})
+
+
+def test_an_upgrade_the_wrapper_skips_fails(bash, tmp_path):
+    """THE review finding: the processor still holds the lock, the wrapper skips (exit 0),
+    and the old schema stays. That must not look like success."""
+    wrapper, version_sql, sleeps = make_upgrade_stubs(
+        tmp_path, installed=OLD, holders=1, wrapper_installs=False)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"version {IMAGE} was NOT installed (installed: {OLD})" in r.stdout
+    # It waited the bound first, in 2 s steps, and no longer.
+    assert sleeps.read_text().split() == ["2", "2", "2"]
+    assert "waiting up to 6s" in r.stdout
+
+
+def test_an_upgrade_installs_once_the_holder_is_gone(bash, tmp_path):
+    wrapper, version_sql, sleeps = make_upgrade_stubs(
+        tmp_path, installed=OLD, holders=0, wrapper_installs=True)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not sleeps.exists(), "no holder, no wait"
+
+
+def test_a_fresh_database_counts_as_an_upgrade(bash, tmp_path):
+    wrapper, version_sql, _ = make_upgrade_stubs(
+        tmp_path, installed="", holders=1, wrapper_installs=False)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "(installed: none)" in r.stdout
+
+
+def test_the_same_version_still_skips_with_exit_0(bash, tmp_path):
+    """A plain `up -d` with nothing changed re-runs the setup beside a live processor: a
+    skip applies nothing that was missing, so it stays a success, and nothing waits."""
+    wrapper, version_sql, sleeps = make_upgrade_stubs(
+        tmp_path, installed=IMAGE, holders=1, wrapper_installs=False)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not sleeps.exists()
+    assert "NOT installed" not in r.stdout
+
+
+def test_an_unversioned_image_keeps_the_old_behaviour(bash, tmp_path):
+    """GIT_HASH "unspecified": versions cannot tell an upgrade from a re-run."""
+    wrapper, version_sql, sleeps = make_upgrade_stubs(
+        tmp_path, installed="unspecified", holders=1, wrapper_installs=False)
+    version_sql.write_text(version_sql.read_text().replace(IMAGE, "unspecified"))
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not sleeps.exists()
+
+
+def test_the_wrappers_failure_is_the_installs(bash, tmp_path):
+    wrapper, version_sql, _ = make_upgrade_stubs(
+        tmp_path, installed=OLD, holders=0, wrapper_installs=False, wrapper_exit=3)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql)
+    assert r.returncode == 3, r.stdout + r.stderr
+
+
+def test_a_bad_wait_falls_back_to_60(bash, tmp_path):
+    wrapper, version_sql, _ = make_upgrade_stubs(
+        tmp_path, installed=OLD, holders=0, wrapper_installs=True)
+    r = run_upgrade(bash, tmp_path, wrapper, version_sql, HAF_STATS_INSTALL_LOCK_WAIT="soon")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "HAF_STATS_INSTALL_LOCK_WAIT='soon'" in r.stdout
+
+
+# --- the processor refuses another version's schema -----------------------------------
+
+def make_versioned_processor(tmp_path, installed):
+    _, _ = make_psql_with_registry(tmp_path, has_table=False)
+    psql = tmp_path / "bin" / "psql"
+    body = psql.read_text()
+    # Answer the installed-version query ahead of the registry stub's arms.
+    psql.write_text(body.replace("case \"$cmd\" in\n",
+                                 f"case \"$cmd\" in\n  *app_version*) printf '%s' '{installed}'; exit 0 ;;\n", 1))
+    version_sql = tmp_path / "version.sql"
+    version_sql.write_text(f"INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('{IMAGE}');\n")
+    return version_sql
+
+
+def test_the_processor_refuses_another_versions_schema(bash, tmp_path):
+    version_sql = make_versioned_processor(tmp_path, OLD)
+    r = run_process(bash, tmp_path, env_extra={"HAF_STATS_VERSION_SQL": str(version_sql)})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"this image is version {IMAGE}, but the database has {OLD}" in r.stdout
+    assert not (tmp_path / "startup.txt").exists(), "it must stop before processing starts"
+
+
+@pytest.mark.parametrize("installed", [IMAGE, ""])
+def test_the_processor_runs_on_its_own_version_or_none_recorded(bash, tmp_path, installed):
+    version_sql = make_versioned_processor(tmp_path, installed)
+    r = run_process(bash, tmp_path, env_extra={"HAF_STATS_VERSION_SQL": str(version_sql)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "but the database has" not in r.stdout

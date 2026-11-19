@@ -694,7 +694,7 @@ path.
 
 | Verb | Runs | Notes |
 |------|------|-------|
-| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; skips (exit 0) while the block processor holds the [install lock](#install-lock), or fails an upgrade with a newer wrapper |
+| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; skips (exit 0) while the block processor holds the [install lock](#install-lock); an upgrade fails instead (exit 1) |
 | `process_blocks [--host=] [--port=] [--user=]` | `scripts/process_blocks.sh` | infinite loop |
 | `uninstall_app [--force] [--host=] [--port=] [--user=]` | `scripts/uninstall_app.sh` | destructive |
 
@@ -1101,8 +1101,8 @@ whole install. An install therefore cannot run over a live processor. It used to
 the retention upgrade in `db/daily_retention.sql` copies a table and drops the original, and
 lost whatever the processor committed in between.
 
-While the processor runs, an install **skips and exits 0** (an upgrade fails instead, with a
-newer wrapper; see below). Its log has lines like:
+While the processor runs, an install **skips and exits 0** (an upgrade fails instead; see
+below). Its log has lines like:
 
 ```
 ... INFO  install_with_app_lock  NOTICE:  Skipping install: lock on haf_stats held by haf_stats_block_processing (pid=...)
@@ -1120,18 +1120,37 @@ v5.1.3 for hive/haf_api_node!296.
 So every recipe here that says "stop the block processor first" means it: an install run
 with the processor up does nothing.
 
-An image upgrade is unaffected: setup and the processor run the same image, so a new image
-recreates both, and compose stops the old processor before it runs the new install.
+**An upgrade is never skipped silently.** When the image's version (the git hash
+`db/version.sql` records) is not the installed one, the install:
+
+- waits up to `HAF_STATS_INSTALL_LOCK_WAIT` seconds (default 60) for the lock's holders to go
+  ("Installing version ...: waiting up to 60s for the block processor to release HAF's lock");
+- **fails** (exit 1, "version ... was NOT installed") if the wrapper skips anyway, so compose
+  does not start the new processor on the old schema.
+
+The wait is for the old processor's backend, which can hold the lock for a while after compose
+stops its container: the legacy loop's until its next connection check (up to 10 s), the
+driver's until it finishes the range it is in. Rerunning the same version still skips with
+exit 0, since there is nothing to apply. An image built without a usable `GIT_HASH`
+(`unspecified`) cannot tell an upgrade from a rerun and keeps the plain skip.
+
+The block processor refuses to start (exit 1, "this image is version ..., but the database has
+... installed") when the installed version is another one, so a processor started by other
+means (`up -d haf-stats-process`, a manual run) never runs one version's code on another's
+schema either.
+
+An image upgrade is otherwise unaffected: setup and the processor run the same image, so a new
+image recreates both, and compose stops the old processor before it runs the new install.
 `restart: true` (on `haf-stats-process` here) covers what recreates the setup alone -- a
 change to its own environment or command -- which would otherwise find the lock held and skip.
-`up -d haf-stats-setup` alone never stops the processor, and skips (or, with a new image and a
-newer wrapper, fails; see below). hive/haf_api_node's
+`up -d haf-stats-setup` alone never stops the processor, and skips (or, with a new image,
+fails; see below). hive/haf_api_node's
 `haf-stats-block-processing` wants the same `restart: true` on `haf-stats-install`, for the same
 setup-only changes. Any other holder of the lock — a PostgREST holding it while the API serves,
 as hive/haf_api_node!296 proposes — has to be stopped too.
 
-**An upgrade that would be skipped fails instead**, once this Dockerfile's `FROM` moves to a psql
-base image with the wrapper from hive/common-ci-configuration#85. The install hands the wrapper
+**The wrapper's own check.** A psql base image with the wrapper from
+hive/common-ci-configuration#85 makes the same decision itself. The install hands the wrapper
 the version this image installs (`HAF_APP_INSTALL_VERSION`, read from the baked
 `db/version.sql`) and how to read the installed one (`HAF_APP_INSTALLED_VERSION_QUERY`,
 `SELECT git_hash FROM haf_stats_app.app_version LIMIT 1`). With the lock held:
@@ -1148,7 +1167,7 @@ those, rerun the install, then start them again.
 
 Two images built without `GIT_HASH` both carry `unspecified`, so an upgrade between them still
 looks like a rerun and skips. The `psql:14-3` wrapper this image ships today ignores both
-variables and skips either way. A checkout has no `db/version.sql`, so `install_app.sh` sets
+variables; `install_app.sh`'s own check above fails the upgrade instead. A checkout has no `db/version.sql`, so `install_app.sh` sets
 neither there.
 
 If an install keeps skipping with no processor running, a leftover session still holds the
@@ -1162,8 +1181,8 @@ What a held lock does depends on the HAF version:
 | HAF | install while the lock is held |
 |---|---|
 | 1.28.6, 1.28.7 | no lock functions: installs unlocked, as before |
-| 1.28.8 | skips, exit 0 (an upgrade fails with a newer wrapper; see above) |
-| develop, `haf_stats` registered and healthy | skips, exit 0 (an upgrade fails with a newer wrapper; see above) |
+| 1.28.8 | skips, exit 0 (exit 1 when that leaves an upgrade unapplied, above) |
+| develop, `haf_stats` registered and healthy | skips, exit 0 (likewise) |
 | develop, registered but broken (its process procedure is gone) | waits ~10 s for the holders, then fails naming them |
 | develop, not registered | waits ~10 s, then installs **without the lock**, under the live processor -- the race this lock exists to prevent. The wrapper still logs "Acquired install lock". A haf_stats that runs but is not registered (the install warned and skipped `register_app.sql`) needs its registration fixed |
 
