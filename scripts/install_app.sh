@@ -224,6 +224,19 @@ dsn_value() {
 if [ -z "${HAF_INSTALL_LOCK_HELD:-}" ]; then
     export HAF_INSTALL_LOCK_HELD=1
     if command -v python3 >/dev/null 2>&1 && [ -f "${INSTALL_LOCK_WRAPPER}" ]; then
+        # Upgrade detection (hive/common-ci-configuration#85). With these two set, a wrapper that
+        # cannot take the lock still skips a rerun of the installed version with exit 0, but
+        # FAILS, naming the holder, when this image would install a different version: a skip
+        # would leave the old schema serving under the new image. They go in the environment,
+        # not as --version flags, because the psql:14-3 wrapper predates them and would read a
+        # flag as the app name; it ignores the environment. The version is the one
+        # db/version.sql writes (baked by the Dockerfile). A checkout has no version.sql, so
+        # this sets neither there.
+        if [ -f "${SCRIPT_DIR}/../db/version.sql" ]; then
+            HAF_APP_INSTALL_VERSION="$(sed -n "s/.*VALUES ('\([A-Za-z0-9._-]*\)').*/\1/p" "${SCRIPT_DIR}/../db/version.sql")"
+            export HAF_APP_INSTALL_VERSION
+            export HAF_APP_INSTALLED_VERSION_QUERY="SELECT git_hash FROM haf_stats_app.app_version LIMIT 1"
+        fi
         log "Taking HAF's install lock on haf_stats..."
         # `bash "$0"`, not "$0": the script is not executable in a checkout.
         exec python3 "${INSTALL_LOCK_WRAPPER}" haf_stats \

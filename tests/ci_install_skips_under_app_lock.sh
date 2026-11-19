@@ -2,9 +2,10 @@
 # install-skips-under-app-lock (#157): HAF's application lock against a real server.
 #
 # app-lock-holder holds the SHARED haf_stats lock, as a block processor does (the driver's
-# --lock, or the legacy loop's own call). An install now must skip -- exit 0, and change
-# nothing -- instead of racing it. Then this releases the holder, and the same install must
-# take the exclusive lock and run.
+# --lock, or the legacy loop's own call). An install now must not run, and must change
+# nothing, instead of racing it: it skips with exit 0, or, with a wrapper that detects
+# upgrades, fails a blocked upgrade and skips a same-version rerun. Then this releases the
+# holder, and the same install must take the exclusive lock and run.
 #
 # "Changed nothing" is read off haf_stats_app.app_version: every install that runs rewrites it
 # (step 2b, db/version.sql, TRUNCATE + INSERT), so a sentinel set here survives only a skip.
@@ -29,23 +30,51 @@ holder_locks() {
 }
 
 SENTINEL="ci-app-lock-sentinel"
+set_sentinel() {
+    q -c "UPDATE haf_stats_app.app_version SET git_hash = '${SENTINEL}'" >/dev/null ||
+        fail "could not set the app_version sentinel"
+}
 log="$(mktemp)"
 
 [ "$(holder_locks)" = "1" ] || fail "app-lock-holder does not hold the shared haf_stats lock"
-q -c "UPDATE haf_stats_app.app_version SET git_hash = '${SENTINEL}'" >/dev/null ||
-    fail "could not set the app_version sentinel"
+set_sentinel
 
-# 1. Under the processor's lock: skip.
+# 1. Under the processor's lock: the install must not run. The sentinel is not the version this
+#    image installs, so this is an upgrade as far as the wrapper can tell. The psql:14-3 wrapper
+#    skips it with exit 0. A wrapper with hive/common-ci-configuration#85's upgrade detection
+#    (it reads HAF_APP_INSTALL_VERSION, which install_app.sh sets) must fail it instead, and
+#    still skip a rerun of the installed version with exit 0 (1b).
+detects_upgrades=0
+grep -q HAF_APP_INSTALL_VERSION /usr/local/bin/install_with_app_lock.py && detects_upgrades=1
 /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
-[ "$rc" = "0" ] || fail "install_app exited ${rc} while a processor held the lock; a skip exits 0"
-grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a skip"
+if [ "${detects_upgrades}" = "1" ]; then
+    [ "$rc" = "1" ] || fail "install_app exited ${rc} on an upgrade blocked by the lock; it must fail (1)"
+    grep -q "Cannot install haf_stats version" "$log" || fail "the wrapper did not report the blocked upgrade"
+else
+    [ "$rc" = "0" ] || fail "install_app exited ${rc} while a processor held the lock; a skip exits 0"
+    grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a skip"
+fi
 if grep -q "Installing haf_stats schema" "$log"; then
     fail "the install ran while a processor held the shared haf_stats lock"
 fi
 [ "$(q -c 'SELECT git_hash FROM haf_stats_app.app_version')" = "${SENTINEL}" ] ||
     fail "app_version was rewritten: the install ran under the lock"
-echo "install-skips-under-app-lock: ok - under a processor's shared lock the install skipped and changed nothing"
+echo "install-skips-under-app-lock: ok - under a processor's shared lock the install did not run and changed nothing"
+
+if [ "${detects_upgrades}" = "1" ]; then
+    # 1b. The installed version is this image's (db/version.sql writes exactly what the install
+    #     would): a rerun, which skips with exit 0.
+    q -f /app/db/version.sql >/dev/null || fail "could not record this image's version"
+    /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    [ "$rc" = "0" ] || fail "install_app exited ${rc} rerunning the installed version under the lock; a skip exits 0"
+    grep -q "Skipping haf_stats install — version" "$log" || fail "the wrapper did not report a same-version skip"
+    if grep -q "Installing haf_stats schema" "$log"; then
+        fail "the install ran while a processor held the shared haf_stats lock"
+    fi
+    echo "install-skips-under-app-lock: ok - a rerun of the installed version skipped"
+fi
 
 # 2. Holder gone: run.
 q -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'ci_app_lock_holder'" >/dev/null
@@ -54,6 +83,7 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 [ "$(holder_locks)" = "0" ] || fail "app-lock-holder still holds the lock after it was terminated"
+set_sentinel
 
 /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}

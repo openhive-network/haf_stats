@@ -79,7 +79,8 @@ def clean_env(bindir=None) -> dict:
            and not k.startswith("POSTGRES_")
            and not k.startswith("PG")
            and k not in _REBUILD_KNOBS
-           and k != "HAF_INSTALL_LOCK_HELD"}
+           and k not in {"HAF_INSTALL_LOCK_HELD", "HAF_APP_INSTALL_VERSION",
+                         "HAF_APP_INSTALLED_VERSION_QUERY"}}
     # install_app.sh hands itself to the psql base image's install_with_app_lock.py when that
     # exists (#157) -- and it does in the .aidev runtime, with a real python3, so a test running
     # the install would connect to a server that is not there. Pointed at nothing here; the

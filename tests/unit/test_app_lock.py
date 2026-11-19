@@ -14,6 +14,8 @@ the same lock in its own session first.
 from __future__ import annotations
 
 import posixpath
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -53,6 +55,8 @@ def make_install_stubs(tmp_path, *, wrapper=True):
         bindir / "python3",
         f'#!/bin/sh\necho python3 >> "{events.as_posix()}"\n'
         f'printf "%s" "${{HAF_INSTALL_LOCK_HELD-unset}}" > "{(tmp_path / "held.env").as_posix()}"\n'
+        f'printf "%s\\n%s" "${{HAF_APP_INSTALL_VERSION-unset}}" "${{HAF_APP_INSTALLED_VERSION_QUERY-unset}}"'
+        f' > "{(tmp_path / "version.env").as_posix()}"\n'
         f'for a in "$@"; do printf "%s\\n" "$a" >> "{argv.as_posix()}"; done\nexit 0\n',
     )
     wrapper_path = tmp_path / "install_with_app_lock.py"
@@ -61,14 +65,14 @@ def make_install_stubs(tmp_path, *, wrapper=True):
     return events, argv, wrapper_path
 
 
-def run_install(bash, tmp_path, wrapper_path, *args, held=False, env_extra=None):
+def run_install(bash, tmp_path, wrapper_path, *args, held=False, env_extra=None, script=INSTALL):
     env = clean_env(tmp_path / "bin")
     env["HAF_STATS_INSTALL_LOCK_WRAPPER"] = str(wrapper_path)
     if held:
         env["HAF_INSTALL_LOCK_HELD"] = "1"
     env.update(env_extra or {})
     return subprocess.run(
-        [bash, str(INSTALL), *args], env=env, capture_output=True, text=True, timeout=TIMEOUT
+        [bash, str(script), *args], env=env, capture_output=True, text=True, timeout=TIMEOUT
     )
 
 
@@ -94,6 +98,49 @@ def test_the_install_hands_itself_to_the_lock_wrapper(bash, tmp_path):
     # Exported, so the wrapper's child goes straight on: unexported, the child wraps itself
     # again and skips against its own parent's exclusive lock (the wrapper does not set it).
     assert (tmp_path / "held.env").read_text() == "1"
+
+
+INSTALLED_VERSION_QUERY = "SELECT git_hash FROM haf_stats_app.app_version LIMIT 1"
+
+
+def test_a_checkout_leaves_upgrade_detection_off(bash, tmp_path):
+    """No db/version.sql in a checkout, so there is no version to compare: neither is set."""
+    assert not (REPO / "db" / "version.sql").exists(), "a stray db/version.sql would skew this"
+    _, _, wrapper = make_install_stubs(tmp_path)
+    r = run_install(bash, tmp_path, wrapper)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "version.env").read_text() == "unset\nunset"
+
+
+@pytest.mark.parametrize("git_hash", ["ab6d7c4b", "1.28.8-rc1_x", None])
+def test_the_image_hands_the_wrapper_its_version_and_how_to_read_the_installed_one(
+        bash, tmp_path, git_hash):
+    """common-ci-configuration#85: with both, a held lock fails an upgrade instead of skipping it.
+
+    Run from an image-shaped tree whose db/version.sql the Dockerfile's real RUN line wrote,
+    so the version handed over is exactly what the install would write to app_version.
+    None = a build with no --build-arg (the placeholder).
+    """
+    from tests.unit.test_version_provenance import PLACEHOLDER, _bake
+
+    app = tmp_path / "app"
+    shutil.copytree(REPO / "scripts", app / "scripts")
+    (app / "db").mkdir()
+    (app / "db" / "version.sql").write_text(_bake(bash, tmp_path, git_hash), encoding="utf-8")
+    _, argv, wrapper = make_install_stubs(tmp_path)
+    r = run_install(bash, tmp_path, wrapper, script=app / "scripts" / "install_app.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert argv.read_text().splitlines()[1] == "haf_stats", "it must still hand off"
+    version, query = (tmp_path / "version.env").read_text().split("\n")
+    assert version == (PLACEHOLDER if git_hash is None else git_hash)
+    assert query == INSTALLED_VERSION_QUERY
+
+
+def test_the_installed_version_query_reads_the_column_the_install_writes():
+    sql = (REPO / "db" / "haf_stats_app.sql").read_text(encoding="utf-8")
+    assert re.search(r"CREATE TABLE IF NOT EXISTS haf_stats_app\.app_version \(\s*git_hash TEXT",
+                     sql), "app_version.git_hash moved; update the query in install_app.sh"
+    assert INSTALLED_VERSION_QUERY in INSTALL.read_text(encoding="utf-8")
 
 
 def test_the_hand_off_waits_for_postgres(bash, tmp_path):

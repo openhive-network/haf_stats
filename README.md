@@ -694,7 +694,7 @@ path.
 
 | Verb | Runs | Notes |
 |------|------|-------|
-| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; skips (exit 0) while the block processor holds the [install lock](#install-lock) |
+| `install_app [--swagger-url=BASE] [--host=] [--port=] [--user=] [--schema=haf_stats_app] [--is_forking=FALSE]` | `scripts/install_app.sh` | idempotent; skips (exit 0) while the block processor holds the [install lock](#install-lock), or fails an upgrade with a newer wrapper |
 | `process_blocks [--host=] [--port=] [--user=]` | `scripts/process_blocks.sh` | infinite loop |
 | `uninstall_app [--force] [--host=] [--port=] [--user=]` | `scripts/uninstall_app.sh` | destructive |
 
@@ -1101,7 +1101,8 @@ whole install. An install therefore cannot run over a live processor. It used to
 the retention upgrade in `db/daily_retention.sql` copies a table and drops the original, and
 lost whatever the processor committed in between.
 
-While the processor runs, an install **skips and exits 0**. Its log has lines like:
+While the processor runs, an install **skips and exits 0** (an upgrade fails instead, with a
+newer wrapper; see below). Its log has lines like:
 
 ```
 ... INFO  install_with_app_lock  NOTICE:  Skipping install: lock on haf_stats held by haf_stats_block_processing (pid=...)
@@ -1123,10 +1124,32 @@ An image upgrade is unaffected: setup and the processor run the same image, so a
 recreates both, and compose stops the old processor before it runs the new install.
 `restart: true` (on `haf-stats-process` here) covers what recreates the setup alone -- a
 change to its own environment or command -- which would otherwise find the lock held and skip.
-`up -d haf-stats-setup` alone never stops the processor, and skips. hive/haf_api_node's
+`up -d haf-stats-setup` alone never stops the processor, and skips (or, with a new image and a
+newer wrapper, fails; see below). hive/haf_api_node's
 `haf-stats-block-processing` wants the same `restart: true` on `haf-stats-install`, for the same
 setup-only changes. Any other holder of the lock — a PostgREST holding it while the API serves,
 as hive/haf_api_node!296 proposes — has to be stopped too.
+
+**An upgrade that would be skipped fails instead**, once this Dockerfile's `FROM` moves to a psql
+base image with the wrapper from hive/common-ci-configuration#85. The install hands the wrapper
+the version this image installs (`HAF_APP_INSTALL_VERSION`, read from the baked
+`db/version.sql`) and how to read the installed one (`HAF_APP_INSTALLED_VERSION_QUERY`,
+`SELECT git_hash FROM haf_stats_app.app_version LIMIT 1`). With the lock held:
+- a rerun of the installed version still skips, exit 0;
+- a different version, or none installed, exits 1 naming the holder, rather than leave the
+  old schema under the new image;
+- if the installed version cannot be read, the wrapper warns and skips, exit 0.
+
+`haf-stats-process` waits for setup to complete successfully, so a blocked upgrade makes
+`docker compose up -d` itself fail. The error says to stop `haf_stats-postgrest`. For haf_stats
+the holder is the block processor (`haf-stats-process` here, `haf-stats-block-processing` in
+hive/haf_api_node), plus any PostgREST holding the lock under hive/haf_api_node!296. Stop
+those, rerun the install, then start them again.
+
+Two images built without `GIT_HASH` both carry `unspecified`, so an upgrade between them still
+looks like a rerun and skips. The `psql:14-3` wrapper this image ships today ignores both
+variables and skips either way. A checkout has no `db/version.sql`, so `install_app.sh` sets
+neither there.
 
 If an install keeps skipping with no processor running, a leftover session still holds the
 lock; its holder is named in the skip line, and `pg_stat_activity` shows it by that
@@ -1139,8 +1162,8 @@ What a held lock does depends on the HAF version:
 | HAF | install while the lock is held |
 |---|---|
 | 1.28.6, 1.28.7 | no lock functions: installs unlocked, as before |
-| 1.28.8 | skips, exit 0 |
-| develop, `haf_stats` registered and healthy | skips, exit 0 |
+| 1.28.8 | skips, exit 0 (an upgrade fails with a newer wrapper; see above) |
+| develop, `haf_stats` registered and healthy | skips, exit 0 (an upgrade fails with a newer wrapper; see above) |
 | develop, registered but broken (its process procedure is gone) | waits ~10 s for the holders, then fails naming them |
 | develop, not registered | waits ~10 s, then installs **without the lock**, under the live processor -- the race this lock exists to prevent. The wrapper still logs "Acquired install lock". A haf_stats that runs but is not registered (the install warned and skipped `register_app.sql`) needs its registration fixed |
 
@@ -1258,7 +1281,7 @@ They are one clock: `haf_stats_app.main()` writes both from the same variable in
 transaction, so on a node the processor drives they agree exactly. A persistent
 disagreement means the HAF context was reset out from under the data — re-running
 `scripts/install_app.sh` repairs the pointer — **stop the block processor first**: an install
-with `haf-stats-process` up skips entirely and exits 0 without fixing anything (see
+with `haf-stats-process` up does not run and fixes nothing (see
 [Install lock](#install-lock)). Note
 it *raises* a lagging pointer and cannot lower one, so it is not a way to force a replay (the
 warning the function itself emits names that procedure). `tests/parity/context_vs_app_status.sql`
