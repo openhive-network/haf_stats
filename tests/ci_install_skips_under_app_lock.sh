@@ -111,10 +111,13 @@ echo "install-skips-under-app-lock: ok - with the lock free the install took it 
 #    then a query in it. With HAF's lock functions (loaded here by app-lock-holder) the session
 #    must hold exactly one shared lock and have the connection check on; without them (a HAF
 #    before 1.28.8; here a fresh database) it must run cleanly and hold none, or the legacy loop
-#    would never start on those HAFs.
+#    would never start on those HAFs. Only the haf_stats lock counts, under hive._try_app_lock's
+#    key, the one the install tries and app_lock_holders (scripts/common.sh) waits on: a lock
+#    under any other key or app name would let an install run over the loop.
 LOCK_FILE=/app/db/legacy_loop_lock.sql
 HELD_SQL="SELECT count(*) || ' ' || current_setting('client_connection_check_interval') FROM pg_locks
-          WHERE locktype = 'advisory' AND mode = 'ShareLock' AND granted AND pid = pg_backend_pid()"
+          WHERE locktype = 'advisory' AND mode = 'ShareLock' AND granted AND pid = pg_backend_pid()
+            AND classid = hashtext('hive_fork_manager_app_lock')::oid AND objid = hashtext('haf_stats')::oid"
 got="$(q -f "${LOCK_FILE}" -c "${HELD_SQL}" | tail -n 1)" ||
     fail "${LOCK_FILE} failed with the lock functions present"
 [ "${got}" = "1 10s" ] || fail "${LOCK_FILE} with the lock functions: expected '1 10s' (one shared lock, check on), got '${got}'"

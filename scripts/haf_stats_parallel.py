@@ -60,6 +60,13 @@ connection authenticated with (conn.info.password), whether it came from the URL
 or ~/.pgpass. conn.dsn is not used: psycopg2 masks a password in it as "password=xxx", which
 would override PGPASSWORD and ~/.pgpass. Their server messages are written to stdout as the
 driver writes its own.
+
+Each worker connection, when it opens, takes HAF's shared lock on haf_stats the way the legacy
+loop's session does, by running db/legacy_loop_lock.sql (#157). The driver's --lock covers only
+the driver's own connection: when that drops, a worker's backend can still be committing a
+group or a staging step, and without its own lock an install could start under it. With it, an
+install waits for every worker backend too, and client_connection_check_interval ends a worker
+backend whose process is gone. A worker connection that cannot take the lock is closed, not used.
 """
 
 from __future__ import annotations
@@ -73,9 +80,13 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Protocol
 
 PARALLELISM_ENV = "HAF_STATS_SYNC_PARALLELISM"
+
+# The processor session's half of HAF's application lock, shared with the legacy loop.
+SESSION_LOCK_SQL = (Path(__file__).resolve().parent.parent / "db" / "legacy_loop_lock.sql").read_text(encoding="utf-8")
 
 _STAGE_SQL = "SELECT haf_stats_app.stage_shared_batch(%s, %s, %s)"
 _STAGED_SQL = "SELECT haf_stats_app.shared_batch_complete(%s, %s)"
@@ -256,9 +267,7 @@ class ParallelCoordinator:
         try:
             worker = self._idle.get_nowait()
         except queue.Empty:
-            worker = self._connect(**params)
-            worker.autocommit = True
-            worker.notices = []
+            worker = self._open_worker(params, kind)
         healthy = False
         try:
             # One query string, so one round trip. A statement that fails leaves its BEGIN block
@@ -284,6 +293,21 @@ class ParallelCoordinator:
             else:
                 self._close(worker)
         return result
+
+    def _open_worker(self, params: Mapping[str, str], kind: str) -> _Connection:
+        """A new worker connection in autocommit mode, holding HAF's shared lock on haf_stats."""
+        worker = self._connect(**params)
+        worker.autocommit = True
+        worker.notices = []
+        try:
+            worker.cursor().execute(SESSION_LOCK_SQL)
+        except self._db_error as e:
+            self._log(f"{kind}: a new worker connection could not take HAF's lock on haf_stats: {str(e).strip()}")
+            self._close(worker)
+            raise
+        finally:
+            self._forward_notices(worker)
+        return worker
 
     def _rolled_back(self, worker: _Connection) -> bool:
         """Whether the worker connection is still usable after a statement failed: one that

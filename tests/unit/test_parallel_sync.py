@@ -67,8 +67,10 @@ class FakeDb:
         fail_stage_from: int | None = None,
         irreversible: int | None = None,
         barrier_stage_from: int | None = None,
+        fail_session_lock: bool = False,
     ) -> None:
         self.massive = massive
+        self.fail_session_lock = fail_session_lock
         self.timed = timed
         self.fail_group = fail_group
         self.fail_stage = fail_stage
@@ -105,6 +107,10 @@ class FakeCursor:
             self.row = (db.massive,)
         elif "processor_groups(), haf_stats_app.shared_batch_stage_levels()" in sql:
             self.row = (list(GROUPS), [list(level) for level in STAGE_LEVELS], db.timed)
+        elif sql == parallel.SESSION_LOCK_SQL:
+            db.record(self.conn.name, "session lock")
+            if db.fail_session_lock:
+                raise FakeDbError("injected failure taking the session lock")
         elif sql == "ROLLBACK":
             db.record(self.conn.name, f"rollback {self.conn.pending}")
             self.conn.pending = None
@@ -422,6 +428,49 @@ def test_parallelism_one_is_the_single_session_path_even_in_massive_sync() -> No
     coordinator(db, parallelism=1).process(driver_conn(db), 101, 10100)
     assert db.log == [("driver", "process_blocks (101,10100)")]
     assert db.opened == 0
+
+
+def test_every_worker_connection_takes_the_session_lock_once_before_its_first_round_trip() -> None:
+    db = FakeDb()
+    driver = driver_conn(db)
+    c = coordinator(db)
+    c.process(driver, 101, 10100)
+    c.process(driver, 10101, 20100)
+
+    workers = sorted({n for n, _ in db.log if n != "driver"})
+    assert len(workers) == db.opened > 1
+    for w in workers:
+        events = [e for n, e in db.log if n == w]
+        assert events[0] == "session lock", f"{w} ran {events[0]!r} before taking HAF's lock"
+        assert events.count("session lock") == 1, f"{w} took the lock again when it was reused"
+    assert ("driver", "session lock") not in db.log, "the driver's connection holds --lock already"
+
+
+def test_the_session_lock_is_the_legacy_loops_lock_file() -> None:
+    # The same file the legacy loop runs and the install-test lane checks against a real
+    # server, lock key included.
+    assert parallel.SESSION_LOCK_SQL == (ROOT / "db" / "legacy_loop_lock.sql").read_text(encoding="utf-8")
+    assert "acquire_app_block_processor_locks(ARRAY['haf_stats'])" in parallel.SESSION_LOCK_SQL
+
+
+def test_a_worker_that_cannot_take_the_lock_is_closed_and_runs_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    db = FakeDb(fail_session_lock=True)
+    opened: list[FakeConn] = []
+
+    def connect(**params: str) -> FakeConn:
+        with db.lock:
+            db.opened += 1
+            conn = FakeConn(db, f"worker{db.opened}", params)
+            opened.append(conn)
+        return conn
+
+    with pytest.raises(FakeDbError):
+        parallel.ParallelCoordinator(4, connect, FakeDbError).process(driver_conn(db), 101, 10100)
+
+    assert opened and all(conn.closed for conn in opened)
+    assert not any(e.startswith(("stage ", "group ", "round trip")) for _, e in db.log)
+    assert ("driver", "finish 101..10100") not in db.log
+    assert "could not take HAF's lock on haf_stats" in capsys.readouterr().out
 
 
 def test_workers_connect_with_the_password_the_driver_authenticated_with() -> None:

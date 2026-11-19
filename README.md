@@ -1095,7 +1095,10 @@ and retry on their own.
 
 The install and the block processor coordinate through HAF's application lock (#157). The
 processor holds a **shared** lock on `haf_stats` for as long as it runs (the driver's
-`--lock`, or the legacy `CALL main()` loop's own call in the same session); `install_app.sh`
+`--lock`, or the legacy `CALL main()` loop's own call in the same session). With
+`HAF_STATS_SYNC_PARALLELISM` above 1, each of the massive sync's worker connections takes the
+same shared lock when it opens, so a worker still committing after the driver's connection
+drops also keeps the install out. `install_app.sh`
 takes it **exclusively**, through the psql base image's `install_with_app_lock.py`, for the
 whole install. An install therefore cannot run over a live processor. It used to race one:
 the retention upgrade in `db/daily_retention.sql` copies a table and drops the original, and
@@ -1130,7 +1133,8 @@ with the processor up does nothing.
 
 The wait is for the old processor's backend, which can hold the lock for a while after compose
 stops its container: the legacy loop's until its next connection check (up to 10 s), the
-driver's until it finishes the range it is in. Rerunning the same version still skips with
+driver's until it finishes the range it is in, and a parallel sync's worker connections' until
+their next connection check (up to 10 s). Rerunning the same version still skips with
 exit 0, since there is nothing to apply. An image built without a usable `GIT_HASH`
 (`unspecified`) cannot tell an upgrade from a rerun and keeps the plain skip.
 
@@ -1172,8 +1176,11 @@ neither there.
 
 If an install keeps skipping with no processor running, a leftover session still holds the
 lock; its holder is named in the skip line, and `pg_stat_activity` shows it by that
-`application_name`. The legacy loop sets `client_connection_check_interval`, so its backend
-ends within seconds of a killed container on PostgreSQL 14+; anything else can be ended with
+`application_name`. A leftover worker connection of the parallel sync carries the processor's
+name (`haf_stats_block_processing`), even with no processor running. The legacy loop and the
+parallel sync's worker connections set
+`client_connection_check_interval`, so their backends end within seconds of a killed container
+on PostgreSQL 14+; anything else can be ended with
 `SELECT pg_terminate_backend(<pid>)`.
 
 What a held lock does depends on the HAF version:

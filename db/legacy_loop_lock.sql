@@ -1,8 +1,11 @@
--- The legacy CALL haf_stats_app.main() loop's half of HAF's application lock (#157). Run by
--- scripts/process_blocks.sh in the SAME psql session as the CALL, before it, so the session
--- holds the lock for as long as the loop runs. Each statement is its own transaction (psql
--- autocommit); a session-level advisory lock outlives them. The install-test lane runs this
--- file against a real server, with and without HAF's lock functions.
+-- The processor sessions' half of HAF's application lock (#157): the legacy CALL
+-- haf_stats_app.main() loop's session, and each worker connection the parallel massive sync
+-- (scripts/haf_stats_parallel.py) opens. Run by scripts/process_blocks.sh in the SAME psql
+-- session as the CALL, before it, so the session holds the lock for as long as the loop runs.
+-- Each statement is its own transaction there (psql autocommit); a worker sends the file as
+-- one query string. Either way the setting and the advisory lock are session-level and
+-- outlive the transaction. The install-test lane runs this file against a real server, with
+-- and without HAF's lock functions.
 
 -- bash is PID 1 in the processor container and ignores SIGTERM, so `docker stop` ends in
 -- SIGKILL, and a backend busy in main() does not notice its client is gone: it would keep
