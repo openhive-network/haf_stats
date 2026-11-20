@@ -6,6 +6,8 @@ These guard the custom subset/order verifier itself: without them, a regression 
 `_check_rows_present` (e.g. dropping the membership or ordering assert) would silently make the
 get_custom_json_app_registry tavern test vacuous.
 """
+# private-test-exempt: tests the private cores of validate_response's public verifiers; must
+# remain in tests/tavern/ so pytest.mark.synthetic places them in the endpoint lane's stub run
 
 from datetime import date
 
