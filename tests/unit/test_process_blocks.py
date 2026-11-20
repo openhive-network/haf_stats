@@ -274,7 +274,7 @@ PROCEDURE_RESOLVES = "to_regprocedure(process_procedure || '( hive.blocks_range 
 
 
 def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_fails=False,
-                            procedure_dropped=False):
+                            procedure_dropped=False, server_14=False):
     """A stub psql that also answers the two registry-probe queries.
 
     Records $PGAPPNAME per invocation so a test can prove the legacy loop tags its own
@@ -297,6 +297,7 @@ def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_
         f'printf "%s\\n" "${{PGAPPNAME-}}" >> "{appnames.as_posix()}"\n'
         'case "$cmd" in\n'
         f'  *"now()"*) printf "%s" {STUB_NOW!r} ;;\n'
+        f'  *server_version_num*) printf "%s" {("t" if server_14 else "f")!r} ;;\n'
         f'  *to_regclass*) {probe_exit}; printf "%s" {("t" if has_table else "f")!r} ;;\n'
         # procedure_dropped: the row is there but its schema is gone (#97). Only a probe
         # that ASKS whether the procedure still resolves is told so -- with the
@@ -312,12 +313,14 @@ def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_
 
 
 def make_driver(tmp_path):
-    """A stub haf_app_driver.py that records its argv instead of running."""
+    """A stub haf_app_driver.py that records its argv instead of running, and its PGOPTIONS
+    in driver.env."""
     stub_bin(tmp_path)
     argv = tmp_path / "driver.log"
     write_exec(
         tmp_path / "bin" / "haf_app_driver.py",
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{argv.as_posix()}"\nexit 0\n',
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{argv.as_posix()}"\n'
+        f'printf "%s" "${{PGOPTIONS-unset}}" > "{(tmp_path / "driver.env").as_posix()}"\nexit 0\n',
     )
     return argv
 

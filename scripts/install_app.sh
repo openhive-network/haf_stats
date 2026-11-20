@@ -203,10 +203,13 @@ wait_for_postgres
 #
 # The lock is session-level and this script runs many psql sessions, so it is held by the psql
 # base image's install_with_app_lock.py on a connection of its own, which then runs this script
-# again as its child. The re-run sees HAF_INSTALL_LOCK_HELD and goes straight on. When a
-# processor holds the lock the wrapper logs who, skips the install and exits 0: stop the block
-# processor before re-installing (README, "Install lock"). The same wrapper as balance_tracker,
-# reputation_tracker, nft_tracker, haf_block_explorer, hivesense, haf_fyp and proxy-whitelist.
+# again as its child. The re-run sees HAF_INSTALL_LOCK_HELD=haf_stats and goes straight on.
+# Only that value: the variable is shared with the installers of balance_tracker,
+# reputation_tracker, nft_tracker, haf_block_explorer, hivesense, haf_fyp and proxy-whitelist,
+# which use the same wrapper and set it to 1, so a value one of them exported (or a shell left
+# behind) must not let this install skip the lock. When a processor holds the lock the wrapper
+# logs who, skips the install and exits 0: stop the block processor before re-installing
+# (README, "Install lock").
 #
 # Here, after the flags are checked and the server is up: earlier, a bad flag would be masked
 # by a skip, and the wrapper's own connect would fail before PostgreSQL is ready. Without the
@@ -221,8 +224,8 @@ dsn_value() {
     printf "'%s'" "${v//\'/\\\'}"
 }
 
-if [ -z "${HAF_INSTALL_LOCK_HELD:-}" ]; then
-    export HAF_INSTALL_LOCK_HELD=1
+if [ "${HAF_INSTALL_LOCK_HELD:-}" != "haf_stats" ]; then
+    export HAF_INSTALL_LOCK_HELD=haf_stats
     if command -v python3 >/dev/null 2>&1 && [ -f "${INSTALL_LOCK_WRAPPER}" ]; then
         # Upgrade detection (hive/common-ci-configuration#85). With these two set, a wrapper that
         # cannot take the lock still skips a rerun of the installed version with exit 0, but

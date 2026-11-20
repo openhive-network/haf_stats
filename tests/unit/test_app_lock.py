@@ -69,7 +69,7 @@ def run_install(bash, tmp_path, wrapper_path, *args, held=False, env_extra=None,
     env = clean_env(tmp_path / "bin")
     env["HAF_STATS_INSTALL_LOCK_WRAPPER"] = str(wrapper_path)
     if held:
-        env["HAF_INSTALL_LOCK_HELD"] = "1"
+        env["HAF_INSTALL_LOCK_HELD"] = "haf_stats"
     env.update(env_extra or {})
     return subprocess.run(
         [bash, str(script), *args], env=env, capture_output=True, text=True, timeout=TIMEOUT
@@ -97,7 +97,7 @@ def test_the_install_hands_itself_to_the_lock_wrapper(bash, tmp_path):
     assert "psql" not in events.read_text().split()
     # Exported, so the wrapper's child goes straight on: unexported, the child wraps itself
     # again and skips against its own parent's exclusive lock (the wrapper does not set it).
-    assert (tmp_path / "held.env").read_text() == "1"
+    assert (tmp_path / "held.env").read_text() == "haf_stats"
 
 
 INSTALLED_VERSION_QUERY = "SELECT git_hash FROM haf_stats_app.app_version LIMIT 1"
@@ -173,6 +173,18 @@ def test_the_rerun_under_the_lock_installs(bash, tmp_path):
     assert "psql" in events.read_text().split()
 
 
+@pytest.mark.parametrize("value", ["1", "balance_tracker", "haf_stats_x"])
+def test_another_apps_held_marker_does_not_skip_the_lock(bash, tmp_path, value):
+    """Six other apps' installers set HAF_INSTALL_LOCK_HELD=1 for their own re-runs: a value
+    left in the environment by one of them must not let this install run without the lock."""
+    events, argv, wrapper = make_install_stubs(tmp_path)
+    r = run_install(bash, tmp_path, wrapper, env_extra={"HAF_INSTALL_LOCK_HELD": value})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert argv.read_text().splitlines()[0] == str(wrapper), "the install skipped the lock wrapper"
+    assert "Installing haf_stats schema" not in r.stdout
+    assert (tmp_path / "held.env").read_text() == "haf_stats"
+
+
 def test_without_the_wrapper_it_installs_unlocked_and_says_so(bash, tmp_path):
     events, argv, wrapper = make_install_stubs(tmp_path, wrapper=False)
     r = run_install(bash, tmp_path, wrapper)
@@ -206,6 +218,28 @@ def test_the_driver_holds_the_shared_lock(bash, tmp_path):
     r = run_process(bash, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "--lock=haf_stats" in driver.read_text().split()
+
+
+@pytest.mark.parametrize("ambient", [None, "-c statement_timeout=0"])
+def test_the_drivers_connection_notices_a_dead_client_on_14(bash, tmp_path, ambient):
+    """A SIGKILLed driver's backend busy in a range must not keep the lock until the range
+    ends: the same client_connection_check_interval as db/legacy_loop_lock.sql, through libpq,
+    added to whatever PGOPTIONS the container already carries."""
+    make_psql_with_registry(tmp_path, server_14=True)
+    make_driver(tmp_path)
+    r = run_process(bash, tmp_path, env_extra={"PGOPTIONS": ambient} if ambient else None)
+    assert r.returncode == 0, r.stderr
+    expected = "-c client_connection_check_interval=10s"
+    assert (tmp_path / "driver.env").read_text() == (f"{ambient} {expected}" if ambient else expected)
+
+
+def test_the_drivers_connection_check_is_left_off_before_14(bash, tmp_path):
+    """PostgreSQL 13 refuses a connection that sets a parameter it does not have."""
+    make_psql_with_registry(tmp_path, server_14=False)
+    make_driver(tmp_path)
+    r = run_process(bash, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "driver.env").read_text() == "unset"
 
 
 def make_psql_recording_each_command(tmp_path):
@@ -251,6 +285,8 @@ def test_the_legacy_lock_file_names_the_lock_and_the_session_check():
     sql = (REPO / "db" / "legacy_loop_lock.sql").read_text(encoding="utf-8")
     assert LOCK_CALL in sql
     assert "client_connection_check_interval" in sql
+    # A top-level SELECT prints its result table into the processor's log.
+    assert not re.search(r"^\s*SELECT\b", sql, re.MULTILINE | re.IGNORECASE), sql
 
 
 # --- an upgrade is never skipped silently ---------------------------------------------

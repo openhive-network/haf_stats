@@ -269,6 +269,13 @@ if command -v haf_app_driver.py >/dev/null 2>&1 \
         log "haf_stats is registered in the HAF application registry; running haf_app_driver.py (massive-sync parallelism ${_haf_stats_parallelism})"
         # --lock: the shared HAF lock install_app.sh tries exclusively (#157), held for the
         # driver's session and re-taken on every reconnect; it waits while an install runs.
+        # The same connection check db/legacy_loop_lock.sql gives the legacy loop's session, for
+        # the same reason (that file says why), here through libpq: the driver takes no
+        # setting of its own. Only where the server has it: PostgreSQL before 14 refuses a
+        # connection that names an unknown parameter. The parallel sync's workers inherit it.
+        if [ "$(psql_cmd -Atq -c "SELECT current_setting('server_version_num')::INT >= 140000" 2>/dev/null || true)" = "t" ]; then
+            export PGOPTIONS="${PGOPTIONS:+${PGOPTIONS} }-c client_connection_check_interval=10s"
+        fi
         exec haf_app_driver.py --app=haf_stats \
             --postgres-url="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?application_name=haf_stats_block_processing" \
             --lock=haf_stats --startup-marker= "${_haf_stats_driver_args[@]}"
