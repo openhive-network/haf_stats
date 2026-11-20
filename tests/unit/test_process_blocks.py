@@ -40,7 +40,7 @@ def bash():
     return require_bash()
 
 
-def make_psql(tmp_path) -> Path:
+def make_psql(tmp_path: Path) -> Path:
     """A stub psql: answers `SELECT now()`, records every -c, and never blocks."""
     stub_bin(tmp_path)
     logfile = tmp_path / "sql.log"
@@ -62,7 +62,7 @@ def make_psql(tmp_path) -> Path:
     return logfile
 
 
-def run(bash, tmp_path, *args: str, startup_file: Path | None = None, env_extra=None):
+def run(bash, tmp_path: Path, *args: str, startup_file: Path | None = None, env_extra=None):
     env = clean_env(stub_bin(tmp_path))
     if startup_file is not None:
         env["HAF_STATS_STARTUP_TIME_FILE"] = str(startup_file)
@@ -76,7 +76,7 @@ def run(bash, tmp_path, *args: str, startup_file: Path | None = None, env_extra=
 
 # --- the startup timestamp --------------------------------------------------------
 
-def test_writes_the_startup_timestamp(bash, tmp_path):
+def test_writes_the_startup_timestamp(bash, tmp_path: Path) -> None:
     """Without it the healthcheck reports "block processing hasn't started yet" for the
     life of the container."""
     make_psql(tmp_path)
@@ -86,7 +86,7 @@ def test_writes_the_startup_timestamp(bash, tmp_path):
     assert startup.read_text().strip() == STUB_NOW
 
 
-def test_the_timestamp_comes_from_the_database_not_the_container(bash, tmp_path):
+def test_the_timestamp_comes_from_the_database_not_the_container(bash, tmp_path: Path) -> None:
     """Two reasons, and the first is a correctness one.
 
     last_active_at is `timestamp without time zone`, written by HAF in the SERVER's
@@ -106,7 +106,7 @@ def test_the_timestamp_comes_from_the_database_not_the_container(bash, tmp_path)
     assert "SELECT now()::timestamp" in log.read_text()
 
 
-def test_no_gnu_only_date_invocation_survives_in_the_script(bash, tmp_path):
+def test_no_gnu_only_date_invocation_survives_in_the_script(bash, tmp_path: Path) -> None:
     """Pinned by name. The image is Alpine, so `date` is BusyBox: it has `-I[SPEC]` but
     no `--iso-8601`, and no `--utc`. Reintroducing either kills the container on line
     one, and no other test in this repo would notice."""
@@ -117,7 +117,7 @@ def test_no_gnu_only_date_invocation_survives_in_the_script(bash, tmp_path):
     assert not any("--utc" in line for line in code)
 
 
-def test_the_writer_and_the_reader_agree_on_the_default_path(bash, tmp_path):
+def test_the_writer_and_the_reader_agree_on_the_default_path(bash, tmp_path: Path) -> None:
     """They are two files that must name the same location. If they drift, the check
     reports "hasn't started yet" forever and nothing else fails."""
     default = "/tmp/block_processing_startup_time.txt"
@@ -127,7 +127,7 @@ def test_the_writer_and_the_reader_agree_on_the_default_path(bash, tmp_path):
     assert writer.group(1) == reader.group(1) == default
 
 
-def test_the_timestamp_is_written_after_the_database_is_reachable(bash, tmp_path):
+def test_the_timestamp_is_written_after_the_database_is_reachable(bash, tmp_path: Path) -> None:
     """It is read from the database now, so it cannot precede wait_for_postgres. That
     also sharpens what the file's absence means: not "the container started" but
     "block processing has not begun"."""
@@ -138,7 +138,7 @@ def test_the_timestamp_is_written_after_the_database_is_reachable(bash, tmp_path
 
 # --- the loop ---------------------------------------------------------------------
 
-def test_calls_main_with_the_context_name_not_the_schema_name(bash, tmp_path):
+def test_calls_main_with_the_context_name_not_the_schema_name(bash, tmp_path: Path) -> None:
     """haf_stats is the context; haf_stats_app is the schema. main() takes the context."""
     log = make_psql(tmp_path)
     run(bash, tmp_path, startup_file=tmp_path / "startup.txt")
@@ -147,7 +147,7 @@ def test_calls_main_with_the_context_name_not_the_schema_name(bash, tmp_path):
 
 # --- option handling --------------------------------------------------------------
 
-def test_host_flag_reaches_the_connection(bash, tmp_path):
+def test_host_flag_reaches_the_connection(bash, tmp_path: Path) -> None:
     """Asserted on psql's argv, not on wait_for_postgres's log line.
 
     The log line is built from the option loop's own variables, so it stays correct
@@ -162,7 +162,7 @@ def test_host_flag_reaches_the_connection(bash, tmp_path):
     assert "-p 6543" in argv
 
 
-def test_user_flag_reaches_the_connection(bash, tmp_path):
+def test_user_flag_reaches_the_connection(bash, tmp_path: Path) -> None:
     """--user could be parsed and then discarded with no test noticing, while --help
     still advertised it — the silent-discard failure this MR calls a bug elsewhere."""
     make_psql(tmp_path)
@@ -170,21 +170,21 @@ def test_user_flag_reaches_the_connection(bash, tmp_path):
     assert "-U someone_else" in (tmp_path / "argv.log").read_text()
 
 
-def test_an_unknown_option_is_rejected(bash, tmp_path):
+def test_an_unknown_option_is_rejected(bash, tmp_path: Path) -> None:
     make_psql(tmp_path)
     r = run(bash, tmp_path, "--nope", startup_file=tmp_path / "startup.txt")
     assert r.returncode == 2
     assert "is not a valid option" in r.stdout
 
 
-def test_help_exits_zero_and_lists_the_flags(bash, tmp_path):
+def test_help_exits_zero_and_lists_the_flags(bash, tmp_path: Path) -> None:
     r = run(bash, tmp_path, "--help")
     assert r.returncode == 0
     for flag in ("--host", "--port", "--user", "--help"):
         assert flag in r.stdout
 
 
-def test_the_startup_query_asks_for_a_bare_value(bash, tmp_path):
+def test_the_startup_query_asks_for_a_bare_value(bash, tmp_path: Path) -> None:
     """-At on the startup query. Without it real psql writes a header and "(1 row)" into
     the file, `:'startup_time'::timestamp` becomes a cast error, and the container is
     permanently unhealthy -- while a stub that ignores flags reports everything fine."""
@@ -194,7 +194,7 @@ def test_the_startup_query_asks_for_a_bare_value(bash, tmp_path):
     assert "-Atq" in argv or "-At" in argv
 
 
-def test_the_startup_file_is_written_before_the_loop_starts(bash, tmp_path):
+def test_the_startup_file_is_written_before_the_loop_starts(bash, tmp_path: Path) -> None:
     """main() never returns in production, so a write placed after the CALL would never
     happen and the healthcheck would report "hasn't started yet" for the life of the
     container. Ordering asserted against the SQL log, not against two log lines that
@@ -206,7 +206,7 @@ def test_the_startup_file_is_written_before_the_loop_starts(bash, tmp_path):
     assert sql.index("SELECT now()::timestamp") < sql.index("CALL haf_stats_app.main")
 
 
-def test_the_startup_write_is_atomic(bash, tmp_path):
+def test_the_startup_write_is_atomic(bash, tmp_path: Path) -> None:
     """A plain `psql > file` truncates before psql runs, so a psql that fails after
     pg_isready succeeded leaves a zero-byte file that passes an existence check. The
     write goes to a temp file and is moved into place."""
@@ -220,13 +220,13 @@ def test_the_startup_write_is_atomic(bash, tmp_path):
 
 # --- per-invocation flags, and the atomic startup write (round three) ---------------
 
-def _argv_lines(tmp_path) -> list:
+def _argv_lines(tmp_path: Path) -> list:
     """One psql invocation per entry, so a flag cannot be asserted on the wrong call."""
     log = tmp_path / "argv.log"
     return [ln for ln in log.read_text().split("\n") if ln.strip()] if log.exists() else []
 
 
-def test_the_startup_query_alone_carries_the_bare_value_flag(bash, tmp_path):
+def test_the_startup_query_alone_carries_the_bare_value_flag(bash, tmp_path: Path) -> None:
     """-Atq was asserted by grepping the WHOLE argv log, so MOVING it from the startup
     query to the CALL kept the suite green. The startup file then gets a header and
     `(1 row)`, `:'startup_time'::timestamp` raises on the reader side, and the container
@@ -239,7 +239,7 @@ def test_the_startup_query_alone_carries_the_bare_value_flag(bash, tmp_path):
         assert "-Atq" in line, f"the startup query must ask for a bare value: {line}"
 
 
-def test_a_failed_startup_query_leaves_no_truncated_file(bash, tmp_path):
+def test_a_failed_startup_query_leaves_no_truncated_file(bash, tmp_path: Path) -> None:
     """Behavioural, because the source-grep version passes against a no-op `mv`.
 
     Redirecting straight at the destination truncates it before psql runs, so a psql
@@ -273,7 +273,7 @@ def test_a_failed_startup_query_leaves_no_truncated_file(bash, tmp_path):
 PROCEDURE_RESOLVES = "to_regprocedure(process_procedure || '( hive.blocks_range )') IS NOT NULL"
 
 
-def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_fails=False,
+def make_psql_with_registry(tmp_path: Path, *, has_table=True, registered=True, probe_fails=False,
                             procedure_dropped=False, server_14=False):
     """A stub psql that also answers the two registry-probe queries.
 
@@ -312,7 +312,7 @@ def make_psql_with_registry(tmp_path, *, has_table=True, registered=True, probe_
     return logfile, appnames
 
 
-def make_driver(tmp_path):
+def make_driver(tmp_path: Path):
     """A stub haf_app_driver.py that records its argv instead of running, and its PGOPTIONS
     in driver.env."""
     stub_bin(tmp_path)
@@ -325,7 +325,7 @@ def make_driver(tmp_path):
     return argv
 
 
-def test_a_registry_less_haf_does_not_get_the_driver(bash, tmp_path):
+def test_a_registry_less_haf_does_not_get_the_driver(bash, tmp_path: Path) -> None:
     """THE crash-loop case. The driver is on PATH -- it always is, from psql:14-3 on --
     but this HAF predates haf#341, so hafd.applications does not exist. Exec'ing the
     driver here means it exits before its first range as PID 1."""
@@ -338,7 +338,7 @@ def test_a_registry_less_haf_does_not_get_the_driver(bash, tmp_path):
     assert "CALL haf_stats_app.main" in sql.read_text(encoding="utf-8")
 
 
-def test_a_registered_app_gets_the_driver_and_not_the_legacy_loop(bash, tmp_path):
+def test_a_registered_app_gets_the_driver_and_not_the_legacy_loop(bash, tmp_path: Path) -> None:
     sql, _ = make_psql_with_registry(tmp_path)
     driver = make_driver(tmp_path)
     result = run(bash, tmp_path, startup_file=tmp_path / "startup.txt")
@@ -362,7 +362,7 @@ def test_a_registered_app_gets_the_driver_and_not_the_legacy_loop(bash, tmp_path
     assert "CALL haf_stats_app.main" not in sql.read_text(encoding="utf-8")
 
 
-def test_a_row_without_an_entry_procedure_is_not_enough(bash, tmp_path):
+def test_a_row_without_an_entry_procedure_is_not_enough(bash, tmp_path: Path) -> None:
     """haf_app_driver.py has two fatal pre-first-range exits, not one: unregistered, and
     registered-but-self-driven. The probe asks for process_procedure IS NOT NULL so the
     second is not mistaken for a usable registration."""
@@ -375,7 +375,7 @@ def test_a_row_without_an_entry_procedure_is_not_enough(bash, tmp_path):
     assert "CALL haf_stats_app.main" in sql.read_text(encoding="utf-8")
 
 
-def test_a_row_whose_procedure_was_dropped_is_not_enough(bash, tmp_path):
+def test_a_row_whose_procedure_was_dropped_is_not_enough(bash, tmp_path: Path) -> None:
     """#97. An uninstall whose context removal failed still drops haf_stats_app, and no FK
     takes the hafd.applications row with it. The row then says "registered, with an entry
     procedure" about a procedure that no longer exists, and the driver's first call to it
@@ -400,7 +400,7 @@ EXPECTED_REGISTRY_PROBE = (
 )
 
 
-def test_the_registry_probe_is_exactly_the_question_the_driver_needs(bash, tmp_path):
+def test_the_registry_probe_is_exactly_the_question_the_driver_needs(bash, tmp_path: Path) -> None:
     sql, _ = make_psql_with_registry(tmp_path)
     make_driver(tmp_path)
     run(bash, tmp_path, startup_file=tmp_path / "startup.txt")
@@ -410,7 +410,7 @@ def test_the_registry_probe_is_exactly_the_question_the_driver_needs(bash, tmp_p
     assert probes == [EXPECTED_REGISTRY_PROBE]
 
 
-def test_a_probe_that_errors_falls_back(bash, tmp_path):
+def test_a_probe_that_errors_falls_back(bash, tmp_path: Path) -> None:
     """Every psql failure in the probe is swallowed, so an ERRORING probe must not be read
     as a usable registry.
 
@@ -428,7 +428,7 @@ def test_a_probe_that_errors_falls_back(bash, tmp_path):
 
 
 @pytest.mark.parametrize("spelling", ["true", "TRUE", "True", "1", "yes", "on"])
-def test_the_legacy_override_wins_over_a_live_registry(bash, tmp_path, spelling):
+def test_the_legacy_override_wins_over_a_live_registry(bash, tmp_path: Path, spelling) -> None:
     """A typo must fail toward the loop the operator asked for, not silently back to the
     driver -- the convention install_app.sh states for its own flags."""
     sql, _ = make_psql_with_registry(tmp_path)
@@ -440,7 +440,7 @@ def test_the_legacy_override_wins_over_a_live_registry(bash, tmp_path, spelling)
     assert "CALL haf_stats_app.main" in sql.read_text(encoding="utf-8")
 
 
-def test_the_legacy_loop_tags_its_session_for_the_rebuild_guard(bash, tmp_path):
+def test_the_legacy_loop_tags_its_session_for_the_rebuild_guard(bash, tmp_path: Path) -> None:
     """scripts/rebuild_*.sh refuse to TRUNCATE while a processor is connected, and find it
     by application_name. The driver sets that through its connection URI; the legacy loop
     has to set it here or it is matched by query text alone."""
