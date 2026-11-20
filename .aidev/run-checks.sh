@@ -362,10 +362,17 @@ stage_sources() {
         "${hash:-unspecified}" > "$stage/db/version.sql"
 }
 
+# PATH with /opt/venv off it, as in the app image: install_app.sh runs
+# install_with_app_lock.py with python3, which needs the system interpreter's psycopg2.
+app_path() {
+    local path=":$PATH:"
+    path="${path//:\/opt\/venv\/bin:/:}"; path="${path#:}"; echo "${path%:}"
+}
+
 # As the consumer: the roles are the shared HAF's, and db/builtin_roles.sql leaves
 # them as it finds them when they already hold what it would set.
 clone_install() {
-    (cd "$stage" && POSTGRES_HOST="$AIDEV_EXTERNAL_HAF_HOST" POSTGRES_PORT="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
+    (cd "$stage" && PATH="$(app_path)" POSTGRES_HOST="$AIDEV_EXTERNAL_HAF_HOST" POSTGRES_PORT="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
         POSTGRES_USER=haf_shared_consumer POSTGRES_DB="$clone" bash scripts/install_app.sh)
 }
 
@@ -414,7 +421,7 @@ sync_blocks() {
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
         --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \
         --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds" || return 1
-    bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
+    PATH="$(app_path)" bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
         "$EQUALITY_STOP_AT_BLOCK" "$EQUALITY_FAIL_BLOCK"
 }
 
