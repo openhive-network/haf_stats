@@ -16,33 +16,33 @@ from validate_response import _check_default_window_first_bucket, _check_rows_pr
 pytestmark = pytest.mark.synthetic
 
 
-def test_present_subset_in_order_passes():
+def test_present_subset_in_order_passes() -> None:
     _check_rows_present(
         [{"a": 1}, {"a": 2}, {"a": 3}],
         [{"a": 1}, {"a": 3}],
     )
 
 
-def test_missing_row_fails():
+def test_missing_row_fails() -> None:
     with pytest.raises(AssertionError, match="not found"):
         _check_rows_present([{"a": 1}], [{"a": 2}])
 
 
-def test_out_of_order_fails_when_ordered():
+def test_out_of_order_fails_when_ordered() -> None:
     with pytest.raises(AssertionError, match="out of order"):
         _check_rows_present([{"a": 2}, {"a": 1}], [{"a": 1}, {"a": 2}])
 
 
-def test_out_of_order_allowed_when_unordered():
+def test_out_of_order_allowed_when_unordered() -> None:
     _check_rows_present([{"a": 2}, {"a": 1}], [{"a": 1}, {"a": 2}], ordered=False)
 
 
-def test_dict_equality_is_key_order_insensitive():
+def test_dict_equality_is_key_order_insensitive() -> None:
     # PostgREST may serialise object keys in any order; dict equality must still match.
     _check_rows_present([{"a": 1, "b": 2}], [{"b": 2, "a": 1}])
 
 
-def test_non_list_response_fails():
+def test_non_list_response_fails() -> None:
     with pytest.raises(AssertionError, match="Expected a JSON array"):
         _check_rows_present({"not": "a list"}, [{"a": 1}])
 
