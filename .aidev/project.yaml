@@ -77,12 +77,25 @@ sandbox:
 # jobs are not bound; see .aidev/README.md.
 #
 # `full` and `canary` declare their walls: without one the 900s default applies, and
-# the synced lane alone is over 1000s. Recorded by hand on 2026-10-25 against the
-# shared HAF: full's steps 963s (sync 662s, regression 267s, the other twelve 34s),
-# and the synced lane on its own 1023s (sync 745s, regression 272s). full's 1800s is
-# about 1.9x that run, room for the host-load swing of the sync, inside its 2100s
-# activity ceiling; canary's 1500s is its cap (the deploy timeout less its 300s
-# reserve), about 1.5x.
+# the synced lane alone is over 1000s. Measured from the gate artefacts of 2026-11-20
+# against the shared HAF, before the sync step ran tests/ci_parallel_sync_equality.sh
+# alongside its own sync rather than after it:
+#   - #158, passing (steem-18): steps 1336s, wall 22m46s. sync 870s (block processing
+#     261s, then the equality: its three clones and installs 110s, its single,
+#     parallel and serial syncs 128s, 120s, 126s), regression 341s, reinstall 52s,
+#     the other eleven 73s.
+#   - #159, killed at 3600s in the equality on both attempts (steem-9, steem-5): block
+#     processing 1437s and 1488s, the equality's clones and installs 660-700s, its
+#     single sync 539s and 522s, its parallel sync 774s on steem-9; pattern, regression
+#     and reinstall never started. The worker hosts were idle; the shared HAF answered
+#     slower: the driver's untimed gap between batches went from a 0.20s median (#158)
+#     to 1.05s (0.65-4.2s), its timed batches about 2x.
+# Run alongside, the equality's wall (its legs at once: the installs, then the longest
+# sync) hides under the 5M-block sync's: on #158's numbers the sync step is about 330s
+# and full about 810s; on #159's about 1550s and, with regression and reinstall slowed
+# alike (unmeasured there), under the wall. full's 3600s is the largest the key takes,
+# about 4.4x #158's run; canary's 1500s is its cap (the deploy timeout less its 300s
+# reserve), and the canary lane runs the same steps.
 #
 # A failing test is reported under its own id (unit.xml, pattern.xml, regression.xml,
 # reinstall.xml, the lanes' per-service and tavern reports), its step's own case then
@@ -118,7 +131,7 @@ verification:
     adapter: command
     args: [".aidev/run-checks.sh", "full", "shellcheck", "ci-shell-lint", "unit", "sql-lint", "hadolint", "compose-validate", "openapi-drift", "stack-pins", "endpoint", "install", "sync", "pattern", "regression", "reinstall"]
     artifacts: ["test-results/full/"]
-    timeout: 1800
+    timeout: 3600
     honor_quarantine: true
     rerun: *stats_rerun
   baseline:

@@ -105,6 +105,11 @@ Where it differs from CI:
 - the block processing runs `haf_app_driver.py` as `haf_stats_owner` with
   `--stop-at-block=5000000`, not the `haf-stats-process` container; the
   block-processing healthcheck and the rewriter request in CI's `sync` are not run;
+- `tests/ci_parallel_sync_equality.sh` starts with the `sync` step and runs while the
+  lane's own clone is installed and synced, on its own three clones, rather than after
+  the sync as in CI's job; its blocks (1..3,000,000, failure at 2,500,000's day) are
+  CI's. Its output is `parallel-equality.log`, printed into `sync.log` at the step's
+  end;
 - PostgREST logs in as the consumer, not `haf_stats_owner`, and switches to the same
   anon role;
 - `reinstall` compares a catalog snapshot (`.aidev/schema_snapshot.sql`), not

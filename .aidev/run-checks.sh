@@ -54,12 +54,13 @@
 #                     tests/ci_daily_retention_equality.sql (.gitlab-ci.yml's sync job
 #                     runs the same four steps; keep them in step); then
 #                     scripts/processor_timings_report.py over both logs:
-#                     processor-timings.json and its table; then
-#                     tests/ci_parallel_sync_equality.sh, on three clones of its own:
-#                     blocks 1..3,000,000 synced at parallelism 1, and at 4 through an
-#                     injected group failure and a partly applied batch then resumed at 4
-#                     (after an emulated crash) and at 1, give identical tables (parallel-equality/; .gitlab-ci.yml's
-#                     sync job runs it too, with the same blocks)
+#                     processor-timings.json and its table. Alongside all of that, from
+#                     the step's start: tests/ci_parallel_sync_equality.sh, on three
+#                     clones of its own: blocks 1..3,000,000 synced at parallelism 1, and
+#                     at 4 through an injected group failure and a partly applied batch
+#                     then resumed at 4 (after an emulated crash) and at 1, give identical
+#                     tables (parallel-equality.log, parallel-equality/; .gitlab-ci.yml's
+#                     sync job runs it too, with the same blocks, after its sync)
 #   - pattern         pattern-test: tavern -m 'not negative and not synthetic' against
 #                     PostgREST over the clone (anon role haf_stats_user); one junit
 #                     case per tavern test, pattern.xml
@@ -385,9 +386,9 @@ current_block() {
 # (db/process_block_range.sql): the INFO lines it adds reach the driver's log only at
 # --server-messages=INFO, and change nothing the processors write. The lines a failed
 # batch leaves are kept in the log too, but no report is made from them.
-sync_blocks() {
+sync_clone() {
     local block t0 seconds deferred_seconds driver_log="$out/sync-driver.log" deferred_log="$out/deferred-refresh.log"
-    stage_sources && open_clone || return 1
+    open_clone || return 1
     # The consumer owns the clone; haf_stats_owner creates its schemas in it.
     cq -c "GRANT CREATE ON DATABASE \"$clone\" TO haf_stats_owner" || return 1
     clone_install || return 1
@@ -420,9 +421,24 @@ sync_blocks() {
     synced=yes
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
         --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \
-        --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds" || return 1
+        --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds"
+}
+
+# The equality syncs clones of its own, so it runs while this run's clone is installed and
+# synced rather than after: the two together are most of the full gate's wall. Its verdict
+# is waited for even when the sync fails, so its clones are dropped before the step ends.
+sync_blocks() {
+    local rc=0 equality_rc=0 equality_pid t0=$SECONDS equality_log="$out/parallel-equality.log"
+    stage_sources || return 1
     PATH="$(app_path)" bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
-        "$EQUALITY_STOP_AT_BLOCK" "$EQUALITY_FAIL_BLOCK"
+        "$EQUALITY_STOP_AT_BLOCK" "$EQUALITY_FAIL_BLOCK" > "$equality_log" 2>&1 &
+    equality_pid=$!
+    sync_clone || rc=$?
+    echo "the sync took $((SECONDS - t0))s; waiting for tests/ci_parallel_sync_equality.sh"
+    wait "$equality_pid" || equality_rc=$?
+    echo "== parallel-equality, exit $equality_rc after $((SECONDS - t0))s ($equality_log):"
+    cat "$equality_log"
+    [ "$rc" -eq 0 ] && [ "$equality_rc" -eq 0 ]
 }
 
 needs_sync() {

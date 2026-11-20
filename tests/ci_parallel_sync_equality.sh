@@ -35,10 +35,11 @@
 #             parallelism 1: the single-session process_block_range skips what the groups
 #             have applied.
 #
-# Then every haf_stats table's checksum (tests/ci_table_checksums.sql) must be the same in
-# each resumed clone as in single, and neither may hold a progress row, or a shared stage marked
-# complete for a range at or before STOP_BLOCK (the range after it may be staged ahead). The
-# clones are dropped on exit.
+# The three run at once, each on its own clone, its output kept in OUT_DIR/<name>.out and
+# printed once all three are done. Then every haf_stats table's checksum
+# (tests/ci_table_checksums.sql) must be the same in each resumed clone as in single, and
+# neither may hold a progress row, or a shared stage marked complete for a range at or before
+# STOP_BLOCK (the range after it may be staged ahead). The clones are dropped on exit.
 set -uo pipefail
 
 haf_url="${1:?haf url}"
@@ -68,7 +69,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# CLONE_NAME: a fresh clone with haf_stats installed; prints the database name.
+# CLONE_NAME VAR: a fresh clone with haf_stats installed, its database name put in VAR. Not
+# called in a command substitution: that subshell's clones+= would never reach cleanup.
 new_clone() {
     local id db
     id="hsp-$1-$(date -u +%Y%m%d%H%M%S)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -84,7 +86,7 @@ new_clone() {
     (cd "$sources" && POSTGRES_HOST="${host_port%:*}" POSTGRES_PORT="${host_port##*:}" \
         POSTGRES_USER="$haf_user" POSTGRES_DB="$db" bash scripts/install_app.sh) > "$out/install-$1.log" 2>&1 \
         || { echo "install into $db failed:"; tail -30 "$out/install-$1.log"; return 1; }
-    echo "$db"
+    printf -v "$2" '%s' "$db"
 }
 
 # DB LOG PARALLELISM: the driver to stop_block; returns its exit status.
@@ -101,18 +103,21 @@ sync_to_stop() {
 
 q() { psql "$haf_url/$1" -X -v ON_ERROR_STOP=on -Atc "$2"; }
 
-single="$(new_clone single)" || exit 1
-parallel="$(new_clone parallel)" || exit 1
-serial="$(new_clone serial)" || exit 1
+single="" parallel="" serial=""
+new_clone single single || exit 1
+new_clone parallel parallel || exit 1
+new_clone serial serial || exit 1
 echo "clones: single=$single parallel=$parallel serial=$serial"
 
-t0=$SECONDS
-sync_to_stop "$single" "$out/single.log" 1 || { echo "the single-session sync failed:"; tail -40 "$out/single.log"; exit 1; }
-echo "single-session sync to $stop_block: $((SECONDS - t0))s"
-psql "$haf_url/$single" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/single.checksums" || exit 1
+sync_single() {
+    local t0=$SECONDS
+    sync_to_stop "$single" "$out/single.log" 1 || { echo "the single-session sync failed:"; tail -40 "$out/single.log"; return 1; }
+    echo "single-session sync to $stop_block: $((SECONDS - t0))s"
+    psql "$haf_url/$single" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/single.checksums"
+}
 
 # NAME DB RESUME_PARALLELISM CRASH: the failure, the partial batch, with CRASH=crash the emulated
-# crash, and the resume, then the checksums against single's.
+# crash, and the resume, then the checksums.
 fail_and_resume() {
     local name="$1" db="$2" resume_parallelism="$3" crash="$4" log="$out/$1.log" t0=$SECONDS
     local fail_day state at rows continuing network context batch_end half left staged
@@ -185,13 +190,24 @@ fail_and_resume() {
     [ "$left" = 0 ] || { echo "FAIL: $name: $left progress rows left after the resumed sync"; return 1; }
     left="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker WHERE first_block <= $stop_block")" || return 1
     [ "$left" = 0 ] || { echo "FAIL: $name: $left shared stages marked complete for a synced range after the resumed sync"; return 1; }
-    psql "$haf_url/$db" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/$name.checksums" || return 1
-    echo "$name: $(wc -l < "$out/$name.checksums") tables compared"
-    if ! diff -u "$out/single.checksums" "$out/$name.checksums"; then
-        echo "FAIL: $name: the resumed sync wrote different table contents"; return 1
-    fi
-    echo "$name: every table is identical"
+    psql "$haf_url/$db" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/$name.checksums"
 }
 
-fail_and_resume parallel "$parallel" 4 crash || exit 1
-fail_and_resume serial "$serial" 1 keep || exit 1
+# NAME: its checksums against single's.
+compare() {
+    echo "$1: $(wc -l < "$out/$1.checksums") tables compared"
+    if ! diff -u "$out/single.checksums" "$out/$1.checksums"; then
+        echo "FAIL: $1: the resumed sync wrote different table contents"; return 1
+    fi
+    echo "$1: every table is identical"
+}
+
+sync_single > "$out/single.out" 2>&1 & pids=($!)
+fail_and_resume parallel "$parallel" 4 crash > "$out/parallel.out" 2>&1 & pids+=($!)
+fail_and_resume serial "$serial" 1 keep > "$out/serial.out" 2>&1 & pids+=($!)
+rc=0
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+cat "$out/single.out" "$out/parallel.out" "$out/serial.out"
+[ "$rc" = 0 ] || exit 1
+compare parallel || exit 1
+compare serial || exit 1
