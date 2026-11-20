@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import socket
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -150,6 +151,68 @@ def _check_rows_present(actual: Any, expected: Any, ordered: bool = True) -> Non
             "Expected rows are present but out of order relative to the response "
             f"(positions {positions}); the endpoint's ORDER BY is not honoured."
         )
+
+
+def assert_default_window_first_bucket(
+    response: Any,
+    granularity: str,
+    lookback_days: int = 0,
+    lookback_years: int = 0,
+    count_field: str = "votes_cast",
+    **_kwargs: Any,
+) -> None:
+    """Assert a default-window response opens with the whole period holding today minus the lookback.
+
+    For the ``pwindow`` fixture, which has a count of 1 on every day: the first row's ``period``
+    must be the start of the ``granularity`` period that contains today (UTC) minus the lookback,
+    and its ``count_field`` must equal that period's length in days, i.e. the bucket is complete
+    and so does not change from one day to the next.
+    """
+
+    today = datetime.now(timezone.utc).date()
+    _check_default_window_first_bucket(
+        response.json(), today, granularity, lookback_days, lookback_years, count_field
+    )
+
+
+def _check_default_window_first_bucket(
+    actual: Any,
+    today: date,
+    granularity: str,
+    lookback_days: int,
+    lookback_years: int,
+    count_field: str,
+) -> None:
+    """Core check behind :func:`assert_default_window_first_bucket`; raises AssertionError."""
+
+    base = today - timedelta(days=lookback_days)
+    if lookback_years:
+        # PostgreSQL's NOW() - INTERVAL 'N years' clamps Feb 29 to Feb 28.
+        try:
+            base = base.replace(year=base.year - lookback_years)
+        except ValueError:
+            base = base.replace(year=base.year - lookback_years, day=28)
+
+    if granularity == "day":
+        start, days = base, 1
+    elif granularity == "week":
+        start, days = base - timedelta(days=base.weekday()), 7
+    elif granularity == "month":
+        start = base.replace(day=1)
+        days = ((start + timedelta(days=32)).replace(day=1) - start).days
+    else:
+        raise AssertionError(f"unsupported granularity {granularity!r}")
+
+    assert isinstance(actual, list) and actual, f"Expected a non-empty JSON array, got {actual!r}"
+    first = actual[0]
+    assert first.get("period") == start.isoformat(), (
+        f"First bucket is {first.get('period')!r}, want the {granularity} starting "
+        f"{start.isoformat()}:\n{_pretty(first)}"
+    )
+    assert first.get(count_field) == days, (
+        f"First bucket {start.isoformat()} has {count_field}={first.get(count_field)!r}, want "
+        f"{days} (the whole {granularity}):\n{_pretty(first)}"
+    )
 
 
 def assert_head_then_get_framed(response: Any, **_kwargs: Any) -> None:

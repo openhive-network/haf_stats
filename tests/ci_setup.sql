@@ -184,6 +184,8 @@ INSERT INTO hafd.accounts (id, name) VALUES (5001, 'ixtester') ON CONFLICT DO NO
 INSERT INTO hafd.accounts (id, name) VALUES (5002, 'ixalice') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (5003, 'ixbob') ON CONFLICT DO NOTHING;
 INSERT INTO hafd.accounts (id, name) VALUES (5004, 'ixcarol') ON CONFLICT DO NOTHING;
+-- Default-window fixture account for get_account_content_stats / get_account_financial_summary.
+INSERT INTO hafd.accounts (id, name) VALUES (8101, 'pwindow') ON CONFLICT DO NOTHING;
 
 -- Op type names for the get_network_rc_utilization + get_account_rc_footprint synthetic tests
 -- (seeded here, before SET ROLE haf_stats_owner, as the hafd.operation_types stub is not owned
@@ -880,6 +882,25 @@ CREATE TABLE IF NOT EXISTS haf_stats_backend.account_content_daily (
     replies_received INT NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, day)
 );
+
+-- pwindow (#156): one vote cast and one incoming transfer on EVERY day, so a bucket's count is
+-- the number of its days present in the window, and a whole period is told apart from a partial
+-- one by value alone. The days relative to today cover the one-year default plus the month it is
+-- widened back to, with margin; the fixed January-February 2020 days back the explicit mid-month
+-- from_date test.
+INSERT INTO haf_stats_backend.account_content_daily (account_id, day, votes_cast)
+SELECT 8101, d::DATE, 1
+FROM generate_series(CURRENT_DATE - 430, CURRENT_DATE, INTERVAL '1 day') d
+UNION ALL
+SELECT 8101, d::DATE, 1
+FROM generate_series(DATE '2020-01-01', DATE '2020-02-29', INTERVAL '1 day') d
+ON CONFLICT DO NOTHING;
+INSERT INTO haf_stats_backend.account_financial_daily
+    (account_id, day, op_type_id, is_outgoing, hbd_nai, op_count)
+SELECT account_id, day, 2, FALSE, 1000, 1
+FROM haf_stats_backend.account_content_daily
+WHERE account_id = 8101
+ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS haf_stats_backend.comment_registry (
     author_id INT  NOT NULL,

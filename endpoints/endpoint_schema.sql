@@ -389,7 +389,7 @@ info:
   license:
     name: MIT License
     url: https://opensource.org/license/mit
-  version: 2.0.0
+  version: 3.0.0
 externalDocs:
   description: HAF Stats GitLab repository
   url: https://gitlab.syncad.com/hive/haf_stats
@@ -519,7 +519,7 @@ DECLARE
       "name": "MIT License",
       "url": "https://opensource.org/license/mit"
     },
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "externalDocs": {
     "description": "HAF Stats GitLab repository",
@@ -743,7 +743,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account financial summary",
-        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (incoming/outgoing).",
+        "description": "Aggregated HBD/HIVE/VESTS flows for an account over a time range, grouped by financial category and direction (incoming/outgoing). With from_date omitted the range starts on the first day of the period (day, ISO week from Monday, or month) that contains the day one year ago, so every bucket except the last is a whole period. An explicit from_date is used as given: when it falls mid-period, the first bucket covers only from_date to the end of that period. The last bucket is period-to-date, holding only the days up to to_date (today by default).",
         "operationId": "haf_stats_endpoints.get_account_financial_summary",
         "parameters": [
           {
@@ -764,7 +764,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to the start of the period containing the day 1 year ago"
           },
           {
             "in": "query",
@@ -849,7 +849,7 @@ DECLARE
           "Account"
         ],
         "summary": "Account content stats",
-        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates. Post and comment counts reflect content-creation events only (edits excluded): every creation is counted at creation time, including content later deleted or re-created under the same permlink, so figures can slightly exceed Hivemind, which counts only currently-live content. The difference is negligible in practice.",
+        "description": "Per-account posting and engagement summary \u2014 posts, comments, votes cast, votes received, replies received, and author rewards \u2014 aggregated by the chosen granularity. Author reward figures are sourced from the account's financial daily aggregates. Post and comment counts reflect content-creation events only (edits excluded): every creation is counted at creation time, including content later deleted or re-created under the same permlink, so figures can slightly exceed Hivemind, which counts only currently-live content. The difference is negligible in practice. With from_date omitted the range starts on the first day of the period (day, ISO week from Monday, or month) that contains the day 30 days ago, so every bucket except the last is a whole period. An explicit from_date is used as given: when it falls mid-period, the first bucket covers only from_date to the end of that period. The last bucket is period-to-date, holding only the days up to to_date (today by default).",
         "operationId": "haf_stats_endpoints.get_account_content_stats",
         "parameters": [
           {
@@ -870,7 +870,7 @@ DECLARE
               "x-sql-default-value": "NULL",
               "type": "string"
             },
-            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago"
+            "description": "Block number or start date (YYYY-MM-DD), inclusive, defaults to the start of the period containing the day 30 days ago"
           },
           {
             "in": "query",
@@ -3380,6 +3380,12 @@ $$;
     description: >-
       Aggregated HBD/HIVE/VESTS flows for an account over a time range,
       grouped by financial category and direction (incoming/outgoing).
+      With from_date omitted the range starts on the first day of the period
+      (day, ISO week from Monday, or month) that contains the day one year ago,
+      so every bucket except the last is a whole period. An explicit from_date
+      is used as given: when it falls mid-period, the first bucket covers only
+      from_date to the end of that period. The last bucket is period-to-date,
+      holding only the days up to to_date (today by default).
     operationId: haf_stats_endpoints.get_account_financial_summary
     parameters:
       - in: path
@@ -3395,7 +3401,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 1 year ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to the start of the period containing the day 1 year ago
       - in: query
         name: to_date
         required: false
@@ -3459,9 +3465,6 @@ DECLARE
     _from DATE;
     _to DATE;
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '1 year')::DATE);
-    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
-
     -- Wax's extendRest JSON-encodes string query params for custom namespaces,
     -- sending e.g. "month" (%22month%22) instead of month. Strip a surrounding
     -- pair of double quotes so the value passes the enum check below regardless of
@@ -3474,6 +3477,12 @@ BEGIN
             MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
+    -- The default window starts on the boundary of the period holding NOW() - 1 year, so its
+    -- first bucket is a whole period that does not shrink day by day; an explicit from_date is
+    -- taken as given.
+    _from := haf_stats_app.to_filter_date("from_date",
+        DATE_TRUNC("granularity", NOW() - INTERVAL '1 year')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
     -- The table stores the category as its op type id and the direction as is_outgoing; the
     -- response names them as it always has, mapped once per aggregated row, and is ordered by
     -- those names exactly as before.
@@ -3525,6 +3534,12 @@ $$;
       including content later deleted or re-created under the same permlink, so
       figures can slightly exceed Hivemind, which counts only currently-live content.
       The difference is negligible in practice.
+      With from_date omitted the range starts on the first day of the period
+      (day, ISO week from Monday, or month) that contains the day 30 days ago,
+      so every bucket except the last is a whole period. An explicit from_date
+      is used as given: when it falls mid-period, the first bucket covers only
+      from_date to the end of that period. The last bucket is period-to-date,
+      holding only the days up to to_date (today by default).
     operationId: haf_stats_endpoints.get_account_content_stats
     parameters:
       - in: path
@@ -3540,7 +3555,7 @@ $$;
           x-sql-datatype: TEXT
           x-sql-default-value: "NULL"
           type: string
-        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to 30 days ago
+        description: Block number or start date (YYYY-MM-DD), inclusive, defaults to the start of the period containing the day 30 days ago
       - in: query
         name: to_date
         required: false
@@ -3612,9 +3627,6 @@ DECLARE
     _author_reward_id CONSTANT SMALLINT := (
         SELECT id FROM hafd.operation_types WHERE name = 'hive::protocol::author_reward_operation');
 BEGIN
-    _from := haf_stats_app.to_filter_date("from_date", (NOW() - INTERVAL '30 days')::DATE);
-    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
-
     -- Tolerate Wax's JSON-encoded string params (e.g. "month"); see issue #22.
     "granularity" := TRIM('"' FROM "granularity");
     -- IS NULL is required: "NULL NOT IN (...)" evaluates to NULL (not TRUE), so
@@ -3624,6 +3636,10 @@ BEGIN
             MESSAGE = 'invalid granularity: ' || COALESCE("granularity", '(null)'),
             HINT = 'Must be one of: day, week, month';
     END IF;
+    -- As in get_account_financial_summary: the default window starts on a period boundary.
+    _from := haf_stats_app.to_filter_date("from_date",
+        DATE_TRUNC("granularity", NOW() - INTERVAL '30 days')::DATE);
+    _to := haf_stats_app.to_filter_date("to_date", NOW()::DATE);
 
     -- Resolve the account name to its id once, then filter the daily tables on
     -- account_id (their leading index column). Unknown account -> empty result.
