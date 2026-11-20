@@ -120,7 +120,7 @@ services:
         # This processor holds the shared haf_stats lock that the install takes exclusively
         # (#157). A new image recreates both, and compose stops this one first anyway; this
         # covers a change to the setup alone (its environment or command), which would
-        # otherwise find the lock held, skip, and never apply.
+        # otherwise find the lock held, skip, and never apply. Docker Compose v2.17+.
         restart: true
 
   # Removes haf_stats from the database: HAF context, all three schemas (CASCADE), both

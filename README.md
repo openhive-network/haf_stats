@@ -419,14 +419,18 @@ finds the table in an earlier shape -- TEXT `category`/`direction` columns, whic
 vocabulary they hold (issue #26 changed it) -- **drops it and creates it again, empty**,
 and says so with a warning: no row is converted. Until it is repopulated the financial
 endpoints, author rewards in `get_account_content_stats` and the bounded-range reward and
-transfer leaderboards report nothing for history. Stop the block processor first, run
-`install_app.sh` (with the processor up it skips; see [Install lock](#install-lock)), then,
-with the processor still stopped -- on a compose stack, `docker compose up -d` installs and
-starts `haf-stats-process` again straight away, so stop it once more:
+transfer leaderboards report nothing for history. To repopulate it, with the block processor
+stopped throughout (with it up the install skips; see [Install lock](#install-lock)):
 
 ```bash
+docker compose stop haf-stats-process
+docker compose run --rm haf-stats-setup      # the install; `up -d` would start the processor again
 ./scripts/rebuild_financial.sh
+docker compose start haf-stats-process
 ```
+
+Outside compose, the same steps are: stop the processor, run `./scripts/install_app.sh`, run
+`./scripts/rebuild_financial.sh`, start the processor.
 
 `FROM_BLOCK`, `TO_BLOCK`, and `BATCH_SIZE` may be supplied as environment
 variables. By default `TO_BLOCK` is the app's recorded `last_processed_block`,
@@ -1118,7 +1122,12 @@ haf_stats is running".)
 A plain `docker compose up -d` with an unchanged image reruns `haf-stats-setup` without
 restarting the processor, so that rerun skips; only a changed (recreated) setup makes compose
 stop the processor first. That is compose's `depends_on: restart: true`, measured on compose
-v5.1.3 for hive/haf_api_node!296.
+v5.1.3 for hive/haf_api_node!296; it needs **Docker Compose v2.17 or newer**. Without it nothing stops the
+processor for a recreated setup, so the setup-only changes below skip.
+
+`docker compose restart haf-stats-setup` (on hive/haf_api_node, `restart haf-stats-install`)
+reruns the install under the running processor, too: it skips with exit 0, or fails on an
+upgrade (below).
 
 So every recipe here that says "stop the block processor first" means it: an install run
 with the processor up does nothing.
@@ -1132,9 +1141,9 @@ with the processor up does nothing.
   does not start the new processor on the old schema.
 
 The wait is for the old processor's backend, which can hold the lock for a while after compose
-stops its container: the legacy loop's until its next connection check (up to 10 s), the
-driver's until it finishes the range it is in, and a parallel sync's worker connections' until
-their next connection check (up to 10 s). Rerunning the same version still skips with
+stops its container: until its next connection check (up to 10 s) on PostgreSQL 14+, for the
+legacy loop, the driver and a parallel sync's worker connections alike; on an older server, the
+driver's until it finishes the range it is in. Rerunning the same version still skips with
 exit 0, since there is nothing to apply. An image built without a usable `GIT_HASH`
 (`unspecified`) cannot tell an upgrade from a rerun and keeps the plain skip.
 
@@ -1148,9 +1157,8 @@ image recreates both, and compose stops the old processor before it runs the new
 `restart: true` (on `haf-stats-process` here) covers what recreates the setup alone -- a
 change to its own environment or command -- which would otherwise find the lock held and skip.
 `up -d haf-stats-setup` alone never stops the processor, and skips (or, with a new image,
-fails; see below). hive/haf_api_node's
-`haf-stats-block-processing` wants the same `restart: true` on `haf-stats-install`, for the same
-setup-only changes. Any other holder of the lock — a PostgREST holding it while the API serves,
+fails; see below). hive/haf_api_node's `haf-stats-block-processing` has the same
+`restart: true` on `haf-stats-install` (hive/haf_api_node!299). Any other holder of the lock — a PostgREST holding it while the API serves,
 as hive/haf_api_node!296 proposes — has to be stopped too.
 
 **The wrapper's own check.** A psql base image with the wrapper from
@@ -1177,8 +1185,8 @@ neither there.
 If an install keeps skipping with no processor running, a leftover session still holds the
 lock; its holder is named in the skip line, and `pg_stat_activity` shows it by that
 `application_name`. A leftover worker connection of the parallel sync carries the processor's
-name (`haf_stats_block_processing`), even with no processor running. The legacy loop and the
-parallel sync's worker connections set
+name (`haf_stats_block_processing`), even with no processor running. The legacy loop, the
+driver and the parallel sync's worker connections set
 `client_connection_check_interval`, so their backends end within seconds of a killed container
 on PostgreSQL 14+; anything else can be ended with
 `SELECT pg_terminate_backend(<pid>)`.
