@@ -43,7 +43,18 @@ heading to the new version and sets `info.version` in the YAML block of
 regenerates the embedded JSON). `tests/unit/test_api_version.py` fails when the
 newest released heading here and `info.version` disagree.
 
-## Unreleased
+## 3.0.0
+
+### Breaking
+
+* With no `from_date`, `GET /account/{account}/content-stats` and `GET
+  /account/{account}/financial-summary` now start on the first day of the period
+  (`granularity` day, ISO week or month) that contains the day 30 days ago and one
+  year ago respectively, instead of on that day itself. The first bucket is therefore
+  a whole period whose values no longer shrink day by day: on 2026-11-12 the default
+  content-stats window starts at 2026-10-01 rather than 2026-10-13, so the October row
+  is the full month. With `granularity=day` the default is unchanged, and an explicit
+  `from_date` is still used as given (#156).
 
 ### Corrected
 
