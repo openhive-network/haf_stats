@@ -431,14 +431,18 @@ def test_parallelism_one_is_the_single_session_path_even_in_massive_sync() -> No
 
 
 def test_every_worker_connection_takes_the_session_lock_once_before_its_first_round_trip() -> None:
-    db = FakeDb()
+    # The groups wait until all five are running together, so five worker connections are open
+    # at once; the second batch reuses them.
+    db = FakeDb(barrier=threading.Barrier(len(GROUPS), timeout=10))
     driver = driver_conn(db)
-    c = coordinator(db)
+    c = coordinator(db, parallelism=len(GROUPS))
     c.process(driver, 101, 10100)
     c.process(driver, 10101, 20100)
 
     workers = sorted({n for n, _ in db.log if n != "driver"})
-    assert len(workers) == db.opened > 1
+    assert len(workers) == db.opened >= len(GROUPS)
+    assert db.log.count(("driver", "finish 10101..20100")) == 1
+    assert sum(e == "round trip" for _, e in db.log) > db.opened, "no worker connection was reused"
     for w in workers:
         events = [e for n, e in db.log if n == w]
         assert events[0] == "session lock", f"{w} ran {events[0]!r} before taking HAF's lock"
