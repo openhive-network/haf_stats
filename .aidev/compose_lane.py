@@ -16,7 +16,9 @@ project adds to its CI lane runs here too), and runs each one as a local process
   - an app-image service (`image: ${HAF_STATS_IMAGE...}`) runs
     docker/docker_entrypoint.sh with its command, as the app image's ENTRYPOINT does,
     over /app (the runtime image's /app -> /tmp/aidev-app) holding the db/,
-    endpoints/ and scripts/ it mounts (the tree's own when it mounts none), with
+    endpoints/ and scripts/ it mounts (the tree's own when it mounts none; the tree's
+    db/ with the db/version.sql the Dockerfile bakes from GIT_HASH, here HEAD's short
+    hash, which a mounted db/ hides as it does in CI), with
     /opt/venv off PATH: its python3 is the system one with psycopg2, as the app
     image's is (common-ci-configuration/psql has no venv).
   - `postgrest` runs the postgrest binary with the service's environment.
@@ -269,13 +271,28 @@ class Lane:
         self.services = {n: Service(n, s, self) for n, s in specs.items() if n not in STACK_SERVICES}
         if wait not in self.services:
             raise SystemExit(f"{compose}: no service {wait!r}")
+        self._image_db: Path | None = None
+
+    def image_db(self) -> Path:
+        """The image's /app/db: the tree's db/ and the version.sql the Dockerfile writes."""
+        if self._image_db is None:
+            db = Path(tempfile.mkdtemp(prefix="lane-image-")) / "db"
+            shutil.copytree(self.root / "db", db, symlinks=True)
+            head = subprocess.run(["git", "rev-parse", "--short=8", "HEAD"], cwd=self.root,
+                                  capture_output=True, text=True).stdout.strip()
+            version = head if re.fullmatch(r"[A-Za-z0-9._-]+", head) else "unspecified"
+            (db / "version.sql").write_text(
+                "TRUNCATE haf_stats_app.app_version; "
+                f"INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('{version}');\n")
+            self._image_db = db
+        return self._image_db
 
     def point_app(self, svc: Service) -> None:
         """/app for this service: the db/, endpoints/, scripts/ it mounts, else the tree's."""
         app = svc.workdir / "app"
         app.mkdir(exist_ok=True)
-        for sub in ("db", "endpoints"):
-            (app / sub).symlink_to(svc.mounts.get(f"/app/{sub}", self.root / sub))
+        (app / "db").symlink_to(svc.mounts.get("/app/db") or self.image_db())
+        (app / "endpoints").symlink_to(svc.mounts.get("/app/endpoints", self.root / "endpoints"))
         # The Dockerfile copies scripts/ and the entrypoints with --chmod=755.
         shutil.copytree(svc.mounts.get("/app/scripts", self.root / "scripts"), app / "scripts", symlinks=True)
         for name in ("docker_entrypoint.sh", "block-processing-healthcheck.sh", "block-processing-healthcheck.sql"):
