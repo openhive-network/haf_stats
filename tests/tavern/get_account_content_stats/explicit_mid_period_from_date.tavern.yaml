@@ -1,0 +1,42 @@
+---
+test_name: Account content stats keeps an explicit mid-month from_date as given (issue #156)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# Only the default window is aligned to a period start. pwindow has one vote cast on every day
+# of January-February 2020, so January from the 15th holds 17 days and February all 29.
+stages:
+  - name: GET /rpc/get_account_content_stats for pwindow from 2020-01-15
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "pwindow"
+        from_date: "2020-01-15"
+        to_date: "2020-02-29"
+        granularity: "month"
+    response:
+      status_code: 200
+      json:
+        - period: "2020-01-01"
+          posts: 0
+          comments: 0
+          votes_cast: 17
+          votes_received: 0
+          replies_received: 0
+          author_reward_hive_nai: 0
+          author_reward_hbd_nai: 0
+          author_reward_vests_nai: 0
+        - period: "2020-02-01"
+          posts: 0
+          comments: 0
+          votes_cast: 29
+          votes_received: 0
+          replies_received: 0
+          author_reward_hive_nai: 0
+          author_reward_hbd_nai: 0
+          author_reward_vests_nai: 0

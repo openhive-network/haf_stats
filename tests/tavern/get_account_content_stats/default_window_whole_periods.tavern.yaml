@@ -1,0 +1,60 @@
+---
+test_name: Account content stats with no from_date opens on a whole period (issue #156)
+
+marks:
+  - synthetic
+
+includes:
+  - !include ../common.yaml
+
+# The pwindow fixture has a count of 1 on every day around today, so a first bucket that is a
+# whole period carries its length in days. Before #156 the default window started 30 days ago
+# to the day, and the first week or month bucket held only the days from there on, one fewer
+# each day.
+stages:
+  - name: GET /rpc/get_account_content_stats for pwindow, the default granularity (month)
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "pwindow"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:assert_default_window_first_bucket
+        extra_kwargs:
+          granularity: "month"
+          lookback_days: 30
+          count_field: "votes_cast"
+
+  - name: GET /rpc/get_account_content_stats for pwindow, granularity=week
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "pwindow"
+        granularity: "week"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:assert_default_window_first_bucket
+        extra_kwargs:
+          granularity: "week"
+          lookback_days: 30
+          count_field: "votes_cast"
+
+  - name: GET /rpc/get_account_content_stats for pwindow, granularity=day
+    request:
+      url: "{api_url}/rpc/get_account_content_stats"
+      method: GET
+      params:
+        account: "pwindow"
+        granularity: "day"
+    response:
+      status_code: 200
+      verify_response_with:
+        function: validate_response:assert_default_window_first_bucket
+        extra_kwargs:
+          granularity: "day"
+          lookback_days: 30
+          count_field: "votes_cast"
