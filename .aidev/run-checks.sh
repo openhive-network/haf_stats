@@ -131,6 +131,9 @@ else
 fi
 cases="$out/cases.tsv"; : > "$cases"
 py=/opt/venv/bin/python3
+# PATH as the app image has it, without /opt/venv: scripts/install_app.sh runs the psql base
+# image's install_with_app_lock.py with `python3`, which must be the system one (psycopg2).
+app_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx /opt/venv/bin | paste -sd:)"
 
 STOP_AT_BLOCK=5000000
 # The synced lane's massive sync runs on the parallel path (scripts/haf_stats_parallel.py).
@@ -366,7 +369,7 @@ stage_sources() {
 # them as it finds them when they already hold what it would set.
 clone_install() {
     (cd "$stage" && POSTGRES_HOST="$AIDEV_EXTERNAL_HAF_HOST" POSTGRES_PORT="${AIDEV_EXTERNAL_HAF_PORT:-5432}" \
-        POSTGRES_USER=haf_shared_consumer POSTGRES_DB="$clone" bash scripts/install_app.sh)
+        POSTGRES_USER=haf_shared_consumer POSTGRES_DB="$clone" PATH="$app_path" bash scripts/install_app.sh)
 }
 
 current_block() {
@@ -414,7 +417,7 @@ sync_blocks() {
     "$py" scripts/processor_timings_report.py --log "$driver_log" --out "$out/processor-timings.json" \
         --first-block 1 --last-block "$STOP_AT_BLOCK" --sync-seconds "$seconds" \
         --deferred-log "$deferred_log" --deferred-seconds "$deferred_seconds" || return 1
-    bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
+    PATH="$app_path" bash tests/ci_parallel_sync_equality.sh "$consumer_url" "$stage" "$out/parallel-equality" \
         "$EQUALITY_STOP_AT_BLOCK" "$EQUALITY_FAIL_BLOCK"
 }
 

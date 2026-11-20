@@ -16,7 +16,8 @@ project adds to its CI lane runs here too), and runs each one as a local process
   - an app-image service (`image: ${HAF_STATS_IMAGE...}`) runs
     docker/docker_entrypoint.sh with its command, as the app image's ENTRYPOINT does,
     over /app (the runtime image's /app -> /tmp/aidev-app) holding the db/,
-    endpoints/ and scripts/ it mounts (the tree's own when it mounts none), with
+    endpoints/ and scripts/ it mounts (the tree's own when it mounts none; an
+    unmounted db/ gets the version.sql the Dockerfile bakes, from HEAD), with
     /opt/venv off PATH: its python3 is the system one with psycopg2, as the app
     image's is (common-ci-configuration/psql has no venv).
   - `postgrest` runs the postgrest binary with the service's environment.
@@ -274,8 +275,11 @@ class Lane:
         """/app for this service: the db/, endpoints/, scripts/ it mounts, else the tree's."""
         app = svc.workdir / "app"
         app.mkdir(exist_ok=True)
-        for sub in ("db", "endpoints"):
-            (app / sub).symlink_to(svc.mounts.get(f"/app/{sub}", self.root / sub))
+        (app / "endpoints").symlink_to(svc.mounts.get("/app/endpoints", self.root / "endpoints"))
+        if "/app/db" in svc.mounts:
+            (app / "db").symlink_to(svc.mounts["/app/db"])
+        else:
+            self._image_db(app / "db")
         # The Dockerfile copies scripts/ and the entrypoints with --chmod=755.
         shutil.copytree(svc.mounts.get("/app/scripts", self.root / "scripts"), app / "scripts", symlinks=True)
         for name in ("docker_entrypoint.sh", "block-processing-healthcheck.sh", "block-processing-healthcheck.sql"):
@@ -288,6 +292,20 @@ class Lane:
             tmp.unlink()
         tmp.symlink_to(app)
         tmp.replace(APP_LINK)
+
+    def _image_db(self, db: Path) -> None:
+        """The tree's db/ plus the version.sql the Dockerfile bakes into the image's (CI's GIT_HASH)."""
+        db.mkdir()
+        for entry in (self.root / "db").iterdir():
+            if entry.name != "version.sql":
+                (db / entry.name).symlink_to(entry)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True, text=True)
+        git_hash = head.stdout.strip()[:8] if head.returncode == 0 else ""
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", git_hash):
+            git_hash = "unspecified"
+        (db / "version.sql").write_text(
+            "TRUNCATE haf_stats_app.app_version; "
+            f"INSERT INTO haf_stats_app.app_version (git_hash) VALUES ('{git_hash}');\n")
 
     def rewriter_command(self, svc: Service) -> list[str]:
         prefix = svc.workdir / "openresty"
