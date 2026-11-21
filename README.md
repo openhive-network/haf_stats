@@ -125,7 +125,10 @@ docker/
   .env                      Image versions, registry and host ports
   haf_stats_nginx.conf.template
                             The rewriter's nginx config; the entrypoint substitutes
-                            POSTGREST_HOST/PORT and inlines endpoints/rewrite_rules.conf
+                            POSTGREST_HOST/PORT and RESOLVER (the DNS server nginx
+                            re-resolves POSTGREST_HOST through per request; default
+                            127.0.0.11, Docker's embedded DNS) and inlines
+                            endpoints/rewrite_rules.conf
   rewriter_entrypoint.sh    Renders the template above, then execs nginx
   docker-compose-ci.yml     CI stub stack: builds Dockerfile.rewriter and runs the
                             tavern suite against it, with no HAF instance

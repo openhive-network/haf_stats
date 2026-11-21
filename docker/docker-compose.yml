@@ -222,17 +222,15 @@ services:
   # this repo's README got PostgREST and no rewriter.
   #
   # Service shape copied from the deployment that proves it: POSTGREST_HOST/PORT are the
-  # only two knobs the entrypoint reads, and the healthcheck probes :81, which is a
+  # knobs set here (the entrypoint's RESOLVER defaults to Docker's embedded DNS, which is
+  # right for this stack), and the healthcheck probes :81, which is a
   # SEPARATE server block in the image serving only /health. Do not point it at :80/health
   # -- that path is a rewrite rule reaching get_health in the database, so it would report
   # the APP healthy rather than the PROXY alive.
   #
-  # OPERATIONAL NOTE: haf_stats_nginx.conf.template becomes a literal
-  # `proxy_pass http://haf-stats-api:3000` with no `resolver` directive, so nginx resolves
-  # that name ONCE at startup and caches the IP. Recreating haf-stats-api (an image bump,
-  # --force-recreate) gives it a new IP and this container keeps serving 502s against the
-  # old one -- while reporting healthy, because the :81 probe is an unconditional 204 that
-  # never touches the upstream. Restart the rewriter after anything that recreates the API.
+  # The template proxies through a variable with a `resolver` (Docker's 127.0.0.11,
+  # valid=10s), so recreating haf-stats-api alone (an image bump, --force-recreate) is
+  # picked up within seconds without restarting this container.
   haf-stats-rewriter:
     # One version for both images, matching haf_api_node/haf_stats.yaml, which pins this
     # image at ${HAF_STATS_VERSION}. A second knob that must always be moved with the

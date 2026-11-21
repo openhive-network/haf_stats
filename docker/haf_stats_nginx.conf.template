@@ -20,9 +20,20 @@ http {
         rpc_arguments = dofile(ngx.config.prefix() .. "conf/rpc_arguments.lua")
     }
 
+    # Docker's embedded DNS by default (RESOLVER in the entrypoint). With the upstream in a
+    # variable, nginx resolves POSTGREST_HOST per request (cached for `valid`) instead of
+    # once at startup, so a recreated PostgREST with a new address is picked up on its own.
+    # An IP literal POSTGREST_HOST never consults the resolver.
+    resolver ${RESOLVER} valid=10s;
+
     server {
         listen 0.0.0.0:80 default_server;
         server_name _;
+
+        # Set at server level: a `rewrite ... break` in rewrite_rules.conf stops the
+        # location's rewrite directives, so a `set` after it there would never run.
+        # The value carries no URI part, so proxy_pass sends the rewritten URI and args.
+        set $postgrest_upstream http://${POSTGREST_HOST}:${POSTGREST_PORT};
 
         location / {
             include rewrite_rules.conf;
@@ -36,7 +47,7 @@ http {
             rewrite_by_lua_block { rpc_form.forward(rpc_arguments) }
             header_filter_by_lua_block { rpc_form.restore_head() }
 
-            proxy_pass http://${POSTGREST_HOST}:${POSTGREST_PORT};
+            proxy_pass $postgrest_upstream;
 
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
