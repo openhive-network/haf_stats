@@ -23,7 +23,8 @@ http {
     # Docker's embedded DNS by default (RESOLVER in the entrypoint). With the upstream in a
     # variable, nginx resolves POSTGREST_HOST per request (cached for `valid`) instead of
     # once at startup, so a recreated PostgREST with a new address is picked up on its own.
-    # An IP literal POSTGREST_HOST never consults the resolver.
+    # An IP literal POSTGREST_HOST never consults the resolver; nor does a name from
+    # /etc/hosts (which this resolver does not read), as the entrypoint substitutes its address.
     resolver ${RESOLVER} valid=10s;
 
     server {
