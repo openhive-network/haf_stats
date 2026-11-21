@@ -315,7 +315,8 @@ class Lane:
         conf = (self.root / "docker/haf_stats_nginx.conf.template").read_text()
         conf = (conf.replace("${REWRITE_LOG}", log_line)
                 .replace("${POSTGREST_HOST}", env.get("POSTGREST_HOST", "haf-stats-api"))
-                .replace("${POSTGREST_PORT}", env.get("POSTGREST_PORT", "3000")))
+                .replace("${POSTGREST_PORT}", env.get("POSTGREST_PORT", "3000"))
+                .replace("${RESOLVER}", env.get("RESOLVER", "127.0.0.11")))
         for port, local in REWRITER_PORTS.items():
             conf = re.sub(r"(listen\s+[0-9.]*:?)" + port + r"\b", r"\g<1>" + local, conf)
         (prefix / "conf/nginx.conf").write_text(conf)

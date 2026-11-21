@@ -5,6 +5,8 @@
 #   REWRITE_LOG     - set to "on" to enable nginx rewrite logging (default: off)
 #   POSTGREST_HOST  - hostname of the PostgREST service to proxy to (default: haf-stats-api)
 #   POSTGREST_PORT  - port of the PostgREST service (default: 3000)
+#   RESOLVER        - DNS server nginx re-resolves POSTGREST_HOST through at request
+#                     time (default: 127.0.0.11, Docker's embedded DNS)
 
 if [ "$REWRITE_LOG" = "on" ]; then
     REWRITE_LOG="rewrite_log on;"
@@ -14,10 +16,12 @@ fi
 
 POSTGREST_HOST="${POSTGREST_HOST:-haf-stats-api}"
 POSTGREST_PORT="${POSTGREST_PORT:-3000}"
+RESOLVER="${RESOLVER:-127.0.0.11}"
 
 sed -e "s|\${REWRITE_LOG}|$REWRITE_LOG|g" \
     -e "s|\${POSTGREST_HOST}|$POSTGREST_HOST|g" \
     -e "s|\${POSTGREST_PORT}|$POSTGREST_PORT|g" \
+    -e "s|\${RESOLVER}|$RESOLVER|g" \
     /usr/local/openresty/nginx/conf/nginx.conf.template \
     > /usr/local/openresty/nginx/conf/nginx.conf
 
