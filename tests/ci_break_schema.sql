@@ -3,11 +3,13 @@
 -- Without this, CI ran one guarded statement out of 14: comment_registry.community's
 -- ADD COLUMN, which every fresh install needs because its CREATE TABLE lacks the column. The other
 -- 13 met tables that already had what they add, or lacked what they drop, so a typo in one -- or a
--- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 17 (#44 added three, #120 two,
--- #124 one); install-again has to redo them, and tests/ci_install_verify.sql asserts that each one landed.
+-- catalog test that is wrongly always-FALSE -- shipped green. This undoes all 18 (#44 added three, #120 two,
+-- #124 one, #166 one); install-again has to redo them, and tests/ci_install_verify.sql asserts that each
+-- one landed.
 --
---  13 dropped columns   active_users_daily.ops, comment_registry.community,
+--  14 dropped columns   active_users_daily.ops, comment_registry.community,
 --                       app_config.daily_retention_days (#124),
+--                       processor_group_progress.seconds (#166),
 --                       account_custom_json_daily.op_bytes,
 --                       rc_exact on network_op_daily, network_custom_json_daily and
 --                       account_custom_json_daily (#44),
@@ -91,6 +93,7 @@ RESET ROLE;
 
 ALTER TABLE haf_stats_backend.active_users_daily DROP COLUMN ops;
 ALTER TABLE haf_stats_app.app_config DROP COLUMN daily_retention_days;
+ALTER TABLE haf_stats_app.processor_group_progress DROP COLUMN seconds;
 ALTER TABLE haf_stats_backend.comment_registry DROP COLUMN community;
 ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN op_bytes;
 ALTER TABLE haf_stats_backend.account_custom_json_daily DROP COLUMN rc_exact;
@@ -133,6 +136,7 @@ BEGIN
         VALUES
         ('haf_stats_backend.active_users_daily', 'ops', FALSE),
         ('haf_stats_app.app_config', 'daily_retention_days', FALSE),
+        ('haf_stats_app.processor_group_progress', 'seconds', FALSE),
         ('haf_stats_backend.comment_registry', 'community', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', FALSE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', TRUE),

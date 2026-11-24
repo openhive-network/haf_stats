@@ -237,20 +237,31 @@ $$;
 -- prepare_batch_custom_json_ops above. op_count is additive (DO UPDATE adds), so each block range
 -- must be processed exactly once - the same exactly-once assumption the other additive counters
 -- rely on.
+--
+-- _shard, when given, limits a call to the signers whose account id is _shard modulo the number
+-- of the custom_json group's shards (haf_stats_app.custom_json_shards(),
+-- db/process_block_range.sql): each shard of a batch writes its own accounts' rows, and the
+-- shards of a batch together write what one call without _shard writes.
 -- ---------------------------------------------------------------------------
 
 -- The rows process_custom_json adds for a block range, before they are merged into the table: one per
 -- group, with its op_count, op_bytes and exact RC (#44). The processor INSERTs them; the rc_exact
 -- backfill (haf_stats_app.backfill_rc_exact) compares them with what a past day already holds.
+-- No hash join: the signers join the ops on op_id, and hashint8 XOR-folds an op id's block number
+-- onto its position, so a dense 10k-block batch's ids share few hash values and probing a hash of
+-- its million custom_json ops took 16 s on steem-20 at block 60M; merged, 3 s.
 DROP FUNCTION IF EXISTS haf_stats_app.account_custom_json_rows(INT, INT);
+DROP FUNCTION IF EXISTS haf_stats_app.account_custom_json_rows(INT, INT, INT);
 CREATE OR REPLACE FUNCTION haf_stats_app.account_custom_json_rows(
     _first_block INT,
-    _last_block INT
+    _last_block INT,
+    _shard INT DEFAULT NULL
 )
 RETURNS TABLE (account_id INT, day DATE, custom_json_type_id SMALLINT, op_count INT, op_bytes BIGINT, rc_exact BIGINT)
 LANGUAGE plpgsql
 VOLATILE
 SET jit = OFF
+SET enable_hashjoin = OFF
 AS $$
 BEGIN
 PERFORM haf_stats_app.prepare_batch_authored_ops(_first_block, _last_block);
@@ -264,6 +275,7 @@ SELECT a.account_id, cj.day, cj.custom_json_type_id, COUNT(*)::INT, SUM(cj.op_by
 FROM haf_stats_batch_authored_ops a
 JOIN haf_stats_batch_custom_json_ops cj ON cj.op_id = a.op_id
 WHERE a.op_class = 5   -- custom_json_operation
+  AND (_shard IS NULL OR a.account_id % cardinality(haf_stats_app.custom_json_shards()) = _shard)
 GROUP BY a.account_id, cj.day, cj.custom_json_type_id;
 END;
 $$;
@@ -271,7 +283,8 @@ $$;
 DROP FUNCTION IF EXISTS haf_stats_app.process_custom_json;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_custom_json(
     _first_block INT,
-    _last_block INT
+    _last_block INT,
+    _shard INT DEFAULT NULL
 )
 RETURNS VOID
 LANGUAGE plpgsql
@@ -281,7 +294,7 @@ BEGIN
 
 INSERT INTO haf_stats_backend.account_custom_json_daily AS acj (account_id, day, custom_json_type_id, op_count, op_bytes, rc_exact)
 SELECT r.account_id, r.day, r.custom_json_type_id, r.op_count, r.op_bytes, r.rc_exact
-FROM haf_stats_app.account_custom_json_rows(_first_block, _last_block) AS r
+FROM haf_stats_app.account_custom_json_rows(_first_block, _last_block, _shard) AS r
 ON CONFLICT (account_id, day, custom_json_type_id) DO UPDATE SET
     op_count = acj.op_count + EXCLUDED.op_count,
     op_bytes = acj.op_bytes + EXCLUDED.op_bytes,

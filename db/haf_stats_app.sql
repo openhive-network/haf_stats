@@ -564,7 +564,8 @@ $$;
 -- Otherwise it makes process_blocks' preparations and returns TRUE. finish_parallel_range
 -- raises unless every group has applied the range, so the driver's commit -- which moves the
 -- HAF context -- can only follow a fully applied batch; then it does what process_block_range
--- does after its groups, and records the batch as process_blocks does. Neither commits.
+-- does after its groups, and records the batch as process_blocks does. It returns each group's
+-- seconds from its progress row, {"financial": .., ...}, which the caller logs. Neither commits.
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS haf_stats_app.begin_parallel_range;
@@ -595,20 +596,25 @@ CREATE OR REPLACE FUNCTION haf_stats_app.finish_parallel_range(
     _first_block INT,
     _last_block INT
 )
-RETURNS VOID
+RETURNS JSONB
 LANGUAGE plpgsql
 SET search_path = pg_catalog, haf_stats_app, public
 AS $$
 DECLARE
     _group TEXT;
+    _seconds JSONB;
 BEGIN
     FOREACH _group IN ARRAY haf_stats_app.processor_groups() LOOP
         IF haf_stats_app.processor_group_from(_group, _first_block, _last_block) IS NOT NULL THEN
             RAISE EXCEPTION 'haf_stats: processor group % has not applied blocks %..%; the batch is not committed', _group, _first_block, _last_block;
         END IF;
     END LOOP;
+    -- Before finish_block_range deletes the rows.
+    SELECT jsonb_object_agg(p.group_name, p.seconds) INTO _seconds
+    FROM haf_stats_app.processor_group_progress AS p;
     PERFORM haf_stats_app.finish_block_range(_first_block, _last_block);
     UPDATE haf_stats_app.app_status SET last_processed_block = _last_block;
+    RETURN COALESCE(_seconds, '{}'::JSONB);
 END;
 $$;
 

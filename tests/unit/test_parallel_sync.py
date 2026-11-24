@@ -10,8 +10,9 @@ it can: the batch staged in level order and committed on a worker connection bef
 starts, unless the previous batch staged exactly its range ahead, beside its own groups; the
 groups dealt out to at most `parallelism` worker connections and each committed there, every
 worker connection's work for a batch sent in one round trip, the batch finished on the driver's
-connection only after every group committed, never after a failure, and live ranges left to the
-single-session procedure.
+connection only after every group committed, never after a failure, each batch's line naming
+the group times finish_parallel_range returned and the longest of them and the staging, and
+live ranges left to the single-session procedure.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ class FakeDb:
         fail_group: str | None = None,
         barrier: threading.Barrier | None = None,
         fail_stage: str | None = None,  # fails once
-        timed: bool = False,
+        group_seconds: dict[str, float | None] | None = None,
         fail_stage_from: int | None = None,
         irreversible: int | None = None,
         barrier_stage_from: int | None = None,
@@ -71,7 +72,8 @@ class FakeDb:
     ) -> None:
         self.massive = massive
         self.fail_session_lock = fail_session_lock
-        self.timed = timed
+        # What finish_parallel_range returns: each group's seconds from its progress row.
+        self.group_seconds = dict.fromkeys(GROUPS, 0.0) if group_seconds is None else group_seconds
         self.fail_group = fail_group
         self.fail_stage = fail_stage
         # Only the staging of ranges from this block on fails; their ops step waits on the barrier.
@@ -106,7 +108,7 @@ class FakeCursor:
             self.conn.db.record(self.conn.name, "begin")
             self.row = (db.massive,)
         elif "processor_groups(), haf_stats_app.shared_batch_stage_levels()" in sql:
-            self.row = (list(GROUPS), [list(level) for level in STAGE_LEVELS], db.timed)
+            self.row = (list(GROUPS), [list(level) for level in STAGE_LEVELS])
         elif sql == parallel.SESSION_LOCK_SQL:
             db.record(self.conn.name, "session lock")
             if db.fail_session_lock:
@@ -118,6 +120,7 @@ class FakeCursor:
             self.row = self.conn.run_query(sql, list(params))
         elif "finish_parallel_range" in sql:
             db.record(self.conn.name, f"finish {params[0]}..{params[1]}")
+            self.row = (dict(db.group_seconds),)
         elif "CALL haf_stats_app.process_blocks" in sql:
             db.record(self.conn.name, f"process_blocks {params[0]}")
         else:
@@ -507,21 +510,43 @@ def test_worker_server_messages_reach_the_log(capsys: pytest.CaptureFixture[str]
         assert f'INFO:  haf_stats_processor_timing {{"step":"{group}"}}' in out
 
 
-def test_a_timed_batch_reports_its_phases(capsys: pytest.CaptureFixture[str]) -> None:
-    db = FakeDb(timed=True)
-    coordinator(db).process(driver_conn(db), 101, 10100)
-    lines = [line for line in capsys.readouterr().out.splitlines() if "haf_stats_batch_phases" in line]
-    assert len(lines) == 1
-    record = json.loads(lines[0].split("haf_stats_batch_phases ", 1)[1])
-    assert (record["first_block"], record["last_block"]) == (101, 10100)
-    assert sorted(record["seconds"]) == ["begin", "finish", "groups", "staging"]
-    assert all(isinstance(v, float) and v >= 0 for v in record["seconds"].values())
+def _batch_lines(out: str) -> list[dict[str, Any]]:
+    return [json.loads(line.split("haf_stats_batch_phases ", 1)[1])
+            for line in out.splitlines() if "haf_stats_batch_phases" in line]
 
 
-def test_an_untimed_or_live_batch_reports_no_phases(capsys: pytest.CaptureFixture[str]) -> None:
-    db = FakeDb()
+def test_every_massive_batch_reports_its_phases_and_group_times(capsys: pytest.CaptureFixture[str]) -> None:
+    # No haf_stats.processor_timings: the line is written whatever the setting.
+    seconds: dict[str, float | None] = {"financial": 0.5, "users": 1.25, "content": 0.75, "custom_json": 9.5, "network": 0.25}
+    db = FakeDb(group_seconds=seconds)
+    c = coordinator(db)
+    c.process(driver_conn(db), 101, 10100)
+    c.process(driver_conn(db), 10101, 20100)
+
+    records = _batch_lines(capsys.readouterr().out)
+    assert [(r["first_block"], r["last_block"]) for r in records] == [(101, 10100), (10101, 20100)]
+    for record in records:
+        assert sorted(record["seconds"]) == ["begin", "finish", "groups", "staging"]
+        assert all(isinstance(v, float) and v >= 0 for v in record["seconds"].values())
+        assert record["group_seconds"] == seconds
+        assert record["critical"] == "custom_json"
+        assert isinstance(record["stage_seconds"], float) and 0 <= record["stage_seconds"] < 9.5
+    # The first batch staged its own range before its groups, so the phase it waited in holds it.
+    assert records[0]["stage_seconds"] <= records[0]["seconds"]["staging"]
+
+
+def test_staging_is_the_critical_part_when_no_group_takes_longer(capsys: pytest.CaptureFixture[str]) -> None:
+    # A group whose progress row has no time (written before it was recorded) reports null.
+    db = FakeDb(group_seconds={**dict.fromkeys(GROUPS, 0.0), "network": None})
     coordinator(db).process(driver_conn(db), 101, 10100)
-    db = FakeDb(timed=True, massive=False)
+
+    [record] = _batch_lines(capsys.readouterr().out)
+    assert record["group_seconds"]["network"] is None
+    assert record["critical"] == "staging"
+
+
+def test_a_live_batch_reports_no_phases(capsys: pytest.CaptureFixture[str]) -> None:
+    db = FakeDb(massive=False)
     coordinator(db).process(driver_conn(db), 5000001, 5000001)
     assert "haf_stats_batch_phases" not in capsys.readouterr().out
 

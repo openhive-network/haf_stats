@@ -16,12 +16,15 @@ SET ROLE haf_stats_owner;
 -- run with --server-messages=INFO:
 --
 --   haf_stats_processor_timing {"first_block":..,"last_block":..,"step":"process_financial",
---                               "within":null,"seconds":..,"reads":["transfer_operation",...]}
+--                               "within":null,"seconds":..,"reads":["transfer_operation",...],
+--                               "shard":null}
 --   haf_stats_operation_counts {"first_block":..,"last_block":..,"seconds":..,"counts":[
 --                               {"op_type":..,"virtual":..,"rows":..}]}
 --
 -- "within" is NULL for a step process_block_range calls, and names the processor for a
--- refresh timed inside one, whose seconds are therefore also in that processor's.
+-- refresh timed inside one, whose seconds are therefore also in that processor's. "shard" is
+-- NULL but for process_custom_json, timed once per shard of the custom_json group
+-- (custom_json_shards()), each shard's seconds a part of the step's.
 -- "reads" names the op types a step selects ("non_virtual" for every non-virtual type):
 -- prepare_batch_ops from hafd.operations, every other step from what it staged. Its rows read
 -- are the batch's counts of those types. The
@@ -37,7 +40,8 @@ CREATE OR REPLACE FUNCTION haf_stats_app.report_processor_timing(
     _last_block INT,
     _started TIMESTAMPTZ,
     _reads TEXT [],
-    _within TEXT
+    _within TEXT,
+    _shard INT DEFAULT NULL
 )
 RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql
@@ -50,7 +54,8 @@ BEGIN
         'step', _step,
         'within', _within,
         'seconds', EXTRACT(EPOCH FROM clock_timestamp() - _started),
-        'reads', _reads
+        'reads', _reads,
+        'shard', _shard
     );
     RETURN clock_timestamp();
 END;
@@ -458,7 +463,8 @@ $$;
 --                addressed to it), content_stats before content_cohorts (which reads
 --                network_author_daily)
 --   custom_json  account_custom_json_*: reads prepare_batch_authored_ops, prepare_batch_exact_rc
---                and prepare_batch_custom_json_ops
+--                and prepare_batch_custom_json_ops. A group per account shard
+--                (custom_json_shards()), each writing only its accounts' rows
 --   network      network_op_daily, network_custom_json_daily, witness_blocks_daily
 --
 -- Each group writes its own deferred_rollup_refreshes rows (keyed by processor). Every group
@@ -480,7 +486,9 @@ $$;
 -- progress rows and records the batch in app_status. So the context never moves past a batch a
 -- group has not applied, and when the batch's transaction does not commit (a group failed, the
 -- process crashed) the batch is delivered again and every group that already applied it skips
--- it: the progress row commits with the group's writes, or not at all.
+-- it: the progress row commits with the group's writes, or not at all. The row also holds the
+-- group's wall time on its connection, which finish_parallel_range returns for the
+-- coordinator's per-batch line.
 -- ---------------------------------------------------------------------------
 
 -- At most one row per group, and only while a batch is in flight: a group's row is written in
@@ -490,8 +498,41 @@ $$;
 CREATE TABLE IF NOT EXISTS haf_stats_app.processor_group_progress (
     group_name TEXT PRIMARY KEY,
     first_block INT NOT NULL,
-    last_block INT NOT NULL
+    last_block INT NOT NULL,
+    -- Seconds process_processor_group took to apply the rows' blocks; NULL on a row written
+    -- before the column existed.
+    seconds DOUBLE PRECISION
 );
+
+SELECT haf_stats_app.apply_schema_migration(
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS a
+        WHERE
+            a.attrelid = 'haf_stats_app.processor_group_progress'::REGCLASS
+            AND a.attname = 'seconds'
+            AND NOT a.attisdropped
+    ),
+    'ALTER TABLE haf_stats_app.processor_group_progress
+     ADD COLUMN IF NOT EXISTS seconds DOUBLE PRECISION',
+    'processor_group_progress.seconds'
+);
+
+-- The custom_json group's shards, each a processor group of its own. The custom_json rollup's
+-- rows are keyed by account, and shard i applies the batch to the accounts whose id is i modulo
+-- the number of shards (process_custom_json): the shards write disjoint keys of
+-- account_custom_json_daily, so they run at once without conflicting upserts, and together
+-- they write what the whole group writes. The number is fixed here rather than by the sync's
+-- parallelism because a progress row names its shard: change it only with no batch in flight
+-- (no processor_group_progress row).
+DROP FUNCTION IF EXISTS haf_stats_app.custom_json_shards;
+CREATE OR REPLACE FUNCTION haf_stats_app.custom_json_shards()
+RETURNS TEXT []
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT ARRAY['custom_json_0', 'custom_json_1', 'custom_json_2', 'custom_json_3']::TEXT [];
+$$;
 
 -- The groups in call order: the order process_block_range runs them in.
 DROP FUNCTION IF EXISTS haf_stats_app.processor_groups;
@@ -500,8 +541,24 @@ RETURNS TEXT []
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    SELECT ARRAY['financial', 'users', 'content', 'custom_json', 'network']::TEXT [];
+    SELECT ARRAY['financial', 'users', 'content']::TEXT []
+           || haf_stats_app.custom_json_shards()
+           || ARRAY['network']::TEXT [];
 $$;
+
+-- A batch in flight when custom_json was one group: what it applied, every shard has applied.
+INSERT INTO haf_stats_app.processor_group_progress (group_name, first_block, last_block, seconds)
+SELECT
+    s.name,
+    p.first_block,
+    p.last_block,
+    p.seconds
+FROM haf_stats_app.processor_group_progress AS p
+CROSS JOIN unnest(haf_stats_app.custom_json_shards()) AS s (name)
+WHERE p.group_name = 'custom_json'
+ON CONFLICT (group_name) DO NOTHING;
+DELETE FROM haf_stats_app.processor_group_progress
+WHERE group_name = 'custom_json';
 
 -- The first block of _first_block.._last_block that _group has still to apply, or NULL when it
 -- has applied all of them. A batch is delivered again from the block it started at, so a
@@ -895,6 +952,9 @@ AS $$
 DECLARE
     _timed BOOLEAN := current_setting('haf_stats.processor_timings', TRUE) = 'on';
     _t TIMESTAMPTZ;
+    _shard INT := array_position(haf_stats_app.custom_json_shards(), _group) - 1;
+    -- Every shard of the custom_json group runs the one branch below, with its _shard.
+    _branch TEXT := CASE WHEN _shard IS NULL THEN _group ELSE 'custom_json_shard' END;
 BEGIN
     -- Each IF _timed line reports the step above it and restarts the clock. The reads
     -- lists name the op types each step selects (see report_processor_timing). _shared names
@@ -906,7 +966,7 @@ BEGIN
     -- session), shared, or the group's own copy (a connection of its own), whose time is then
     -- in the group's first step.
     PERFORM haf_stats_app.prepare_batch_ops(_first_block, _last_block);
-    CASE _group
+    CASE _branch
     WHEN 'financial' THEN
         IF _timed AND NOT 'ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
         PERFORM haf_stats_app.process_financial(_first_block, _last_block);
@@ -925,18 +985,20 @@ BEGIN
         IF _timed THEN _t := haf_stats_app.report_processor_timing('process_content_stats', _first_block, _last_block, _t, '{vote_operation,comment_operation,delete_comment_operation,ineffective_delete_comment_operation}', NULL); END IF;
         PERFORM haf_stats_app.process_content_cohorts(_first_block, _last_block);
         IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_content_cohorts', _first_block, _last_block, _t, '{comment_operation}', NULL); END IF;
-    WHEN 'custom_json' THEN
+    WHEN 'custom_json_shard' THEN
         -- The three rollups that read exact RC each call the first of these, the two custom_json
         -- ones the second, and find them done; called here so their work is a step of its own
         -- rather than part of whichever rollup runs first. On a connection of its own the
         -- network group reads them from the shared batch staging, or, without it, stages them
-        -- again inside process_network_ops and process_network_custom_json.
+        -- again inside process_network_ops and process_network_custom_json. Reported once per
+        -- batch, as the first shard's: in one session the other shards find them staged, and
+        -- on a connection of its own a shard's own copy is timed in its process_custom_json.
         PERFORM haf_stats_app.prepare_batch_exact_rc(_first_block, _last_block);
-        IF _timed AND NOT 'exact_rc' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
+        IF _timed AND _shard = 0 AND NOT 'exact_rc' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_exact_rc', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
         PERFORM haf_stats_app.prepare_batch_custom_json_ops(_first_block, _last_block);
-        IF _timed AND NOT 'custom_json_ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
-        PERFORM haf_stats_app.process_custom_json(_first_block, _last_block);
-        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+        IF _timed AND _shard = 0 AND NOT 'custom_json_ops' = ANY(_shared) THEN _t := haf_stats_app.report_processor_timing('prepare_batch_custom_json_ops', _first_block, _last_block, _t, '{custom_json_operation}', NULL); END IF;
+        PERFORM haf_stats_app.process_custom_json(_first_block, _last_block, _shard);
+        IF _timed THEN PERFORM haf_stats_app.report_processor_timing('process_custom_json', _first_block, _last_block, _t, '{custom_json_operation}', NULL, _shard); END IF;
     WHEN 'network' THEN
         PERFORM haf_stats_app.process_network_ops(_first_block, _last_block);
         IF _timed THEN _t := haf_stats_app.report_processor_timing('process_network_ops', _first_block, _last_block, _t, '{non_virtual}', NULL); END IF;
@@ -953,8 +1015,8 @@ END;
 $$;
 
 -- One group's share of a massive-sync batch, on a worker connection, in a transaction of its own
--- that the caller commits: the group's processors and its progress row commit together.
--- A no-op when the group has already applied the batch. The batch's rollup refreshes are
+-- that the caller commits: the group's processors and its progress row, with the seconds they
+-- took, commit together. A no-op when the group has already applied the batch. The batch's rollup refreshes are
 -- deferred, as main() and process_blocks() defer them during massive sync.
 DROP FUNCTION IF EXISTS haf_stats_app.process_processor_group;
 CREATE OR REPLACE FUNCTION haf_stats_app.process_processor_group(
@@ -967,6 +1029,7 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, haf_stats_app, public
 AS $$
 DECLARE
+    _started TIMESTAMPTZ := clock_timestamp();
     _from INT;
     _shared TEXT [];
 BEGIN
@@ -993,9 +1056,11 @@ BEGIN
     PERFORM haf_stats_app.run_processor_group(_group, _from, _last_block, _shared);
     PERFORM haf_stats_app.detach_shared_batch_stage(_shared);
 
-    INSERT INTO haf_stats_app.processor_group_progress AS p (group_name, first_block, last_block)
-    VALUES (_group, _first_block, _last_block)
-    ON CONFLICT (group_name) DO UPDATE SET last_block = EXCLUDED.last_block;
+    INSERT INTO haf_stats_app.processor_group_progress AS p (group_name, first_block, last_block, seconds)
+    VALUES (_group, _first_block, _last_block, EXTRACT(EPOCH FROM clock_timestamp() - _started))
+    ON CONFLICT (group_name) DO UPDATE SET
+        last_block = EXCLUDED.last_block,
+        seconds = p.seconds + EXCLUDED.seconds;
 END;
 $$;
 

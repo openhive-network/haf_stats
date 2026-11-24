@@ -408,7 +408,7 @@ BEGIN
         RAISE EXCEPTION 'FAIL: the fixture has no account in both auth lists, so the mutation is empty';
     END IF;
 
-    _def := pg_get_functiondef('haf_stats_app.account_custom_json_rows(INT, INT)'::REGPROCEDURE);
+    _def := pg_get_functiondef('haf_stats_app.account_custom_json_rows(INT, INT, INT)'::REGPROCEDURE);
     IF strpos(_def, 'FROM haf_stats_batch_authored_ops a') = 0 THEN
         RAISE EXCEPTION 'FAIL: account_custom_json_rows no longer reads haf_stats_batch_authored_ops a; update the mutation';
     END IF;

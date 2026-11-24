@@ -316,10 +316,10 @@ $shim$;
 
 -- The upgrade branch of the guarded migrations actually ran. (#96)
 --
--- tests/ci_break_schema.sql undid all 17 guarded upgrades before install-again: thirteen columns
+-- tests/ci_break_schema.sql undid all 18 guarded upgrades before install-again: fourteen columns
 -- dropped, rc_estimated put back, account_financial_daily put back in its TEXT
 -- category/direction shape with one row, and both custom_json rollups put back on json_id TEXT
--- with one row each. Without break-schema only one of the 17 migration
+-- with one row each. Without break-schema only one of the 18 migration
 -- statements (comment_registry.community's ADD COLUMN) would run in CI, so a typo in any other, or
 -- a catalog test that is wrongly always-FALSE, would ship green. install-under-lock then proves the opposite
 -- direction -- that no guard fires once everything is applied (tests/ci_install_no_upgrade.sh).
@@ -333,6 +333,7 @@ BEGIN
         VALUES
         ('haf_stats_backend.active_users_daily', 'ops', TRUE),
         ('haf_stats_app.app_config', 'daily_retention_days', TRUE),
+        ('haf_stats_app.processor_group_progress', 'seconds', TRUE),
         ('haf_stats_backend.comment_registry', 'community', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'op_bytes', TRUE),
         ('haf_stats_backend.account_custom_json_daily', 'rc_estimated', FALSE),
@@ -448,7 +449,7 @@ BEGIN
         RAISE EXCEPTION 'install: network_custom_json_daily''s id-leading index is not idx_ncj_custom_json_type_id_day on (custom_json_type_id, day)';
     END IF;
 
-    RAISE NOTICE 'install verified: install-again re-applied all 17 guarded upgrades (13 columns back, rc_estimated gone, account_financial_daily recreated compact and empty, both custom_json rollups converted to custom_json_type_id with their rows) and rebuilt both daily tables on their retention window';
+    RAISE NOTICE 'install verified: install-again re-applied all 18 guarded upgrades (14 columns back, rc_estimated gone, account_financial_daily recreated compact and empty, both custom_json rollups converted to custom_json_type_id with their rows) and rebuilt both daily tables on their retention window';
 END
 $upgraded$;
 

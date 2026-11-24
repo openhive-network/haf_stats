@@ -73,10 +73,14 @@ def _batch(first: int, last: int, seconds: float, refreshes: tuple[str, ...] = (
 
 
 def _phases(first: int, last: int, begin: float = 0.01, staging: float = 0.3, groups: float = 0.6,
-            finish: float = 0.05) -> str:
-    """scripts/haf_stats_parallel.py's line for one batch of the parallel path."""
-    record = {"first_block": first, "last_block": last,
-              "seconds": {"begin": begin, "staging": staging, "groups": groups, "finish": finish}}
+            finish: float = 0.05, bound: tuple[float, dict[str, float | None]] | None = None) -> str:
+    """scripts/haf_stats_parallel.py's line for one batch of the parallel path; with ``bound``,
+    the batch's staging seconds and its groups' (a line written before those were logged has
+    neither)."""
+    record: dict[str, Any] = {"first_block": first, "last_block": last,
+                              "seconds": {"begin": begin, "staging": staging, "groups": groups, "finish": finish}}
+    if bound is not None:
+        record |= {"stage_seconds": bound[0], "group_seconds": bound[1], "critical": "as the coordinator saw it"}
     return f"2026-10-25T10:00:00.000Z haf_stats_parallel: haf_stats_batch_phases {json.dumps(record)}\n"
 
 
@@ -193,6 +197,76 @@ def test_the_wall_time_is_split_by_where_it_went(tmp_path: Path, capsys: pytest.
     assert "in the range processor 3.0s, outside it (the driver between batches) 97.0s" in table
     assert ("phases over 3 batches: begin 0.0s, staging 0.9s, groups 1.5s, finish 0.3s;"
             " with the driver's, 99.8% of the sync wall") in table
+
+
+def test_the_critical_path_is_the_longest_of_the_groups_and_the_staging(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lines = (_batch(1, 1_000_000, 1.0)
+             + [_phases(1, 1_000_000, bound=(0.25, {"custom_json_0": 0.5, "network": 0.125}))]
+             + _batch(1_000_001, 1_500_000, 1.0)
+             + [_phases(1_000_001, 1_500_000, bound=(0.75, {"custom_json_0": 0.5, "network": None}))]
+             + _batch(1_500_001, 2_000_000, 1.0)
+             + [_phases(1_500_001, 2_000_000, bound=(0.25, {"custom_json_0": 1.0, "network": 0.125}))])
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    critical = json.loads(out.read_text(encoding="utf-8"))["critical_path"]
+    assert critical == {
+        "batches": 3,
+        "critical": "custom_json_0",
+        "longest_in": {"custom_json_0": 2, "staging": 1},
+        "staging_seconds": 1.25,
+        "group_seconds": {"custom_json_0": 2.0, "network": 0.25},
+    }
+    table = capsys.readouterr().out
+    assert "critical path over 3 parallel batches: custom_json_0; longest in custom_json_0 2, staging 1" in table
+    assert "  staging 1.2s, groups: custom_json_0 2.0s, network 0.2s" in table
+
+
+def test_phase_lines_without_group_times_have_no_critical_path(tmp_path: Path) -> None:
+    rc, out = _run(tmp_path, _batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000)])
+
+    assert rc == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["critical_path"] is None
+
+
+def _sharded(lines: list[str], shards: list[int | None], seconds: float) -> list[str]:
+    """The batch with its process_custom_json line replaced by one per shard, at ``seconds``."""
+    out = []
+    for line in lines:
+        if '"step": "process_custom_json"' in line:
+            record = json.loads(line.split("haf_stats_processor_timing ", 1)[1])
+            out += [_line("haf_stats_processor_timing", {**record, "seconds": seconds, "shard": shard})
+                    for shard in shards]
+        else:
+            out.append(line)
+    return out
+
+
+def test_a_sharded_step_is_the_sum_of_its_shards(tmp_path: Path) -> None:
+    lines = _sharded(_batch(1, 1_000_000, 1.0), [0, 1, 2, 3], 0.25) + _batch(1_000_001, 2_000_000, 1.0)
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["processors"]["process_custom_json"]["seconds"] == 2.0
+    assert report["processors"]["process_custom_json"]["calls"] == 2
+    assert report["rows_read"]["process_custom_json"] == {"custom_json_operation": 14}
+
+
+@pytest.mark.parametrize(("shards", "problem"), [
+    pytest.param([0, 1, 1], "process_custom_json is timed twice (shard 1)", id="a shard twice"),
+    pytest.param([0, None], "process_custom_json is timed twice", id="a shard and the whole step"),
+    pytest.param([None, 0], "process_custom_json is timed twice (shard 0)", id="the whole step and a shard"),
+    pytest.param([0, -1], "'shard' is -1", id="a negative shard"),
+])
+def test_bad_shards_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str], shards: list[int | None],
+                         problem: str) -> None:
+    rc, out = _run(tmp_path, _sharded(_batch(1, 2_000_000, 1.0), shards, 0.5))
+
+    assert rc == 1
+    assert not out.exists()
+    assert problem in capsys.readouterr().err
 
 
 def _staged_ahead(first: int, last: int) -> list[str]:
@@ -313,7 +387,7 @@ def test_a_bad_deferred_log_fails_and_writes_nothing(tmp_path: Path, capsys: pyt
 # --- the step lists against the SQL that emits the lines ------------------------------
 
 _TIMING_CALL = re.compile(r"report_processor_timing\('(\w+)', _first_block, _last_block, _t, '\{([^}]*)\}', "
-                          r"(NULL|'(\w+)')\)")
+                          r"(NULL|'(\w+)')(?:, _shard)?\)")
 
 
 def _sql(name: str) -> str:
@@ -329,7 +403,8 @@ def _dispatcher() -> str:
 
 def test_every_step_the_dispatcher_calls_is_timed_in_order() -> None:
     body = _dispatcher()
-    called = re.findall(r"PERFORM haf_stats_app\.((?:process|prepare)_\w+)\(_first_block, _last_block\);", body)
+    called = re.findall(r"PERFORM haf_stats_app\.((?:process|prepare)_\w+)\(_first_block, _last_block(?:, _shard)?\);",
+                        body)
     timed = [m.group(1) for m in _TIMING_CALL.finditer(body) if m.group(3) == "NULL"]
 
     assert called == list(PROCESSORS)
