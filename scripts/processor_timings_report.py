@@ -7,12 +7,13 @@
 
 DRIVER_LOG is haf_app_driver.py's output (with --server-messages=INFO) for a run with
 haf_stats.processor_timings = on (db/process_block_range.sql): one
-`haf_stats_processor_timing {...}` line per processor per batch, one per rollup refresh
-a processor ran, and one `haf_stats_operation_counts {...}` line per batch. Every other
-line is ignored. The batches must cover blocks N..M exactly, each with every processor
-timed once and its operations counted once; anything else -- no timings at all, a line
-that is not JSON, a negative time, a missing or unknown step, a refresh credited to the
-wrong processor, a gap or an overlap -- exits 1 naming the problem and writes no report.
+`haf_stats_processor_timing {...}` line per processor per batch (process_custom_json: one per
+shard of the custom_json group, whose seconds are summed), one per rollup refresh a processor
+ran, and one `haf_stats_operation_counts {...}` line per batch. Every other line is ignored. The
+batches must cover blocks N..M exactly, each with every processor timed once (or once per shard)
+and its operations counted once; anything else -- no timings at all, a line that is not JSON, a
+negative time, a missing or unknown step, a refresh credited to the wrong processor, a gap or an
+overlap -- exits 1 naming the problem and writes no report.
 A range with only shared staging steps timed (STAGING_STEPS) and no operation counts is not a
 batch: the parallel path staged it ahead, and the driver delivered another range or none.
 
@@ -31,6 +32,11 @@ range that is not a batch, a batch's second one, or a phase line that does not n
 with a non-negative time exits 1, as does more time inside the range processor than the wall
 time.
 
+A phase line also gives the batch's staging time and each processor group's time on its worker
+connection. A batch takes the longer of its groups and the next batch's staging, so the report's
+"critical_path" totals each of them over the batches and counts the batches each was the longest
+in: the group, or the staging, that bounds the parallel sync.
+
 During massive sync the processors skip their refreshes and record them instead, and
 haf_stats_app.run_deferred_rollup_refreshes() runs each once afterwards
 (db/deferred_rollup_refreshes.sql). DEFERRED_LOG is that call's output, with one
@@ -46,7 +52,7 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +119,7 @@ class _Timing:
     within: str | None
     seconds: float
     reads: tuple[str, ...]
+    shard: int | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +146,17 @@ class _BatchWall:
     last_block: int
     phase: str | None
     seconds: float
+
+
+@dataclass(frozen=True)
+class _BatchBound:
+    """A parallel batch's staging seconds and each processor group's (a haf_stats_batch_phases
+    line's stage_seconds and group_seconds)."""
+
+    first_block: int
+    last_block: int
+    stage_seconds: float
+    group_seconds: tuple[tuple[str, float], ...]
 
 
 def _field(record: Mapping[str, Any], key: str, kind: type | tuple[type, ...], where: str) -> Any:
@@ -178,7 +196,10 @@ def _timing(record: Mapping[str, Any], where: str) -> _Timing:
     reads = _field(record, "reads", list, where)
     if not all(isinstance(r, str) for r in reads):
         raise TimingsError(f"{where}: 'reads' is {reads!r}")
-    return _Timing(first, last, step, within, _seconds(record, where), tuple(reads))
+    shard = record.get("shard")
+    if shard is not None and (isinstance(shard, bool) or not isinstance(shard, int) or shard < 0):
+        raise TimingsError(f"{where}: 'shard' is {shard!r}")
+    return _Timing(first, last, step, within, _seconds(record, where), tuple(reads), shard)
 
 
 def _counts(record: Mapping[str, Any], where: str) -> _Counts:
@@ -202,6 +223,19 @@ def _phases(record: Mapping[str, Any], where: str) -> list[_BatchWall]:
     return [_BatchWall(first, last, phase, _seconds(seconds, where, phase)) for phase in PHASES]
 
 
+def _bound(record: Mapping[str, Any], where: str) -> _BatchBound | None:
+    """None for a phase line without the group times (one written before they were logged)."""
+    if "group_seconds" not in record:
+        return None
+    first, last = _range(record, where)
+    groups = _field(record, "group_seconds", dict, where)
+    if not groups:
+        raise TimingsError(f"{where}: no group seconds")
+    # A group whose progress row predates its time has none.
+    timed = tuple((g, _seconds(groups, where, g)) for g in sorted(groups) if groups[g] is not None)
+    return _BatchBound(first, last, _seconds(record, where, "stage_seconds"), timed)
+
+
 def _json_object(text: str, where: str) -> dict[str, Any]:
     try:
         record = json.loads(text)
@@ -212,15 +246,16 @@ def _json_object(text: str, where: str) -> dict[str, Any]:
     return record
 
 
-def parse_log(lines: Iterable[str]) -> tuple[list[_Timing], list[_Counts], list[_BatchWall]]:
-    """The timing, operation-count and batch wall-time records in a driver log, validated one
-    by one.
+def parse_log(lines: Iterable[str]) -> tuple[list[_Timing], list[_Counts], list[_BatchWall], list[_BatchBound]]:
+    """The timing, operation-count, batch wall-time and batch bound records in a driver log,
+    validated one by one.
 
     :raises TimingsError: a record is not JSON, or is not the shape its line names.
     """
     timings: list[_Timing] = []
     counts: list[_Counts] = []
     walls: list[_BatchWall] = []
+    bounds: list[_BatchBound] = []
     for number, line in enumerate(lines, 1):
         where = f"line {number}"
         processed = _PROCESSED_LINE.search(line)
@@ -230,7 +265,11 @@ def parse_log(lines: Iterable[str]) -> tuple[list[_Timing], list[_Counts], list[
             continue
         phases = _PHASES_LINE.search(line)
         if phases is not None:
-            walls += _phases(_json_object(phases.group(1), where), where)
+            record = _json_object(phases.group(1), where)
+            walls += _phases(record, where)
+            bound = _bound(record, where)
+            if bound is not None:
+                bounds.append(bound)
             continue
         m = _LINE.search(line)
         if m is None:
@@ -240,7 +279,7 @@ def parse_log(lines: Iterable[str]) -> tuple[list[_Timing], list[_Counts], list[
             timings.append(_timing(record, where))
         else:
             counts.append(_counts(record, where))
-    return timings, counts, walls
+    return timings, counts, walls, bounds
 
 
 def parse_deferred_log(lines: Iterable[str]) -> dict[str, float]:
@@ -278,11 +317,16 @@ _Batch = tuple[tuple[int, int], dict[str, _Timing], _Counts]
 
 def _batches(timings: list[_Timing], counts: list[_Counts], first_block: int, last_block: int) -> list[_Batch]:
     by_batch: dict[tuple[int, int], dict[str, _Timing]] = defaultdict(dict)
+    shards: dict[tuple[int, int, str], set[int | None]] = defaultdict(set)
     for t in timings:
         batch = by_batch[(t.first_block, t.last_block)]
-        if t.step in batch:
-            raise TimingsError(f"batch {t.first_block}..{t.last_block}: {t.step} is timed twice")
-        batch[t.step] = t
+        seen = shards[(t.first_block, t.last_block, t.step)]
+        if t.step in batch and (t.shard is None or None in seen or t.shard in seen):
+            raise TimingsError(f"batch {t.first_block}..{t.last_block}: {t.step} is timed twice"
+                               + ("" if t.shard is None else f" (shard {t.shard})"))
+        seen.add(t.shard)
+        # A sharded step's seconds are the sum of its shards'.
+        batch[t.step] = t if t.step not in batch else replace(batch[t.step], seconds=batch[t.step].seconds + t.seconds)
     counts_by_batch: dict[tuple[int, int], _Counts] = {}
     for c in counts:
         key = (c.first_block, c.last_block)
@@ -351,16 +395,45 @@ def _batch_wall(walls: list[_BatchWall], batches: list[_Batch], sync_seconds: fl
     }
 
 
+def _critical_path(bounds: list[_BatchBound]) -> dict[str, Any] | None:
+    """Each processor group's and the staging's seconds over the parallel batches, and how many
+    batches each was the longest in. None when the log has no group seconds. The phase lines they
+    come from are checked against the batches by _batch_wall."""
+    if not bounds:
+        return None
+    staging = 0.0
+    groups: dict[str, float] = defaultdict(float)
+    longest: dict[str, int] = defaultdict(int)
+    for b in bounds:
+        staging += b.stage_seconds
+        critical, most = "staging", b.stage_seconds
+        for group, seconds in b.group_seconds:
+            groups[group] += seconds
+            if seconds > most:
+                critical, most = group, seconds
+        longest[critical] += 1
+    ranked = sorted(longest.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "batches": len(bounds),
+        "critical": ranked[0][0],
+        "longest_in": dict(ranked),
+        "staging_seconds": _rounded(staging),
+        "group_seconds": {g: _rounded(v) for g, v in sorted(groups.items())},
+    }
+
+
 def _rows_read(reads: tuple[str, ...], per_type: Mapping[str, int], non_virtual: int) -> dict[str, int]:
     return {r: (non_virtual if r == NON_VIRTUAL else per_type.get(r, 0)) for r in reads}
 
 
 def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: int, last_block: int,
                  sync_seconds: float, deferred: Mapping[str, float] | None = None,
-                 deferred_seconds: float | None = None, walls: list[_BatchWall] | None = None) -> dict[str, Any]:
+                 deferred_seconds: float | None = None, walls: list[_BatchWall] | None = None,
+                 bounds: list[_BatchBound] | None = None) -> dict[str, Any]:
     """The report for one run: totals, the per-million split and the rows read; given
-    ``walls`` (parse_log), where the wall time went; and, given ``deferred``
-    (parse_deferred_log) and its wall time, the deferred refreshes' seconds.
+    ``walls`` (parse_log), where the wall time went; given ``bounds`` (parse_log), which group or
+    the staging bounded the parallel batches; and, given ``deferred`` (parse_deferred_log) and its
+    wall time, the deferred refreshes' seconds.
 
     :raises TimingsError: the records do not tile ``first_block..last_block`` with every
         processor timed and the operations counted once per batch, a batch wall-time record
@@ -421,6 +494,7 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
         "sync_wall_seconds": _rounded(sync_seconds),
         "blocks_per_second": round(blocks / sync_seconds, 1) if sync_seconds > 0 else None,
         "batch_wall": _batch_wall(walls or [], batches, sync_seconds),
+        "critical_path": _critical_path(bounds or []),
         "processing_seconds": _rounded(processing),
         "instrumentation_seconds": _rounded(instrumentation),
         "processors": {p: entry(p) for p in PROCESSORS},
@@ -466,6 +540,12 @@ def summary_table(report: Mapping[str, Any]) -> str:
             lines.append(f"  phases over {wall['phase_batches']} batches: "
                          + ", ".join(f"{p} {s:.1f}s" for p, s in wall["phases"].items())
                          + f"; with the driver's, {wall['attributed_share']:.1%} of the sync wall")
+    critical = report.get("critical_path")
+    if critical is not None:
+        lines.append(f"critical path over {critical['batches']} parallel batches: {critical['critical']}; longest in "
+                     + ", ".join(f"{name} {n}" for name, n in critical["longest_in"].items()))
+        lines.append(f"  staging {critical['staging_seconds']:.1f}s, groups: "
+                     + ", ".join(f"{g} {v:.1f}s" for g, v in critical["group_seconds"].items()))
     deferred = report.get("deferred_refreshes")
     if deferred is not None:
         lines.append(f"deferred refreshes, after the sync: {deferred['wall_seconds']:.1f}s wall")
@@ -492,14 +572,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--deferred-log and --deferred-seconds go together")
     try:
         with args.log.open(encoding="utf-8", errors="replace") as log:
-            timings, counts, walls = parse_log(log)
+            timings, counts, walls, bounds = parse_log(log)
         deferred = None
         if args.deferred_log is not None:
             with args.deferred_log.open(encoding="utf-8", errors="replace") as log:
                 deferred = parse_deferred_log(log)
         report = build_report(timings, counts, first_block=args.first_block, last_block=args.last_block,
                               sync_seconds=args.sync_seconds, deferred=deferred,
-                              deferred_seconds=args.deferred_seconds, walls=walls)
+                              deferred_seconds=args.deferred_seconds, walls=walls, bounds=bounds)
     except (OSError, TimingsError) as exc:
         print(f"no report: {exc}", file=sys.stderr)
         return 1

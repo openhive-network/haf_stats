@@ -42,17 +42,23 @@ autocommit mode. So a batch staged ahead waits on three round trips in a row -- 
 finish -- and one that was not on four, staging before the groups, which is what it costs where
 a round trip to the server is slow.
 
-With haf_stats.processor_timings on, each batch also writes one line with the wall time of each
-of those four phases, as the driver measures the range processor's ("processed in"):
+Each batch writes one line with the wall time of each of those four phases, as the driver
+measures the range processor's ("processed in"), and what bounds them:
 
     haf_stats_batch_phases {"first_block":..,"last_block":..,"seconds":{"begin":..,
-                            "staging":..,"groups":..,"finish":..}}
+                            "staging":..,"groups":..,"finish":..},"stage_seconds":..,
+                            "group_seconds":{"financial":..,..},"critical":"custom_json_0"}
 
 "begin" runs from the call to the staging's dispatch: begin_parallel_range, and on the first
 batch the query for the groups and staging steps. "staging" is the wait for the staging ahead
-and, when that did not stage the range, the batch's own staging. The staging ahead logs its
-steps' timings under the range it staged, which may be a range the driver never delivers.
-scripts/processor_timings_report.py reads them.
+and, when that did not stage the range, the batch's own staging. "stage_seconds" is how long
+staging the batch's range took, ahead or not; "group_seconds" each group's time on its worker
+connection (its haf_stats_app.processor_group_progress row, as finish_parallel_range returns
+them; a group that applied the batch in an earlier delivery reports that delivery's). A batch
+staged ahead takes the longer of its groups and the next batch's staging, so "critical" names
+the longest of the groups and "staging". With haf_stats.processor_timings on, the staging ahead
+also logs its steps' timings under the range it staged, which may be a range the driver never
+delivers. scripts/processor_timings_report.py reads both.
 
 The worker connections use the driver's connection parameters (conn.get_dsn_parameters(), so
 the same application_name the rebuild scripts look for) and the password the driver's
@@ -81,7 +87,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 PARALLELISM_ENV = "HAF_STATS_SYNC_PARALLELISM"
 
@@ -97,6 +103,12 @@ class _Cursor(Protocol):
     def execute(self, sql: str, params: Sequence[object] = ...) -> Any: ...
 
     def fetchone(self) -> Any: ...
+
+
+class _Staged(NamedTuple):
+    first_block: int
+    last_block: int
+    seconds: float
 
 
 class _ConnectionInfo(Protocol):
@@ -147,10 +159,9 @@ class ParallelCoordinator:
         self._executor: ThreadPoolExecutor | None = None
         self._group_shares: list[list[str]] | None = None
         self._stage_steps: list[str] | None = None
-        self._timed = False
         self._out_lock = threading.Lock()
         self._batch_blocks = 0
-        self._ahead: Future[tuple[int, int] | None] | None = None
+        self._ahead: Future[_Staged | None] | None = None
 
     def process(self, conn: _Connection, first_block: int, last_block: int) -> None:
         started = time.monotonic()
@@ -166,8 +177,12 @@ class ParallelCoordinator:
         if self._group_shares is None or self._stage_steps is None or self._executor is None:
             raise RuntimeError("the coordinator has no groups or staging steps")
         params = _worker_connection_params(conn)
-        if staged_ahead != (first_block, last_block):
+        if staged_ahead is not None and (staged_ahead.first_block, staged_ahead.last_block) == (first_block, last_block):
+            stage_seconds = staged_ahead.seconds
+        else:
+            own_staging_started = time.monotonic()
             self._run_at_once(params, "batch staging steps", _STAGE_SQL, [self._stage_steps], first_block, last_block)
+            stage_seconds = time.monotonic() - own_staging_started
         groups_started = time.monotonic()
         self._batch_blocks = max(self._batch_blocks, last_block - first_block + 1)
         self._ahead = self._executor.submit(
@@ -176,18 +191,21 @@ class ParallelCoordinator:
         self._run_at_once(params, "processor groups", _GROUP_SQL, self._group_shares, first_block, last_block)
         finish_started = time.monotonic()
         cur.execute("SELECT haf_stats_app.finish_parallel_range(%s, %s)", (first_block, last_block))
-        if self._timed:
-            phases = {
-                "begin": staging_started - started,
-                "staging": groups_started - staging_started,
-                "groups": finish_started - groups_started,
-                "finish": time.monotonic() - finish_started,
-            }
-            self._log("haf_stats_batch_phases " + json.dumps({
-                "first_block": first_block,
-                "last_block": last_block,
-                "seconds": {phase: round(seconds, 6) for phase, seconds in phases.items()},
-            }))
+        group_seconds: dict[str, float | None] = cur.fetchone()[0]
+        phases = {
+            "begin": staging_started - started,
+            "staging": groups_started - staging_started,
+            "groups": finish_started - groups_started,
+            "finish": time.monotonic() - finish_started,
+        }
+        self._log("haf_stats_batch_phases " + json.dumps({
+            "first_block": first_block,
+            "last_block": last_block,
+            "seconds": {phase: round(seconds, 6) for phase, seconds in phases.items()},
+            "stage_seconds": round(stage_seconds, 6),
+            "group_seconds": {g: None if t is None else round(t, 6) for g, t in group_seconds.items()},
+            "critical": _critical(stage_seconds, group_seconds),
+        }))
 
     def _run_at_once(
         self,
@@ -214,22 +232,18 @@ class ParallelCoordinator:
             raise failed
 
     def _prepare(self, cur: _Cursor) -> None:
-        cur.execute(
-            "SELECT haf_stats_app.processor_groups(), haf_stats_app.shared_batch_stage_levels(),"
-            " current_setting('haf_stats.processor_timings', TRUE) = 'on'"
-        )
-        groups, levels, timed = cur.fetchone()
+        cur.execute("SELECT haf_stats_app.processor_groups(), haf_stats_app.shared_batch_stage_levels()")
+        groups, levels = cur.fetchone()
         workers = min(self._parallelism, len(groups))
         # Dealt out in call order: connection i runs groups i, i + workers, ...
         self._group_shares = [list(groups[i::workers]) for i in range(workers)]
         self._stage_steps = [step for level in levels for step in level]
-        self._timed = bool(timed)
         # One more than the groups' connections: the staging ahead runs beside them.
         self._executor = ThreadPoolExecutor(max_workers=workers + 1, thread_name_prefix="haf_stats_group")
 
-    def _staged_ahead(self) -> tuple[int, int] | None:
-        """The range the previous batch staged ahead, once that staging has finished; None when it
-        did not complete one (or there was none)."""
+    def _staged_ahead(self) -> _Staged | None:
+        """The range the previous batch staged ahead and how long that took, once that staging has
+        finished; None when it did not complete one (or there was none)."""
         ahead, self._ahead = self._ahead, None
         if ahead is None:
             return None
@@ -241,11 +255,12 @@ class ParallelCoordinator:
 
     def _stage_ahead(
         self, params: Mapping[str, str], steps: Sequence[str], first_block: int, last_block: int
-    ) -> tuple[int, int] | None:
+    ) -> _Staged | None:
+        started = time.monotonic()
         complete = self._run_on_worker(
             params, "batch staging ahead", _STAGE_SQL, steps, first_block, last_block, check=_STAGED_SQL
         )
-        return (first_block, last_block) if complete else None
+        return _Staged(first_block, last_block, time.monotonic() - started) if complete else None
 
     @staticmethod
     def _begin(cur: _Cursor, first_block: int, last_block: int) -> bool:
@@ -342,6 +357,15 @@ class ParallelCoordinator:
         with self._out_lock:
             sys.stdout.write(f"{ts} {lines[0]}\n" + "".join(f"    {extra}\n" for extra in lines[1:]))
             sys.stdout.flush()
+
+
+def _critical(stage_seconds: float, group_seconds: Mapping[str, float | None]) -> str:
+    """The longest of the batch's staging ("staging") and its groups."""
+    critical, longest = "staging", stage_seconds
+    for group, seconds in group_seconds.items():
+        if seconds is not None and seconds > longest:
+            critical, longest = group, seconds
+    return critical
 
 
 def _worker_connection_params(conn: _Connection) -> dict[str, str]:

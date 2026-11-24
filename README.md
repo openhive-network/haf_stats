@@ -888,11 +888,24 @@ stops instead of proceeding ([#75](https://gitlab.syncad.com/hive/haf_stats/-/is
 connections the massive sync spreads each batch over. With `1` every batch runs in one
 session, as it always has. Above `1`, `process_blocks` runs `haf_app_driver.py` with
 `scripts/haf_stats_parallel.py` as its range processor: during `MASSIVE_PROCESSING` the
-batch's processors run in five groups (`haf_stats_app.processor_groups()`, described in
+batch's processors run in eight groups (`haf_stats_app.processor_groups()`, described in
 `db/process_block_range.sql`), dealt out to that many connections at most, which run at once,
 and live sync stays on the driver's one session. A value that is not a positive integer is
-logged and treated as `1`. The legacy `CALL main()` loop ignores the setting. More than five
-adds nothing, because there are five groups. One more connection stages the next batch (below).
+logged and treated as `1`. The legacy `CALL main()` loop ignores the setting. More than eight
+adds nothing, because there are eight groups. One more connection stages the next batch (below).
+
+Four of the groups are shards of `process_custom_json`
+([#166](https://gitlab.syncad.com/hive/haf_stats/-/issues/166)), `custom_json_0` to
+`custom_json_3` (`haf_stats_app.custom_json_shards()`): shard *i* writes the
+`account_custom_json_daily` rows of the accounts whose id is *i* modulo 4, so the shards write
+disjoint keys and run at once. Each has its own progress row, and the single-session path runs
+them one after another. From about block 57M, where most operations are custom_json, the
+custom_json group was the slowest: on steem-20 at 60M its batch took 14.5 s, against 12.7 s of
+staging, 6 s for users and under 2 s each for financial and network. Almost all of that was its
+join of signers to ops, which hashed op ids. `hashint8` folds an op id's block number onto its
+position, so the ids of a dense batch share few hash values. That join is now planned without
+hashing: 3 s for the whole batch and 0.6 s for one shard. The staging ahead is then what bounds
+a dense batch.
 
 Each group commits its writes together with a row in `haf_stats_app.processor_group_progress`.
 The driver's transaction moves the HAF context only after every group has committed. That
@@ -946,12 +959,17 @@ gets its whole share of a batch in one query string, a `BEGIN; ...; COMMIT` bloc
 or group, so each step and group still commits on its own
 ([#147](https://gitlab.syncad.com/hive/haf_stats/-/issues/147)). Where a round trip is slow this
 is what a batch costs: in the gate, at about 0.14 s a round trip, the previous three round trips
-per step and per group (fourteen a batch) took about 2 s a batch, not the staging tables. With
-`haf_stats.processor_timings` on, each batch also logs a `haf_stats_batch_phases` line with the
-four phases' wall times ("staging" is the wait for the staging ahead, and the batch's own staging
-when it needs one), and `scripts/processor_timings_report.py` splits the sync's wall time into them
-and the driver's own work between batches. The staging ahead logs its steps' timings under the
-range it staged; the report leaves out a range that only has those and was never delivered.
+per step and per group (fourteen a batch) took about 2 s a batch, not the staging tables. Each
+batch logs a `haf_stats_batch_phases` line, whatever `haf_stats.processor_timings` says. It holds
+the wall times of the four phases. "staging" is the wait for the staging ahead, plus the batch's
+own staging when it needs one. The line also holds how long staging the batch's range took
+(`stage_seconds`) and each group's seconds on its connection (`group_seconds`, kept in the group's
+progress row). `critical` names the longest of the groups and the staging, which is what bounds
+the batch. `scripts/processor_timings_report.py` splits the sync's wall time into the phases and the
+driver's own work between batches. It also totals the groups and the staging and counts the
+batches each was the longest in (`critical_path`). With the setting on, the staging ahead logs its
+steps' timings under the range it staged; the report leaves out a range that only has those and
+was never delivered.
 
 The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database
 snapshot over blocks 56.0–57.0M and 58–62M, is recorded on that issue once it has run on steem-20.

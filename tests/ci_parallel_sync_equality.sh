@@ -17,23 +17,26 @@
 # haf_app_driver.py, as scripts/process_blocks.sh runs it:
 #
 #   single    at parallelism 1: the registered process_blocks procedure;
-#   parallel  at HAF_STATS_SYNC_PARALLELISM=4 (scripts/haf_stats_parallel.py), with a trigger
-#             that fails the network group once, on the first network_op_daily row of
-#             FAIL_BLOCK's day. The driver must stop on it with the context before that batch,
-#             the batch's four shared stages committed (they are staged before any group
-#             starts, while the batch before it runs or right before its own groups) and the
-#             other groups' progress rows committed for it. Then the trigger is dropped, the
-#             network group applies the first half of the batch on its own, as a delivery of
-#             the batch cut short would have left it, and the server crash's reset of every
+#   parallel  at HAF_STATS_SYNC_PARALLELISM=4 (scripts/haf_stats_parallel.py), with triggers
+#             that fail the network group once, on the first network_op_daily row of
+#             FAIL_BLOCK's day, and the custom_json_1 shard of the custom_json group once, on its
+#             first account_custom_json_daily row in the batch holding that day's first block.
+#             The driver must stop on them with the context before that batch, the batch's four
+#             shared stages committed (they are staged before any group starts, while the batch
+#             before it runs or right before its own groups) and the other groups' progress
+#             rows committed for it, other custom_json shards' among them. Then the triggers are
+#             dropped, the network group and the custom_json_1 shard apply the first half of the
+#             batch on their own, as a delivery of the batch cut short would have left them,
+#             and the server crash's reset of every
 #             UNLOGGED haf_stats_app table is emulated: the shared staging of the batch, and of
 #             the next range, staged ahead before any of its groups started, is gone, and the
 #             progress rows stay. The sync is resumed to STOP_BLOCK at parallelism 4: the other
-#             groups skip the batch, the network group stages and applies the rest of it
-#             (haf_stats_app.processor_group_from past the first block), and the next batch is
+#             groups skip the batch, the network group and the shard stage and apply the rest of
+#             it (haf_stats_app.processor_group_from past the first block), and the next batch is
 #             staged again;
-#   serial    the same failure and partial batch, with the staging kept, then resumed at
+#   serial    the same failures and partial batch, with the staging kept, then resumed at
 #             parallelism 1: the single-session process_block_range skips what the groups
-#             have applied.
+#             and shards have applied.
 #
 # The three run at once, each on its own clone, its output kept in OUT_DIR/<name>.out and
 # printed once all three are done. Then every haf_stats table's checksum
@@ -120,9 +123,10 @@ sync_single() {
 # crash, and the resume, then the checksums.
 fail_and_resume() {
     local name="$1" db="$2" resume_parallelism="$3" crash="$4" log="$out/$1.log" t0=$SECONDS
-    local fail_day state at rows continuing network context batch_end half left staged
+    local fail_day day_start state at rows continuing network shard shards context batch_end half left staged
     fail_day="$(q "$db" "SELECT created_at::DATE FROM hafd.blocks WHERE num = $fail_block")" || return 1
     [ -n "$fail_day" ] || { echo "block $fail_block is not in HAF"; return 1; }
+    day_start="$(q "$db" "SELECT MIN(num) FROM hafd.blocks WHERE created_at::DATE = DATE '$fail_day'")" || return 1
     q "$db" "
         SET ROLE haf_stats_owner;
         CREATE SEQUENCE haf_stats_app.ci_fail_once;
@@ -137,6 +141,24 @@ fail_and_resume() {
         CREATE TRIGGER ci_fail_network_once BEFORE INSERT ON haf_stats_backend.network_op_daily
         FOR EACH ROW WHEN (NEW.day >= DATE '$fail_day')
         EXECUTE FUNCTION haf_stats_app.ci_fail_network_once();
+        -- The batch a row is for is the range key its custom_json stage was attached or staged
+        -- under: the rows carry only a day, and the shard's accounts may sign nothing on that one.
+        CREATE SEQUENCE haf_stats_app.ci_fail_shard_once;
+        CREATE FUNCTION haf_stats_app.ci_fail_shard_once() RETURNS TRIGGER LANGUAGE plpgsql AS \$\$
+        DECLARE
+            _range TEXT := NULLIF(current_setting('haf_stats.batch_custom_json_ops_range', TRUE), '');
+        BEGIN
+            IF split_part(_range, ':', 1)::INT <= $day_start AND split_part(_range, ':', 2)::INT >= $day_start THEN
+                IF nextval('haf_stats_app.ci_fail_shard_once') = 1 THEN
+                    RAISE EXCEPTION 'ci: injected custom_json_1 shard failure at blocks %', _range;
+                END IF;
+            END IF;
+            RETURN NEW;
+        END;
+        \$\$;
+        CREATE TRIGGER ci_fail_shard_once BEFORE INSERT ON haf_stats_backend.account_custom_json_daily
+        FOR EACH ROW WHEN (NEW.account_id % cardinality(haf_stats_app.custom_json_shards()) = 1)
+        EXECUTE FUNCTION haf_stats_app.ci_fail_shard_once();
     " >/dev/null || return 1
 
     if sync_to_stop "$db" "$log" 4; then
@@ -144,31 +166,39 @@ fail_and_resume() {
     fi
     grep -q "ci: injected network group failure" "$log" \
         || { echo "FAIL: $name: the parallel sync stopped, but not on the injected failure:"; tail -40 "$log"; return 1; }
+    grep -q "ci: injected custom_json_1 shard failure at blocks" "$log" \
+        || { echo "FAIL: $name: the custom_json_1 shard was not failed in the network group's batch:"; tail -40 "$log"; return 1; }
     state="$(q "$db" "
         SELECT s.last_processed_block
                || ' ' || (SELECT COUNT(*) FROM haf_stats_app.processor_group_progress)
                || ' ' || (SELECT COUNT(*) FROM haf_stats_app.processor_group_progress AS p
                           WHERE p.first_block = s.last_processed_block + 1)
                || ' ' || (SELECT COUNT(*) FROM haf_stats_app.processor_group_progress WHERE group_name = 'network')
+               || ' ' || (SELECT COUNT(*) FROM haf_stats_app.processor_group_progress WHERE group_name = 'custom_json_1')
+               || ' ' || (SELECT COUNT(*) FROM haf_stats_app.processor_group_progress
+                          WHERE group_name = ANY(haf_stats_app.custom_json_shards()))
                || ' ' || hive.app_get_current_block_num('haf_stats')
                || ' ' || (SELECT COALESCE(MAX(last_block), 0) FROM haf_stats_app.processor_group_progress)
         FROM haf_stats_app.app_status AS s")" || return 1
-    read -r at rows continuing network context batch_end <<< "$state"
-    echo "$name, after the failure: app_status $at, context $context, $rows progress rows ($continuing for the batch $((at + 1))..$batch_end, $network for network)"
+    read -r at rows continuing network shard shards context batch_end <<< "$state"
+    echo "$name, after the failure: app_status $at, context $context, $rows progress rows ($continuing for the batch $((at + 1))..$batch_end, $network for network, $shards for custom_json shards, $shard for custom_json_1)"
     [ "$at" -lt "$fail_block" ] && [ "$at" -gt 0 ] || { echo "FAIL: $name: stopped at block $at, not before $fail_block"; return 1; }
     [ "$context" = "$at" ] || { echo "FAIL: $name: the HAF context ($context) moved apart from app_status ($at)"; return 1; }
-    [ "$rows" -ge 1 ] && [ "$rows" = "$continuing" ] && [ "$network" = 0 ] \
-        || { echo "FAIL: $name: expected the other groups' progress rows for the failed batch, and none for network"; return 1; }
+    [ "$rows" -ge 1 ] && [ "$rows" = "$continuing" ] && [ "$network" = 0 ] && [ "$shard" = 0 ] && [ "$shards" -ge 1 ] \
+        || { echo "FAIL: $name: expected the other groups' progress rows for the failed batch, other custom_json shards' among them, and none for network or custom_json_1"; return 1; }
     staged="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker
                        WHERE first_block = $((at + 1)) AND last_block = $batch_end")" || return 1
     [ "$staged" = 4 ] || { echo "FAIL: $name: $staged of the failed batch's 4 shared stages committed"; return 1; }
 
     q "$db" "SET ROLE haf_stats_owner; DROP TRIGGER ci_fail_network_once ON haf_stats_backend.network_op_daily;
-             DROP FUNCTION haf_stats_app.ci_fail_network_once(); DROP SEQUENCE haf_stats_app.ci_fail_once;" >/dev/null || return 1
+             DROP FUNCTION haf_stats_app.ci_fail_network_once(); DROP SEQUENCE haf_stats_app.ci_fail_once;
+             DROP TRIGGER ci_fail_shard_once ON haf_stats_backend.account_custom_json_daily;
+             DROP FUNCTION haf_stats_app.ci_fail_shard_once(); DROP SEQUENCE haf_stats_app.ci_fail_shard_once;" >/dev/null || return 1
     half=$(((at + 1 + batch_end) / 2))
     [ "$half" -lt "$batch_end" ] || { echo "FAIL: $name: the failed batch $((at + 1))..$batch_end is too short to apply in part"; return 1; }
     q "$db" "SET ROLE haf_stats_owner; SELECT haf_stats_app.process_processor_group('network', $((at + 1)), $half)" >/dev/null || return 1
-    echo "$name: the network group applied $((at + 1))..$half of the batch"
+    q "$db" "SET ROLE haf_stats_owner; SELECT haf_stats_app.process_processor_group('custom_json_1', $((at + 1)), $half)" >/dev/null || return 1
+    echo "$name: the network group and the custom_json_1 shard applied $((at + 1))..$half of the batch"
     if [ "$crash" = crash ]; then
         # What crash recovery does to UNLOGGED tables: each is reset to empty.
         q "$db" "SET ROLE haf_stats_owner; DO \$\$ BEGIN
