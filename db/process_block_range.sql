@@ -600,7 +600,8 @@ $$;
 -- prepare_batch_authored_ops, prepare_batch_exact_rc, prepare_batch_custom_json_ops), filled by
 -- the same fill_batch_* functions as the temp tables. scripts/haf_stats_parallel.py runs the
 -- steps of shared_batch_stage_levels() in level order, each in a transaction of its own
--- (stage_shared_batch), on one worker connection in one round trip. It stages the next batch's
+-- (stage_shared_batch): on one worker connection in one round trip, or, once staging a batch
+-- takes long enough, each step of a level on a connection of its own. It stages the next batch's
 -- likely range while the groups of the current one run, and stages the current batch itself
 -- before its groups only when that range was not staged ahead. A group then attaches the stages
 -- (attach_shared_batch_stage): in its transaction, each stage's haf_stats_batch_* name is a temp
@@ -721,9 +722,11 @@ CREATE UNLOGGED TABLE IF NOT EXISTS haf_stats_app.shared_batch_custom_json_ops_1
 ) WITH (autovacuum_enabled = FALSE);
 
 -- The staging steps in levels: every step reads only the stages of the levels before it, so the
--- steps of a level could run at once. scripts/haf_stats_parallel.py runs them one after another
--- in a single round trip instead: on a server where a round trip is slow, a level's own round
--- trip cost more than running its steps at once saved. The exact_rc step stages exact_rc, then
+-- steps of a level can run at once. scripts/haf_stats_parallel.py runs them one after another
+-- in a single round trip while staging a batch is quick: on a server where a round trip is
+-- slow, a level's own round trip cost more than running its steps at once saved. Once a batch's
+-- staging takes seconds (the dense blocks from about 57M on), it runs each step of a level on a
+-- connection of its own, a round trip per level. The exact_rc step stages exact_rc, then
 -- custom_json_ops, which joins the shares to the custom_json ops.
 DROP FUNCTION IF EXISTS haf_stats_app.shared_batch_stage_levels;
 CREATE OR REPLACE FUNCTION haf_stats_app.shared_batch_stage_levels()
@@ -840,7 +843,9 @@ $$;
 -- the step's stages are already complete for the range (a batch delivered again after a failed
 -- group, or staged ahead). The ops step empties the slot's four tables first: the others are
 -- built from it. So the later steps find their tables holding no rows: a stage's rows commit
--- only with its marker row, and the step runs only while that marker is missing.
+-- only with its marker row, and the step runs only while that marker is missing. The steps after
+-- ops may run at once, each in its own session: they fill different tables of the slot the ops
+-- stage is in.
 DROP FUNCTION IF EXISTS haf_stats_app.stage_shared_batch;
 CREATE OR REPLACE FUNCTION haf_stats_app.stage_shared_batch(
     _step TEXT,
@@ -881,8 +886,15 @@ BEGIN
     ) THEN
         RETURN;
     END IF;
-    -- One step at a time chooses and fills a slot: a coordinator that died can leave one running.
-    PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'));
+    -- An ops step chooses and empties a slot alone; the other steps fill the slot their range's
+    -- ops stage is in, at once with each other but each step one at a time: a coordinator that
+    -- died can leave one running.
+    IF _step = 'ops' THEN
+        PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'));
+    ELSE
+        PERFORM pg_advisory_xact_lock_shared(hashtext('haf_stats_app.shared_batch_marker'));
+        PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'), hashtext(_step));
+    END IF;
     _slot := haf_stats_app.shared_batch_slot(_first_block, _last_block);
     IF (SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker AS m
         WHERE m.slot = _slot AND m.stage = ANY(_stages)

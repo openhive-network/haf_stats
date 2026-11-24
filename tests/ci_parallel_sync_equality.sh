@@ -33,7 +33,12 @@
 #             progress rows stay. The sync is resumed to STOP_BLOCK at parallelism 4: the other
 #             groups skip the batch, the network group and the shard stage and apply the rest of
 #             it (haf_stats_app.processor_group_from past the first block), and the next batch is
-#             staged again;
+#             staged again. This leg stages with HAF_STATS_SPLIT_STAGING_SECONDS=0, each step of a
+#             staging level on a connection of its own, and before the resume a trigger fails the
+#             authored_ops step of the batch after the failed one twice, staged ahead and staged
+#             by itself: the resume must stop on it before that batch with the other three
+#             stages committed by the steps beside it, and a second resume, delivering the batch
+#             again, stages the rest;
 #   serial    the same failures and partial batch, with the staging kept, then resumed at
 #             parallelism 1: the single-session process_block_range skips what the groups
 #             and shards have applied.
@@ -92,11 +97,13 @@ new_clone() {
     printf -v "$2" '%s' "$db"
 }
 
-# DB LOG PARALLELISM: the driver to stop_block; returns its exit status.
+# DB LOG PARALLELISM [SPLIT_SECONDS]: the driver to stop_block, with SPLIT_SECONDS as
+# HAF_STATS_SPLIT_STAGING_SECONDS when given; returns its exit status.
 sync_to_stop() {
-    local db="$1" log="$2" parallelism="$3" args=(-u HAF_STATS_SYNC_PARALLELISM) process_python=()
+    local db="$1" log="$2" parallelism="$3" split="${4:-}" args=(-u HAF_STATS_SPLIT_STAGING_SECONDS -u HAF_STATS_SYNC_PARALLELISM) process_python=()
     if [ "$parallelism" -gt 1 ]; then
-        args=("HAF_STATS_SYNC_PARALLELISM=$parallelism")
+        args=(-u HAF_STATS_SPLIT_STAGING_SECONDS "HAF_STATS_SYNC_PARALLELISM=$parallelism")
+        [ -z "$split" ] || args+=("HAF_STATS_SPLIT_STAGING_SECONDS=$split")
         process_python=(--process-python=haf_stats_parallel:process_blocks)
     fi
     env "${args[@]}" PYTHONPATH="$sources/scripts" /usr/bin/python3 "$(command -v haf_app_driver.py)" --app=haf_stats \
@@ -120,9 +127,10 @@ sync_single() {
 }
 
 # NAME DB RESUME_PARALLELISM CRASH: the failure, the partial batch, with CRASH=crash the emulated
-# crash, and the resume, then the checksums.
+# crash, split staging and a failed staging step, and the resume, then the checksums.
 fail_and_resume() {
-    local name="$1" db="$2" resume_parallelism="$3" crash="$4" log="$out/$1.log" t0=$SECONDS
+    local name="$1" db="$2" resume_parallelism="$3" crash="$4" log="$out/$1.log" t0=$SECONDS split=""
+    [ "$crash" != crash ] || split=0
     local fail_day day_start state at rows continuing network shard shards context batch_end half left staged
     fail_day="$(q "$db" "SELECT created_at::DATE FROM hafd.blocks WHERE num = $fail_block")" || return 1
     [ -n "$fail_day" ] || { echo "block $fail_block is not in HAF"; return 1; }
@@ -161,7 +169,7 @@ fail_and_resume() {
         EXECUTE FUNCTION haf_stats_app.ci_fail_shard_once();
     " >/dev/null || return 1
 
-    if sync_to_stop "$db" "$log" 4; then
+    if sync_to_stop "$db" "$log" 4 "$split"; then
         echo "FAIL: $name: the parallel sync passed the injected failure"; return 1
     fi
     grep -q "ci: injected network group failure" "$log" \
@@ -210,9 +218,10 @@ fail_and_resume() {
         staged="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker")" || return 1
         [ "$staged" = 0 ] || { echo "FAIL: $name: $staged shared stages left after the emulated crash"; return 1; }
         echo "$name: the crash's reset of the UNLOGGED tables emulated"
+        fail_staging_twice "$db" "$log" "$((batch_end + 1))" "$split" || { echo "FAIL: $name: see above"; return 1; }
     fi
 
-    sync_to_stop "$db" "$log" "$resume_parallelism" \
+    sync_to_stop "$db" "$log" "$resume_parallelism" "$split" \
         || { echo "$name: the sync resumed at parallelism $resume_parallelism failed:"; tail -40 "$log"; return 1; }
     echo "$name: sync to $stop_block, with the failure and the resume at parallelism $resume_parallelism: $((SECONDS - t0))s"
 
@@ -221,6 +230,46 @@ fail_and_resume() {
     left="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker WHERE first_block <= $stop_block")" || return 1
     [ "$left" = 0 ] || { echo "FAIL: $name: $left shared stages marked complete for a synced range after the resumed sync"; return 1; }
     psql "$haf_url/$db" -X -At -v ON_ERROR_STOP=1 -f "$here/ci_table_checksums.sql" > "$out/$name.checksums"
+}
+
+# DB LOG FIRST SPLIT: the authored_ops step of the batch from block FIRST fails twice, on its
+# marker row: staged ahead (the batch before it needs no staging: each of its groups has applied
+# part of it), then staged before its own groups. The resume must stop on the second with the
+# batch's other stages committed by the steps beside it on other connections (one step after
+# another on one connection, exact_rc would never have run), and its context before the batch,
+# so that the batch is delivered again.
+fail_staging_twice() {
+    local db="$1" log="$2" first="$3" split="$4" staged at
+    q "$db" "
+        SET ROLE haf_stats_owner;
+        CREATE SEQUENCE haf_stats_app.ci_fail_stage_twice;
+        CREATE FUNCTION haf_stats_app.ci_fail_stage_twice() RETURNS TRIGGER LANGUAGE plpgsql AS \$\$
+        BEGIN
+            IF nextval('haf_stats_app.ci_fail_stage_twice') <= 2 THEN
+                RAISE EXCEPTION 'ci: injected authored_ops staging failure at blocks %..%', NEW.first_block, NEW.last_block;
+            END IF;
+            RETURN NEW;
+        END \$\$;
+        CREATE TRIGGER ci_fail_stage_twice BEFORE INSERT ON haf_stats_app.shared_batch_marker
+        FOR EACH ROW WHEN (NEW.stage = 'authored_ops' AND NEW.first_block = $first)
+        EXECUTE FUNCTION haf_stats_app.ci_fail_stage_twice();
+    " >/dev/null || return 1
+    if sync_to_stop "$db" "$log" 4 "$split"; then
+        echo "the resume passed the injected staging failures"; return 1
+    fi
+    grep -q "batch staging ahead authored_ops, blocks $first\.\..*failed: .*ci: injected authored_ops staging failure" "$log" \
+        || { echo "the staging ahead of the batch from $first did not fail split on the injected failure:"; tail -40 "$log"; return 1; }
+    grep -q "batch staging steps authored_ops, blocks $first\.\..*failed: .*ci: injected authored_ops staging failure" "$log" \
+        || { echo "the resume did not stop on the injected failure of the batch from $first staging itself, split:"; tail -40 "$log"; return 1; }
+    staged="$(q "$db" "SELECT string_agg(DISTINCT stage, ',' ORDER BY stage) FROM haf_stats_app.shared_batch_marker
+                       WHERE first_block = $first")" || return 1
+    [ "$staged" = "custom_json_ops,exact_rc,ops" ] \
+        || { echo "after the failed authored_ops steps, stages '$staged' of the batch from $first committed, not custom_json_ops,exact_rc,ops"; return 1; }
+    at="$(q "$db" "SELECT last_processed_block FROM haf_stats_app.app_status")" || return 1
+    [ "$at" = "$((first - 1))" ] || { echo "the resume stopped at block $at, not before the batch from $first"; return 1; }
+    q "$db" "SET ROLE haf_stats_owner; DROP TRIGGER ci_fail_stage_twice ON haf_stats_app.shared_batch_marker;
+             DROP FUNCTION haf_stats_app.ci_fail_stage_twice(); DROP SEQUENCE haf_stats_app.ci_fail_stage_twice;" >/dev/null || return 1
+    echo "the resume stopped on the injected authored_ops staging failures of the batch from $first, with $staged committed beside them"
 }
 
 # NAME: its checksums against single's.
