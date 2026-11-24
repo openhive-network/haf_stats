@@ -971,6 +971,18 @@ batches each was the longest in (`critical_path`). With the setting on, the stag
 steps' timings under the range it staged; the report leaves out a range that only has those and
 was never delivered.
 
+In the dense blocks from about 57M on, the staging ahead is what bounds a batch once the
+custom_json group is sharded: on steem-20 at 60M it took 12.7 s on its one connection, against
+about 6 s for the slowest group (users)
+([#167](https://gitlab.syncad.com/hive/haf_stats/-/issues/167)). So once staging a batch took
+`HAF_STATS_SPLIT_STAGING_SECONDS` (default `2`) or longer, the next staging sends a round trip
+per level of `haf_stats_app.shared_batch_stage_levels()` instead of one: the ops step, then
+authored_ops and exact_rc at once, each on a connection of its own, one more than before. Below
+that, as in the gate's 5M blocks, the staging stays in one round trip on one connection. Each step
+still commits on its own, so a step that fails leaves the steps beside it committed, and a range
+staged again reuses them. The custom_json ops step joins the ops to their exact RC shares by
+merging them in op id order, not by hashing the op ids (1.6 s hashed, 0.44 s merged at 60M).
+
 The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database
 snapshot over blocks 56.0–57.0M and 58–62M, is recorded on that issue once it has run on steem-20.
 

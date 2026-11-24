@@ -42,6 +42,13 @@ autocommit mode. So a batch staged ahead waits on three round trips in a row -- 
 finish -- and one that was not on four, staging before the groups, which is what it costs where
 a round trip to the server is slow.
 
+Once staging a batch took HAF_STATS_SPLIT_STAGING_SECONDS (default 2) or longer, as it does in the
+dense blocks from about 57M on, the next staging runs each level's steps at once instead, each on
+a worker connection of its own: a round trip per level, and one more connection while a level
+has more than one step. Each step still commits on its own, so a failed step leaves the steps
+that committed, on its connection or another, to be reused when the range is staged again. The
+value is a number of seconds; 0 splits every staging.
+
 Each batch writes one line with the wall time of each of those four phases, as the driver
 measures the range processor's ("processed in"), and what bounds them:
 
@@ -90,6 +97,10 @@ from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
 PARALLELISM_ENV = "HAF_STATS_SYNC_PARALLELISM"
+SPLIT_STAGING_ENV = "HAF_STATS_SPLIT_STAGING_SECONDS"
+# Well above the gate's staging (a few tenths of a second a batch, where a round trip takes about
+# 0.14 s), well below the dense era's (8-13 s on steem-20 at 57-70M).
+_SPLIT_STAGING_SECONDS = 2.0
 
 # The processor session's half of HAF's application lock, shared with the legacy loop.
 SESSION_LOCK_SQL = (Path(__file__).resolve().parent.parent / "db" / "legacy_loop_lock.sql").read_text(encoding="utf-8")
@@ -140,25 +151,55 @@ def parallelism_from_env(environ: Mapping[str, str] = os.environ) -> int:
     return int(raw)
 
 
+def split_staging_seconds_from_env(environ: Mapping[str, str] = os.environ) -> float:
+    """HAF_STATS_SPLIT_STAGING_SECONDS as a number of seconds, 0 or more; 2 when unset or empty.
+
+    :raises ValueError: the value is not a finite number of seconds, 0 or more.
+    """
+    raw = environ.get(SPLIT_STAGING_ENV, "").strip()
+    if not raw:
+        return _SPLIT_STAGING_SECONDS
+    refused = f"{SPLIT_STAGING_ENV} must be a number of seconds, 0 or more, not {raw!r}"
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise ValueError(refused) from None
+    if not 0 <= seconds < float("inf"):
+        raise ValueError(refused)
+    return seconds
+
+
 class ParallelCoordinator:
     """Runs a range's processor groups on up to `parallelism` connections of its own, and stages
-    the next range ahead on one more.
+    the next range ahead on one more, or on one per step of a staging level once staging a batch
+    took `split_staging_seconds` or longer.
 
     `connect` opens a worker connection from libpq connection parameters given as keyword
     arguments (psycopg2.connect); `db_error` is the base class of what its connections raise
     (psycopg2.Error).
     """
 
-    def __init__(self, parallelism: int, connect: Callable[..., _Connection], db_error: type[Exception]) -> None:
+    def __init__(
+        self,
+        parallelism: int,
+        connect: Callable[..., _Connection],
+        db_error: type[Exception],
+        split_staging_seconds: float = _SPLIT_STAGING_SECONDS,
+    ) -> None:
         if parallelism < 1:
             raise ValueError(f"parallelism must be at least 1, not {parallelism}")
+        if split_staging_seconds < 0:
+            raise ValueError(f"split_staging_seconds must be 0 or more, not {split_staging_seconds}")
         self._parallelism = parallelism
+        self._split_staging_seconds = split_staging_seconds
         self._connect = connect
         self._db_error = db_error
         self._idle: queue.SimpleQueue[_Connection] = queue.SimpleQueue()
         self._executor: ThreadPoolExecutor | None = None
         self._group_shares: list[list[str]] | None = None
-        self._stage_steps: list[str] | None = None
+        self._stage_levels: list[list[str]] | None = None
+        # How long staging the last batch took.
+        self._stage_seconds = 0.0
         self._out_lock = threading.Lock()
         self._batch_blocks = 0
         self._ahead: Future[_Staged | None] | None = None
@@ -174,19 +215,20 @@ class ParallelCoordinator:
         if not massive:
             cur.execute("CALL haf_stats_app.process_blocks(%s::hive.blocks_range)", (f"({first_block},{last_block})",))
             return
-        if self._group_shares is None or self._stage_steps is None or self._executor is None:
+        if self._group_shares is None or self._executor is None:
             raise RuntimeError("the coordinator has no groups or staging steps")
         params = _worker_connection_params(conn)
         if staged_ahead is not None and (staged_ahead.first_block, staged_ahead.last_block) == (first_block, last_block):
             stage_seconds = staged_ahead.seconds
         else:
             own_staging_started = time.monotonic()
-            self._run_at_once(params, "batch staging steps", _STAGE_SQL, [self._stage_steps], first_block, last_block)
+            self._stage(params, "batch staging steps", self._stage_round_trips(), first_block, last_block)
             stage_seconds = time.monotonic() - own_staging_started
+        self._stage_seconds = stage_seconds
         groups_started = time.monotonic()
         self._batch_blocks = max(self._batch_blocks, last_block - first_block + 1)
         self._ahead = self._executor.submit(
-            self._stage_ahead, params, self._stage_steps, last_block + 1, last_block + self._batch_blocks
+            self._stage_ahead, params, self._stage_round_trips(), last_block + 1, last_block + self._batch_blocks
         )
         self._run_at_once(params, "processor groups", _GROUP_SQL, self._group_shares, first_block, last_block)
         finish_started = time.monotonic()
@@ -215,13 +257,15 @@ class ParallelCoordinator:
         shares: Sequence[Sequence[str]],
         first_block: int,
         last_block: int,
-    ) -> None:
+        check: str | None = None,
+    ) -> list[Any]:
         """`sql` for each name of each share and the range: each share on a worker connection of
-        its own, in one round trip, each name's statement committed there on its own."""
+        its own, in one round trip, each name's statement committed there on its own, then
+        `check`. Returns each share's value of `check` (None without one)."""
         if self._executor is None:
             raise RuntimeError("the coordinator has no executor")
         futures = [
-            self._executor.submit(self._run_on_worker, params, kind, sql, names, first_block, last_block)
+            self._executor.submit(self._run_on_worker, params, kind, sql, names, first_block, last_block, check)
             for names in shares
         ]
         # Every share is waited for, failed or not, so no worker of this range is still running
@@ -230,6 +274,37 @@ class ParallelCoordinator:
         failed = next((e for e in errors if e is not None), None)
         if failed is not None:
             raise failed
+        return [f.result() for f in futures]
+
+    def _stage_round_trips(self) -> list[list[list[str]]]:
+        """The staging's round trips, one after another: each the shares of steps sent at once,
+        a worker connection each. All the steps in one share while the last batch's staging was
+        quick; otherwise a round trip per level and a share per step."""
+        if self._stage_levels is None:
+            raise RuntimeError("the coordinator has no staging steps")
+        if self._stage_seconds < self._split_staging_seconds:
+            return [[[step for level in self._stage_levels for step in level]]]
+        return [[[step] for step in level] for level in self._stage_levels]
+
+    def _stage(
+        self,
+        params: Mapping[str, str],
+        kind: str,
+        round_trips: Sequence[Sequence[Sequence[str]]],
+        first_block: int,
+        last_block: int,
+        check: str | None = None,
+    ) -> bool:
+        """The staging steps for the range, round trip by round trip; then whether `check` found
+        the range staged. Every share of the last round trip runs `check` after its own steps:
+        the share whose check runs last sees what every share committed."""
+        complete: list[Any] = []
+        for i, shares in enumerate(round_trips):
+            final = i == len(round_trips) - 1
+            complete = self._run_at_once(
+                params, kind, _STAGE_SQL, shares, first_block, last_block, check if final else None
+            )
+        return any(complete)
 
     def _prepare(self, cur: _Cursor) -> None:
         cur.execute("SELECT haf_stats_app.processor_groups(), haf_stats_app.shared_batch_stage_levels()")
@@ -237,9 +312,11 @@ class ParallelCoordinator:
         workers = min(self._parallelism, len(groups))
         # Dealt out in call order: connection i runs groups i, i + workers, ...
         self._group_shares = [list(groups[i::workers]) for i in range(workers)]
-        self._stage_steps = [step for level in levels for step in level]
-        # One more than the groups' connections: the staging ahead runs beside them.
-        self._executor = ThreadPoolExecutor(max_workers=workers + 1, thread_name_prefix="haf_stats_group")
+        self._stage_levels = [list(level) for level in levels]
+        # Beside the groups' threads, the staging ahead's, waiting on the threads of the shares it
+        # sends at once: one per step of a level at most.
+        widest = max(len(level) for level in self._stage_levels)
+        self._executor = ThreadPoolExecutor(max_workers=workers + 1 + widest, thread_name_prefix="haf_stats_group")
 
     def _staged_ahead(self) -> _Staged | None:
         """The range the previous batch staged ahead and how long that took, once that staging has
@@ -254,12 +331,14 @@ class ParallelCoordinator:
             return None
 
     def _stage_ahead(
-        self, params: Mapping[str, str], steps: Sequence[str], first_block: int, last_block: int
+        self,
+        params: Mapping[str, str],
+        round_trips: Sequence[Sequence[Sequence[str]]],
+        first_block: int,
+        last_block: int,
     ) -> _Staged | None:
         started = time.monotonic()
-        complete = self._run_on_worker(
-            params, "batch staging ahead", _STAGE_SQL, steps, first_block, last_block, check=_STAGED_SQL
-        )
+        complete = self._stage(params, "batch staging ahead", round_trips, first_block, last_block, check=_STAGED_SQL)
         return _Staged(first_block, last_block, time.monotonic() - started) if complete else None
 
     @staticmethod
@@ -387,5 +466,7 @@ def process_blocks(conn: _Connection, first_block: int, last_block: int) -> None
     if _coordinator is None:
         import psycopg2
 
-        _coordinator = ParallelCoordinator(parallelism_from_env(), psycopg2.connect, psycopg2.Error)
+        _coordinator = ParallelCoordinator(
+            parallelism_from_env(), psycopg2.connect, psycopg2.Error, split_staging_seconds_from_env()
+        )
     _coordinator.process(conn, first_block, last_block)

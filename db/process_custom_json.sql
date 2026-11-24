@@ -170,11 +170,15 @@ GRANT SELECT ON haf_stats_backend.account_custom_json_monthly TO haf_stats_user;
 -- Loads them into whatever haf_stats_batch_custom_json_ops names: the temp table below, or the
 -- shared staging of parallel massive sync (stage_shared_batch, db/process_block_range.sql).
 -- Returns the number of rows loaded.
+-- No hash join, as in account_custom_json_rows below: both sides are read in op_id order (the
+-- ops' (op_type_id, op_id) index, the shares' primary key), and hashing the op ids of a dense
+-- batch took 1.6 s on steem-20 at block 60M against 0.44 s merged.
 DROP FUNCTION IF EXISTS haf_stats_app.fill_batch_custom_json_ops();
 CREATE OR REPLACE FUNCTION haf_stats_app.fill_batch_custom_json_ops()
 RETURNS BIGINT
 LANGUAGE plpgsql
 SET jit = OFF
+SET enable_hashjoin = OFF
 AS $$
 DECLARE
     _rows BIGINT;

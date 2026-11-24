@@ -22,6 +22,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -69,8 +70,15 @@ class FakeDb:
         irreversible: int | None = None,
         barrier_stage_from: int | None = None,
         fail_session_lock: bool = False,
+        step_barrier: threading.Barrier | None = None,
+        stage_delay: float = 0.0,
     ) -> None:
         self.massive = massive
+        # Staging steps that wait on step_barrier, whatever their range.
+        self.barrier_steps: tuple[str, ...] = ()
+        self.step_barrier = step_barrier
+        # How long each ops step takes.
+        self.stage_delay = stage_delay
         self.fail_session_lock = fail_session_lock
         # What finish_parallel_range returns: each group's seconds from its progress row.
         self.group_seconds = dict.fromkeys(GROUPS, 0.0) if group_seconds is None else group_seconds
@@ -197,6 +205,10 @@ class FakeConn:
             if (db.barrier is not None and db.barrier_stage_from is not None and name == "ops"
                     and first >= db.barrier_stage_from):
                 db.barrier.wait()
+            if db.step_barrier is not None and name in db.barrier_steps:
+                db.step_barrier.wait()
+            if name == "ops" and db.stage_delay:
+                time.sleep(db.stage_delay)
             if name == db.fail_stage and (db.fail_stage_from is None or first >= db.fail_stage_from):
                 db.fail_stage = None
                 raise FakeDbError(f"injected failure in staging step {name}")
@@ -230,7 +242,12 @@ class FakeConn:
         self.closed = True
 
 
-def coordinator(db: FakeDb, parallelism: int = 4, opened_with: list[dict[str, str]] | None = None) -> Any:
+def coordinator(
+    db: FakeDb,
+    parallelism: int = 4,
+    opened_with: list[dict[str, str]] | None = None,
+    split_staging_seconds: float | None = None,
+) -> Any:
     def connect(**params: str) -> FakeConn:
         with db.lock:
             db.opened += 1
@@ -240,7 +257,9 @@ def coordinator(db: FakeDb, parallelism: int = 4, opened_with: list[dict[str, st
         assert params.get("application_name") == "haf_stats_block_processing", params
         return FakeConn(db, f"worker{n}", params)
 
-    return parallel.ParallelCoordinator(parallelism, connect, FakeDbError)
+    if split_staging_seconds is None:
+        return parallel.ParallelCoordinator(parallelism, connect, FakeDbError)
+    return parallel.ParallelCoordinator(parallelism, connect, FakeDbError, split_staging_seconds)
 
 
 def driver_conn(db: FakeDb) -> FakeConn:
@@ -350,6 +369,96 @@ def test_a_failed_staging_ahead_is_logged_and_the_batch_stages_itself(capsys: py
     assert ("driver", "finish 10001..20000") in db.log
     out = capsys.readouterr().out
     assert ("haf_stats_parallel: batch staging ahead ops, authored_ops, exact_rc, blocks 10001..20000, failed: "
+            "injected failure in staging step authored_ops") in out
+
+
+def _staging_round_trips(db: FakeDb, blocks: str) -> list[list[tuple[str, str]]]:
+    """The staging steps of the range on each worker connection, split where a connection's
+    round trip starts: [[(connection, step), ...], ...] in the order the round trips started."""
+    trips: list[list[tuple[str, str]]] = []
+    open_trip: dict[str, list[tuple[str, str]]] = {}
+    for name, event in db.log:
+        if event == "round trip":
+            open_trip[name] = []
+            trips.append(open_trip[name])
+        elif event.startswith("stage ") and event.endswith(f" {blocks}"):
+            open_trip[name].append((name, event.split(" ")[1]))
+    return [trip for trip in trips if trip]
+
+
+def test_a_quick_staging_sends_every_step_in_one_round_trip() -> None:
+    db = FakeDb()
+    c = coordinator(db)
+    c.process(driver_conn(db), 1, 10000)
+    c.process(driver_conn(db), 10001, 20000)
+
+    for blocks in ("1..10000", "10001..20000"):
+        [trip] = _staging_round_trips(db, blocks)
+        assert [step for _, step in trip] == STAGE_STEPS
+
+
+def test_a_staging_that_took_long_splits_the_next_into_a_round_trip_per_level() -> None:
+    # The first batch's staging is in one round trip; it took longer than the threshold, so the
+    # staging ahead sends the ops step, then authored_ops and exact_rc at once on two connections:
+    # each waits on the barrier until the other has started.
+    db = FakeDb(step_barrier=threading.Barrier(2, timeout=10), stage_delay=0.05)
+    c = coordinator(db, split_staging_seconds=0.02)
+    c.process(driver_conn(db), 1, 10000)
+    db.barrier_steps = ("authored_ops", "exact_rc")
+    c.process(driver_conn(db), 10001, 20000)
+
+    assert [[step for _, step in trip] for trip in _staging_round_trips(db, "1..10000")] == [STAGE_STEPS]
+    ops, *level = _staging_round_trips(db, "10001..20000")
+    assert [step for _, step in ops] == ["ops"]
+    assert sorted(step for [(_, step)] in level) == ["authored_ops", "exact_rc"]
+    assert len({conn for [(conn, _)] in level}) == 2, "the level's steps shared a connection"
+    ops_commit = db.log.index((ops[0][0], "commit stage ops 10001..20000"))
+    assert ops_commit < _first(db, "stage authored_ops 10001..20000")
+    assert ops_commit < _first(db, "stage exact_rc 10001..20000")
+    # Staged ahead completely: the second batch did not stage its range again.
+    assert [e for _, e in db.log].count("stage ops 10001..20000") == 1
+    assert sorted(db.committed) == sorted(GROUPS * 2)
+    assert db.opened <= 4 + 2
+
+
+def test_a_split_staging_ahead_starts_the_next_batch_at_once() -> None:
+    db = FakeDb()
+    c = coordinator(db, split_staging_seconds=0)
+    c.process(driver_conn(db), 1, 10000)
+    begin = len(db.log)
+    c.process(driver_conn(db), 10001, 20000)
+
+    second = db.log[begin:db.log.index(("driver", "finish 10001..20000"))]
+    assert not any(e.startswith("stage ") and e.endswith(" 10001..20000") for _, e in second)
+    assert [step for step, *blocks in db.staged if blocks == [10001, 20000]] == STAGE_STEPS
+
+
+def test_a_failed_step_of_a_split_level_keeps_the_others_and_the_retry_stages_the_rest() -> None:
+    db = FakeDb(fail_stage="exact_rc")
+    c = coordinator(db, split_staging_seconds=0)
+    with pytest.raises(FakeDbError, match="injected failure in staging step exact_rc"):
+        c.process(driver_conn(db), 101, 10100)
+
+    assert [step for step, *_ in db.staged] == ["ops", "authored_ops"]
+    assert any(e == "rollback stage exact_rc 101..10100" for _, e in db.log)
+    assert not any(e.startswith(("group ", "finish")) for _, e in db.log)
+
+    c.process(driver_conn(db), 101, 10100)
+    assert {step for step, *_ in db.staged} == set(STAGE_STEPS)
+    assert sorted(db.committed) == sorted(GROUPS)
+    assert ("driver", "finish 101..10100") in db.log
+
+
+def test_a_failed_split_staging_ahead_is_logged_and_the_batch_stages_itself(capsys: pytest.CaptureFixture[str]) -> None:
+    db = FakeDb(fail_stage="authored_ops", fail_stage_from=10001)
+    c = coordinator(db, split_staging_seconds=0)
+    c.process(driver_conn(db), 1, 10000)
+    c.process(driver_conn(db), 10001, 20000)
+
+    assert ("authored_ops", 10001, 20000) in db.staged
+    assert ("driver", "finish 10001..20000") in db.log
+    out = capsys.readouterr().out
+    assert ("haf_stats_parallel: batch staging ahead authored_ops, blocks 10001..20000, failed: "
             "injected failure in staging step authored_ops") in out
 
 
@@ -561,6 +670,18 @@ def test_parallelism_from_env(value: str, expected: int) -> None:
 def test_a_bad_parallelism_is_refused(value: str) -> None:
     with pytest.raises(ValueError, match=parallel.PARALLELISM_ENV):
         parallel.parallelism_from_env({parallel.PARALLELISM_ENV: value})
+
+
+@pytest.mark.parametrize("value,expected", [("", 2.0), ("0", 0.0), ("0.5", 0.5), (" 10 ", 10.0)])
+def test_split_staging_seconds_from_env(value: str, expected: float) -> None:
+    assert parallel.split_staging_seconds_from_env({parallel.SPLIT_STAGING_ENV: value}) == expected
+    assert parallel.split_staging_seconds_from_env({}) == 2.0
+
+
+@pytest.mark.parametrize("value", ["-1", "two", "nan", "inf"])
+def test_a_bad_split_staging_seconds_is_refused(value: str) -> None:
+    with pytest.raises(ValueError, match=parallel.SPLIT_STAGING_ENV):
+        parallel.split_staging_seconds_from_env({parallel.SPLIT_STAGING_ENV: value})
 
 
 # --- scripts/process_blocks.sh -----------------------------------------------------
