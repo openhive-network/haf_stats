@@ -1198,7 +1198,8 @@ fails; see below). hive/haf_api_node's `haf-stats-block-processing` has the same
 as hive/haf_api_node!296 proposes — has to be stopped too.
 
 **The wrapper's own check.** A psql base image with the wrapper from
-hive/common-ci-configuration#85 makes the same decision itself. The install hands the wrapper
+hive/common-ci-configuration#85 makes the same decision itself; this image's base, `psql:14-4`,
+has it. The install hands the wrapper
 the version this image installs (`HAF_APP_INSTALL_VERSION`, read from the baked
 `db/version.sql`) and how to read the installed one (`HAF_APP_INSTALLED_VERSION_QUERY`,
 `SELECT git_hash FROM haf_stats_app.app_version LIMIT 1`). With the lock held:
@@ -1208,14 +1209,15 @@ the version this image installs (`HAF_APP_INSTALL_VERSION`, read from the baked
 - if the installed version cannot be read, the wrapper warns and skips, exit 0.
 
 `haf-stats-process` waits for setup to complete successfully, so a blocked upgrade makes
-`docker compose up -d` itself fail. The error says to stop `haf_stats-postgrest`. For haf_stats
+`docker compose up -d` itself fail. The error names the lock's holders as HAF reports them
+(hive/common-ci-configuration#86) and says to stop them. For haf_stats
 the holder is the block processor (`haf-stats-process` here, `haf-stats-block-processing` in
 hive/haf_api_node), plus any PostgREST holding the lock under hive/haf_api_node!296. Stop
 those, rerun the install, then start them again.
 
 Two images built without `GIT_HASH` both carry `unspecified`, so an upgrade between them still
-looks like a rerun and skips. The `psql:14-3` wrapper this image ships today ignores both
-variables; `install_app.sh`'s own check above fails the upgrade instead. A checkout has no `db/version.sql`, so `install_app.sh` sets
+looks like a rerun and skips. An image on the older `psql:14-3` base has a wrapper that ignores
+both variables; there `install_app.sh`'s own check above fails the upgrade instead. A checkout has no `db/version.sql`, so `install_app.sh` sets
 neither there.
 
 If an install keeps skipping with no processor running, a leftover session still holds the

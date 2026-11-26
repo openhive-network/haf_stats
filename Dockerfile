@@ -1,4 +1,4 @@
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-4
 
 # Root for the BUILD steps only: WORKDIR creates /app root-owned and the RUN below writes
 # /app/db/version.sql into it. The runtime user is dropped to at the end of this file.
@@ -103,10 +103,11 @@ RUN case "${GIT_HASH}" in \
 # checks scan the WHOLE filesystem, so anything writable that this misses -- here or
 # anywhere else -- fails CI rather than shipping) get the same treatment, but only for
 # the files that need it.
-# The base image (common-ci-configuration psql:14-3) ships haf_app_driver.py,
-# install_with_app_lock.py and run_with_reconnect.sh in /usr/local/bin as 0777, and
-# scripts/process_blocks.sh execs haf_app_driver.py from PATH -- so without this the
-# runtime user could rewrite its own block loop. `find ... -exec`, not `chmod -R`, so
+# The base image (common-ci-configuration psql) ships haf_app_driver.py,
+# install_with_app_lock.py and run_with_reconnect.sh in /usr/local/bin; psql:14-3 shipped
+# them 0777, and 14-4 ships 0755 but is a mutable tag. scripts/process_blocks.sh execs
+# haf_app_driver.py from PATH -- so without this a writable copy would let the runtime
+# user rewrite its own block loop. `find ... -exec`, not `chmod -R`, so
 # only the offending files are copied into this layer rather than all of /usr/bin.
 # Symlinks are skipped: their mode is meaningless and chmod would follow them.
 #

@@ -7,7 +7,7 @@
 #   endpoints/rpc_arguments.lua and docker/haf_stats_nginx.conf.template are served by
 #   the openresty (and its hive.rpc_form module) production runs
 #   + bash, psql, python3, git, the psycopg2 module, and install_with_app_lock.py /
-#     haf_app_driver.py from common-ci-configuration/psql:14-3 (the app image's base),
+#     haf_app_driver.py from common-ci-configuration/psql:14-4 (the app image's base),
 #     so scripts/install_app.sh runs as it does in the app image
 #   + postgrest v12.2.3 (the binary docker/docker-compose-ci.yml's postgrest service runs)
 #   + shellcheck 0.11.0, hadolint (the latest-alpine CI's hadolint job ran on
@@ -26,7 +26,7 @@
 # only input (nothing is copied from the tree). Build and pin it with
 # .aidev/runtime/build.sh; see .aidev/README.md.
 FROM postgrest/postgrest:v12.2.3@sha256:729bf65c733b73f5b52777f0e4b853f22ed73aa67a22d38269d289779b0a8401 AS postgrest
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-3@sha256:6a3794d9fdc4e0590789fc01e48539bcd73273715e3b69dd1f45d3ecde8b1cde AS psql
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:14-4@sha256:f3ff5fbfb5e363c429bc2739952cf8d12cfaa4febe46e8707a9d39a3b9d29130 AS psql
 FROM koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
 FROM hadolint/hadolint:latest-alpine@sha256:a1d49ae1a4e83c1dbad26b8c1ad7588c8bd1e04f4866b34ad3cac50335198552 AS hadolint
 FROM docker:24-cli@sha256:2b62f89aaab9e4df0ff843f0d9a7bbd17340a9ba7c660ba6f40b1f00b38c2a4d AS docker
