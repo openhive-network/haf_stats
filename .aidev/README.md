@@ -174,7 +174,7 @@ the runtime image (below). `stack-pins` fails until they match.
 
 The checks run in a container with your uid: `Dockerfile.rewriter`'s base
 (common-ci-configuration's openresty image), plus bash, `psql`, python3 and git,
-`install_with_app_lock.py` and `haf_app_driver.py` from `psql:14-3` (the app image's
+`install_with_app_lock.py` and `haf_app_driver.py` from `psql:14-4` (the app image's
 base), PostgREST 12.2.3, ShellCheck 0.11.0, hadolint, the docker CLI and its compose
 plugin, tavern + pytest at the versions common-ci-configuration's `python-test-tools` image
 ships (read from that image, pinned by digest: CI's tavern and unit jobs run in it) with pyyaml and

@@ -231,8 +231,8 @@ if [ "${HAF_INSTALL_LOCK_HELD:-}" != "haf_stats" ]; then
         # cannot take the lock still skips a rerun of the installed version with exit 0, but
         # FAILS, naming the holder, when this image would install a different version: a skip
         # would leave the old schema serving under the new image. They go in the environment,
-        # not as --version flags, because the psql:14-3 wrapper predates them and would read a
-        # flag as the app name; it ignores the environment. The version is the one
+        # not as --version flags, because an older wrapper (psql:14-3's) predates them and would
+        # read a flag as the app name; it ignores the environment. The version is the one
         # db/version.sql writes (baked by the Dockerfile). A checkout has no version.sql, so
         # this sets neither there.
         if [ -f "${SCRIPT_DIR}/../db/version.sql" ]; then
@@ -240,7 +240,7 @@ if [ "${HAF_INSTALL_LOCK_HELD:-}" != "haf_stats" ]; then
             export HAF_APP_INSTALL_VERSION
             export HAF_APP_INSTALLED_VERSION_QUERY="SELECT git_hash FROM haf_stats_app.app_version LIMIT 1"
         fi
-        # An UPGRADE must not be skipped, with today's wrapper too. psql:14-3's ignores the
+        # An UPGRADE must not be skipped, with an older wrapper too. psql:14-3's ignores the
         # variables above, and every wrapper tries the lock once, while on an image
         # upgrade compose starts this install seconds after it stops the old processor,
         # whose backend can hold the shared lock a while longer: the legacy loop's until

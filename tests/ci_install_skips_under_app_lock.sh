@@ -53,13 +53,16 @@ set_sentinel
 # 1. Under the processor's lock: the install must not run. The sentinel is not the version this
 #    image installs, so this is an upgrade. install_app.sh waits HAF_STATS_INSTALL_LOCK_WAIT
 #    seconds for the holder, then fails the blocked upgrade (exit 1) rather than skip it with
-#    exit 0, whichever wrapper the image has: the psql:14-3 wrapper skips and install_app.sh's
-#    own check fails it ("was NOT installed"); a wrapper with hive/common-ci-configuration#85's
-#    upgrade detection (it reads HAF_APP_INSTALL_VERSION) fails it itself. An image built
+#    exit 0, whichever wrapper the image has: a wrapper with hive/common-ci-configuration#85's
+#    upgrade detection (it reads HAF_APP_INSTALL_VERSION; the psql:14-4 base's does) fails it
+#    itself, and with #86 its recovery line names the holder HAF reported; an older one
+#    (psql:14-3's) skips and install_app.sh's own check fails it ("was NOT installed"). An image built
 #    without a usable GIT_HASH ("unspecified") cannot tell an upgrade from a rerun and skips.
 #    1b: a rerun of the installed version skips with exit 0.
 detects_upgrades=0
 grep -q HAF_APP_INSTALL_VERSION /usr/local/bin/install_with_app_lock.py && detects_upgrades=1
+names_holders=0
+grep -q "the lock's holder(s)" /usr/local/bin/install_with_app_lock.py && names_holders=1
 image_version="$(sed -n "s/.*VALUES ('\([A-Za-z0-9._-]*\)').*/\1/p" /app/db/version.sql)"
 /app/docker_entrypoint.sh install_app "$@" 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
@@ -72,6 +75,10 @@ else
         fail "install_app did not wait for the holder before giving up"
     if [ "${detects_upgrades}" = "1" ]; then
         grep -q "Cannot install haf_stats version" "$log" || fail "the wrapper did not report the blocked upgrade"
+        if [ "${names_holders}" = "1" ]; then
+            grep "Cannot install haf_stats version" "$log" | grep -q "stop the lock's holder(s) (.*ci_app_lock_holder" ||
+                fail "the wrapper's recovery line does not name the lock's holder (ci_app_lock_holder)"
+        fi
     else
         grep -q "Skipping haf_stats install" "$log" || fail "the wrapper did not report a skip"
         grep -q "version ${image_version} was NOT installed" "$log" ||
