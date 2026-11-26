@@ -175,8 +175,8 @@ log "Block processing start time recorded: $(cat "${STARTUP_TIME_FILE}")"
 
 log "Starting block processing loop..."
 
-# The generic HAF block-processing driver (haf#341; on PATH from the psql:14-3 base
-# image) calls hive.app_next_iteration itself and runs the registered
+# The generic HAF block-processing driver (haf#341; on PATH from the psql base image,
+# 14-3 on) calls hive.app_next_iteration itself and runs the registered
 # haf_stats_app.process_blocks once per delivered range, committing between ranges and
 # idling on its own connection in between -- so no transaction spans the wait for a new
 # block, and the backend shows `idle` rather than `idle in transaction` holding context
