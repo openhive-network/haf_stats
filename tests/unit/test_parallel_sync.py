@@ -287,6 +287,13 @@ def _first(db: FakeDb, prefix: str) -> int:
     return min(i for i, (_, e) in enumerate(db.log) if e.startswith(prefix))
 
 
+def _stage_events(db: FakeDb, blocks: str) -> list[str]:
+    """Every staging step run for the range, on any connection. Counted over the whole log: the
+    staging ahead runs on its own threads, so its steps can still be logged after the call that
+    started it returned."""
+    return sorted(e for _, e in db.log if e.startswith("stage ") and e.endswith(f" {blocks}"))
+
+
 def test_the_first_batch_is_staged_once_in_level_order_before_any_group() -> None:
     db = FakeDb()
     coordinator(db).process(driver_conn(db), 101, 10100)
@@ -324,7 +331,7 @@ def test_a_batch_staged_ahead_starts_its_groups_at_once() -> None:
     assert _first(db, "stage ops 10001..20000") < _first(db, "group financial 10001..20000")
     second = db.log[begin:db.log.index(("driver", "finish 10001..20000"))]
     assert [e for n, e in second if n == "driver"] == ["begin"]
-    assert not any(e.endswith(" 10001..20000") and e.startswith("stage ") for _, e in second)
+    assert _stage_events(db, "10001..20000") == sorted(f"stage {s} 10001..20000" for s in STAGE_STEPS)
     assert sorted(e for _, e in second if e.startswith("group ")) == sorted(f"group {g} 10001..20000" for g in GROUPS)
 
 
@@ -429,7 +436,8 @@ def test_a_split_staging_ahead_starts_the_next_batch_at_once() -> None:
     c.process(driver_conn(db), 10001, 20000)
 
     second = db.log[begin:db.log.index(("driver", "finish 10001..20000"))]
-    assert not any(e.startswith("stage ") and e.endswith(" 10001..20000") for _, e in second)
+    assert [e for n, e in second if n == "driver"] == ["begin"]
+    assert _stage_events(db, "10001..20000") == sorted(f"stage {s} 10001..20000" for s in STAGE_STEPS)
     assert [step for step, *blocks in db.staged if blocks == [10001, 20000]] == STAGE_STEPS
 
 
