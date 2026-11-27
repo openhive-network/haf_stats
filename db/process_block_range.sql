@@ -287,6 +287,7 @@ SET jit = OFF
 SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 SET enable_bitmapscan = 'off'
+SET enable_mergejoin = 'off'
 AS $$
 DECLARE
     _safe BOOLEAN := FALSE;
@@ -302,11 +303,17 @@ BEGIN
     -- wrapper would have given it, without its cost: the first run's rows roll back with its
     -- subtransaction. WHEN OTHERS because the safe wrapper treats any failure as authorless; a
     -- failure that is not the authority lookup's raises again from the second run.
+    --
+    -- The rows are inserted in primary-key order. The shared staging's table keeps its key
+    -- through the load (stage_shared_batch), and in name order each row would go to a random
+    -- page of the key: on a dense batch that cost more than the sort. Duplicate pairs are
+    -- removed by that final step, on account ids rather than names. The join hashes the names
+    -- (enable_mergejoin): a merge join would sort every authored row by name first.
     <<attempt>>
     LOOP
         BEGIN
             WITH authored AS MATERIALIZED (
-                SELECT DISTINCT
+                SELECT
                     s.op_id,
                     ra.account_name AS actor_name,
                     s.op_time,
@@ -328,30 +335,24 @@ BEGIN
                 --
                 -- The four types that are most of the non-virtual stream sign with fields of
                 -- their body, read here directly: the same accounts hive.get_required_authorities
-                -- returns for them, without building the operation for it. A body that lacks the
-                -- field gives NULL, or no array element, so no row; HAF gives '' or raises,
-                -- which also leaves the op no account. A non-array auths field is skipped
-                -- rather than raising.
+                -- returns for them, without building the operation for it. Each op's signer
+                -- fields are read as one array, so they cost one function call per op: a body
+                -- that lacks the field gives a null element, or no element, so no row; HAF gives
+                -- '' or raises, which also leaves the op no account. A non-array auths field is
+                -- skipped rather than raising.
                 CROSS JOIN LATERAL (
-                    SELECT s.body_value ->> 'voter' WHERE s.op_type_id = 0          -- vote_operation
-                    UNION ALL
-                    SELECT s.body_value ->> 'author' WHERE s.op_type_id = 1         -- comment_operation
-                    UNION ALL
-                    SELECT s.body_value ->> 'from' WHERE s.op_type_id = 2           -- transfer_operation
-                    UNION ALL
-                    SELECT auth.name                                                -- custom_json_operation
-                    FROM jsonb_array_elements_text(
-                        CASE WHEN jsonb_typeof(s.body_value -> 'required_auths') = 'array'
-                             THEN s.body_value -> 'required_auths' END
-                    ) AS auth (name)
-                    WHERE s.op_type_id = 18
-                    UNION ALL
                     SELECT auth.name
-                    FROM jsonb_array_elements_text(
-                        CASE WHEN jsonb_typeof(s.body_value -> 'required_posting_auths') = 'array'
-                             THEN s.body_value -> 'required_posting_auths' END
-                    ) AS auth (name)
-                    WHERE s.op_type_id = 18
+                    FROM jsonb_array_elements_text(CASE s.op_type_id
+                        WHEN 0 THEN jsonb_build_array(s.body_value -> 'voter')                -- vote_operation
+                        WHEN 1 THEN jsonb_build_array(s.body_value -> 'author')               -- comment_operation
+                        WHEN 2 THEN jsonb_build_array(s.body_value -> 'from')                 -- transfer_operation
+                        WHEN 18 THEN                                                          -- custom_json_operation
+                            (CASE WHEN jsonb_typeof(s.body_value -> 'required_auths') = 'array'
+                                  THEN s.body_value -> 'required_auths' ELSE '[]'::JSONB END)
+                            || (CASE WHEN jsonb_typeof(s.body_value -> 'required_posting_auths') = 'array'
+                                     THEN s.body_value -> 'required_posting_auths' ELSE '[]'::JSONB END)
+                    END) AS auth (name)
+                    WHERE s.op_type_id IN (0, 1, 2, 18)
                     UNION ALL
                     -- Every other type through HAF, in the {type, value} form it takes, as
                     -- operations_view builds it. _safe is a constant of the statement, so only
@@ -381,9 +382,10 @@ BEGIN
                 )
             )
             INSERT INTO haf_stats_batch_authored_ops (op_id, account_id, op_time, day, op_class)
-            SELECT a.op_id, ni.id, a.op_time, a.day, a.op_class
+            SELECT DISTINCT a.op_id, ni.id, a.op_time, a.day, a.op_class
             FROM authored a
-            JOIN name_ids ni ON ni.name = a.actor_name;
+            JOIN name_ids ni ON ni.name = a.actor_name
+            ORDER BY a.op_id, ni.id;
             GET DIAGNOSTICS _rows = ROW_COUNT;
 
             EXIT attempt;
@@ -430,9 +432,9 @@ BEGIN
         day DATE NOT NULL,
         op_class SMALLINT
     ) ON COMMIT DROP;
-    -- The primary key is added after the load: the rows arrive in name order, which is random
-    -- op order, and building the key once is cheaper than inserting each row into it. Dropped
-    -- first so a second staging in the same transaction loads without it too.
+    -- The primary key is added after the load: building it once is cheaper than inserting each
+    -- row into it. Dropped first so a second staging in the same transaction loads without it
+    -- too.
     ALTER TABLE haf_stats_batch_authored_ops DROP CONSTRAINT IF EXISTS haf_stats_batch_authored_ops_pkey;
     TRUNCATE haf_stats_batch_authored_ops;
 
