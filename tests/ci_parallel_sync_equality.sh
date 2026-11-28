@@ -195,7 +195,8 @@ fail_and_resume() {
     [ "$rows" -ge 1 ] && [ "$rows" = "$continuing" ] && [ "$network" = 0 ] && [ "$shard" = 0 ] && [ "$shards" -ge 1 ] \
         || { echo "FAIL: $name: expected the other groups' progress rows for the failed batch, other custom_json shards' among them, and none for network or custom_json_1"; return 1; }
     staged="$(q "$db" "SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker
-                       WHERE first_block = $((at + 1)) AND last_block = $batch_end")" || return 1
+                       WHERE first_block = $((at + 1)) AND last_block = $batch_end
+                         AND stage IN ('ops', 'authored_ops', 'exact_rc', 'custom_json_ops')")" || return 1
     [ "$staged" = 4 ] || { echo "FAIL: $name: $staged of the failed batch's 4 shared stages committed"; return 1; }
 
     q "$db" "SET ROLE haf_stats_owner; DROP TRIGGER ci_fail_network_once ON haf_stats_backend.network_op_daily;
@@ -239,7 +240,7 @@ fail_and_resume() {
 # another on one connection, exact_rc would never have run), and its context before the batch,
 # so that the batch is delivered again.
 fail_staging_twice() {
-    local db="$1" log="$2" first="$3" split="$4" staged at
+    local db="$1" log="$2" first="$3" split="$4" staged expected at
     q "$db" "
         SET ROLE haf_stats_owner;
         CREATE SEQUENCE haf_stats_app.ci_fail_stage_twice;
@@ -261,10 +262,12 @@ fail_staging_twice() {
         || { echo "the staging ahead of the batch from $first did not fail split on the injected failure:"; tail -40 "$log"; return 1; }
     grep -q "batch staging steps authored_ops, blocks $first\.\..*failed: .*ci: injected authored_ops staging failure" "$log" \
         || { echo "the resume did not stop on the injected failure of the batch from $first staging itself, split:"; tail -40 "$log"; return 1; }
-    staged="$(q "$db" "SELECT string_agg(DISTINCT stage, ',' ORDER BY stage) FROM haf_stats_app.shared_batch_marker
+    staged="$(q "$db" "SELECT string_agg(DISTINCT stage COLLATE \"C\", ',' ORDER BY stage COLLATE \"C\") FROM haf_stats_app.shared_batch_marker
                        WHERE first_block = $first")" || return 1
-    [ "$staged" = "custom_json_ops,exact_rc,ops" ] \
-        || { echo "after the failed authored_ops steps, stages '$staged' of the batch from $first committed, not custom_json_ops,exact_rc,ops"; return 1; }
+    expected="custom_json_ops,exact_rc,ops,$(q "$db" "SELECT string_agg('ops_' || k, ',' ORDER BY k)
+                                                      FROM generate_series(0, haf_stats_app.shared_batch_ops_parts() - 1) AS k"),slot" || return 1
+    [ "$staged" = "$expected" ] \
+        || { echo "after the failed authored_ops steps, stages '$staged' of the batch from $first committed, not $expected"; return 1; }
     at="$(q "$db" "SELECT last_processed_block FROM haf_stats_app.app_status")" || return 1
     [ "$at" = "$((first - 1))" ] || { echo "the resume stopped at block $at, not before the batch from $first"; return 1; }
     q "$db" "SET ROLE haf_stats_owner; DROP TRIGGER ci_fail_stage_twice ON haf_stats_app.shared_batch_marker;

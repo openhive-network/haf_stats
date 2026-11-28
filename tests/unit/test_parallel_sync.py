@@ -652,6 +652,23 @@ def test_every_massive_batch_reports_its_phases_and_group_times(capsys: pytest.C
     assert records[0]["stage_seconds"] <= records[0]["seconds"]["staging"]
 
 
+def test_the_phases_line_times_each_staging_round_trip(capsys: pytest.CaptureFixture[str]) -> None:
+    # The first batch stages in one round trip; it took longer than the threshold, so the second
+    # batch's range, staged ahead, takes a round trip per level, the ops level the slow one.
+    db = FakeDb(stage_delay=0.05)
+    c = coordinator(db, split_staging_seconds=0.02)
+    c.process(driver_conn(db), 1, 10000)
+    c.process(driver_conn(db), 10001, 20000)
+
+    first, second = _batch_lines(capsys.readouterr().out)
+    [whole] = first["stage_level_seconds"]
+    assert 0.05 <= whole <= first["stage_seconds"]
+    levels = second["stage_level_seconds"]
+    assert len(levels) == len(STAGE_LEVELS)
+    assert levels[0] >= 0.05 and all(0 <= s < 0.05 for s in levels[1:])
+    assert sum(levels) <= second["stage_seconds"]
+
+
 def test_staging_is_the_critical_part_when_no_group_takes_longer(capsys: pytest.CaptureFixture[str]) -> None:
     # A group whose progress row has no time (written before it was recorded) reports null.
     db = FakeDb(group_seconds={**dict.fromkeys(GROUPS, 0.0), "network": None})
