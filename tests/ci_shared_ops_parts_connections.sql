@@ -16,47 +16,57 @@
 -- marked, and the staged rows must be prepare_batch_ops' for the range, as a multiset.
 --
 -- The other connections must see the fixture, so the setup is committed and undone at the end;
--- the result is recorded and raised only after the cleanup. dblink connects over the server's
+-- the setup, the scenarios and the connections record a failure rather than stop the file, and
+-- it is raised only after the cleanup. The setup is one block, so a failure in it leaves none of
+-- it behind, and the cleanup undoes only a setup that committed. dblink connects over the server's
 -- local socket (see tests/ci_alltime_refresh.sql), and is dropped again only if this file created
 -- it.
 \set ON_ERROR_STOP on
 
 CREATE TEMP TABLE ci173_saved AS
-SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'dblink') AS had_dblink;
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'dblink') AS had_dblink, FALSE AS set_up;
 CREATE TEMP TABLE ci173_result (failure TEXT);
 
 CREATE EXTENSION IF NOT EXISTS dblink;
 
--- Every fixture block is irreversible; the stub lane has no HAF context. The stub has no such
--- function, so creating it fails loudly if one exists.
-CREATE FUNCTION hive.app_get_irreversible_block()
-RETURNS INT
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT 2147483647;
-$$;
+DO $setup$
+BEGIN
+    -- Every fixture block is irreversible; the stub lane has no HAF context. The stub has no such
+    -- function, so creating it fails loudly if one exists.
+    CREATE FUNCTION hive.app_get_irreversible_block()
+    RETURNS INT
+    LANGUAGE sql
+    STABLE
+    AS $$
+        SELECT 2147483647;
+    $$;
 
-INSERT INTO hafd.blocks (num, created_at)
-SELECT n, TIMESTAMP '2021-10-08 00:00:00' + (n - 6680) * INTERVAL '3 seconds'
-FROM generate_series(6680, 6690) AS n
-UNION ALL
-VALUES (6695, TIMESTAMP '2021-10-08 00:00:45'), (6696, TIMESTAMP '2021-10-08 00:00:48');
+    INSERT INTO hafd.blocks (num, created_at)
+    SELECT n, TIMESTAMP '2021-10-08 00:00:00' + (n - 6680) * INTERVAL '3 seconds'
+    FROM generate_series(6680, 6690) AS n
+    UNION ALL
+    VALUES (6695, TIMESTAMP '2021-10-08 00:00:45'), (6696, TIMESTAMP '2021-10-08 00:00:48');
 
--- An op at each outer edge of each part of 6680-6690, non-virtual and staged virtual; blocks
--- 6683, 6686 and 6689 hold none.
-INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
-(hafd.operation_id(6680, 0), 1, '{"voter": "spc-alice", "author": "spc-bob", "permlink": "p", "weight": 10000}', 0),
-(hafd.operation_id(6681, 1), 2, '{"from": "spc-bob", "to": "spc-alice", "amount": "1.000 HIVE", "memo": ""}', 0),
-(hafd.operation_id(6682, 0), 64, '{"producer": "spc-carol", "vesting_shares": "1.000000 VESTS"}', -1),
-(hafd.operation_id(6684, 3), 1, '{"voter": "spc-carol", "author": "spc-alice", "permlink": "q", "weight": 5000}', 1),
-(hafd.operation_id(6685, 0), 2, '{"from": "spc-alice", "to": "spc-dave", "amount": "2.000 HIVE", "memo": "m"}', 0),
-(hafd.operation_id(6687, 2), 64, '{"producer": "spc-dave", "vesting_shares": "2.000000 VESTS"}', -1),
-(hafd.operation_id(6688, 0), 1, '{"voter": "spc-dave", "author": "spc-carol", "permlink": "r", "weight": 100}', 0),
-(hafd.operation_id(6690, 5), 2, '{"from": "spc-dave", "to": "spc-bob", "amount": "3.000 HIVE", "memo": ""}', 2),
-(hafd.operation_id(6695, 0), 1, '{"voter": "spc-bob", "author": "spc-dave", "permlink": "s", "weight": 200}', 0),
-(hafd.operation_id(6696, 1), 2, '{"from": "spc-carol", "to": "spc-bob", "amount": "4.000 HIVE", "memo": ""}', 0),
-(hafd.operation_id(6696, 2), 64, '{"producer": "spc-bob", "vesting_shares": "3.000000 VESTS"}', -1);
+    -- An op at each outer edge of each part of 6680-6690, non-virtual and staged virtual; blocks
+    -- 6683, 6686 and 6689 hold none.
+    INSERT INTO hafd.operations (id, op_type_id, body_value, trx_in_block) VALUES
+    (hafd.operation_id(6680, 0), 1, '{"voter": "spc-alice", "author": "spc-bob", "permlink": "p", "weight": 10000}', 0),
+    (hafd.operation_id(6681, 1), 2, '{"from": "spc-bob", "to": "spc-alice", "amount": "1.000 HIVE", "memo": ""}', 0),
+    (hafd.operation_id(6682, 0), 64, '{"producer": "spc-carol", "vesting_shares": "1.000000 VESTS"}', -1),
+    (hafd.operation_id(6684, 3), 1, '{"voter": "spc-carol", "author": "spc-alice", "permlink": "q", "weight": 5000}', 1),
+    (hafd.operation_id(6685, 0), 2, '{"from": "spc-alice", "to": "spc-dave", "amount": "2.000 HIVE", "memo": "m"}', 0),
+    (hafd.operation_id(6687, 2), 64, '{"producer": "spc-dave", "vesting_shares": "2.000000 VESTS"}', -1),
+    (hafd.operation_id(6688, 0), 1, '{"voter": "spc-dave", "author": "spc-carol", "permlink": "r", "weight": 100}', 0),
+    (hafd.operation_id(6690, 5), 2, '{"from": "spc-dave", "to": "spc-bob", "amount": "3.000 HIVE", "memo": ""}', 2),
+    (hafd.operation_id(6695, 0), 1, '{"voter": "spc-bob", "author": "spc-dave", "permlink": "s", "weight": 200}', 0),
+    (hafd.operation_id(6696, 1), 2, '{"from": "spc-carol", "to": "spc-bob", "amount": "4.000 HIVE", "memo": ""}', 0),
+    (hafd.operation_id(6696, 2), 64, '{"producer": "spc-bob", "vesting_shares": "3.000000 VESTS"}', -1);
+
+    UPDATE ci173_saved SET set_up = TRUE;
+EXCEPTION WHEN OTHERS THEN
+    INSERT INTO ci173_result VALUES ('setup: ' || SQLERRM);
+END;
+$setup$;
 
 -- Waits, up to 30 s, until the statement sent on _conn (backend _pid) has returned (_blocked
 -- FALSE) or is waiting for the ops-finish lock (_blocked TRUE); fails if it returns while it
@@ -174,6 +184,9 @@ DO $connect$
 DECLARE
     _conn TEXT;
 BEGIN
+    IF EXISTS (SELECT FROM ci173_result) THEN
+        RETURN;
+    END IF;
     FOR _k IN 0..haf_stats_app.shared_batch_ops_parts() - 1 LOOP
         _conn := 'ci173_part_' || _k;
         PERFORM dblink_connect(_conn, format('dbname=%s user=postgres application_name=%s', current_database(), _conn));
@@ -191,6 +204,7 @@ DECLARE
     _order INT [] := ARRAY[2, 0, 3, 1];
     _k INT;
     _prev INT;
+    _marked BIGINT;
     _conn TEXT;
 BEGIN
     IF EXISTS (SELECT FROM ci173_result) THEN
@@ -200,7 +214,8 @@ BEGIN
         RAISE EXCEPTION 'FAIL: out of order: written for % parts, not %', cardinality(_order), haf_stats_app.shared_batch_ops_parts();
     END IF;
     PERFORM r.v FROM dblink('ci173_part_0', 'SELECT haf_stats_app.stage_shared_batch(''slot'', 6680, 6690)') AS r(v TEXT);
-    FOREACH _k IN ARRAY _order LOOP
+    FOR _i IN 1..cardinality(_order) LOOP
+        _k := _order[_i];
         _conn := 'ci173_part_' || _k;
         PERFORM dblink_exec(_conn, 'BEGIN');
         PERFORM dblink_send_query(_conn, format('SELECT haf_stats_app.stage_shared_batch(%L, 6680, 6690)', 'ops_' || _k));
@@ -211,8 +226,13 @@ BEGIN
         END IF;
         PERFORM pg_temp.ci173_wait(_conn, (SELECT c.pid FROM ci173_conn AS c WHERE c.part = _k), FALSE);
         PERFORM pg_temp.ci173_returned(_conn);
-        IF pg_temp.ci173_ops_marked(6680, 6690) <> 0 THEN
-            RAISE EXCEPTION 'FAIL: out of order: the ops stage of 6680-6690 was marked complete before part % committed', _k;
+        -- This session sees only what the parts committed: those before _k, not _k, which has
+        -- loaded its rows and is still open. Whichever part _k is, the last one included, no
+        -- ops marker may be visible yet.
+        _marked := pg_temp.ci173_ops_marked(6680, 6690);
+        IF _marked <> 0 THEN
+            RAISE EXCEPTION 'FAIL: out of order: % ops markers of 6680-6690 are visible with % of its % parts committed and part % loaded but open',
+                _marked, _i - 1, cardinality(_order), _k;
         END IF;
         _prev := _k;
     END LOOP;
@@ -259,11 +279,30 @@ BEGIN
     END LOOP;
 END;
 $cleanup$;
+-- The staged rows, in each slot the scenarios staged a range into.
+DO $staged$
+DECLARE
+    _slot SMALLINT;
+BEGIN
+    FOR _slot IN
+        SELECT DISTINCT m.slot FROM haf_stats_app.shared_batch_marker AS m
+        WHERE m.stage = 'slot' AND m.first_block IN (6680, 6695)
+    LOOP
+        EXECUTE format('DELETE FROM haf_stats_app.%I WHERE block_num BETWEEN 6680 AND 6696', 'shared_batch_ops_' || _slot);
+    END LOOP;
+END;
+$staged$;
 DELETE FROM haf_stats_app.shared_batch_marker WHERE first_block IN (6680, 6695);
-DELETE FROM hafd.operations
-WHERE id >= hafd.operation_id(6680, 0) AND id < hafd.operation_id(6697, 0);
-DELETE FROM hafd.blocks WHERE num BETWEEN 6680 AND 6696;
-DROP FUNCTION hive.app_get_irreversible_block();
+DO $fixture$
+BEGIN
+    IF (SELECT set_up FROM ci173_saved) THEN
+        DELETE FROM hafd.operations
+        WHERE id >= hafd.operation_id(6680, 0) AND id < hafd.operation_id(6697, 0);
+        DELETE FROM hafd.blocks WHERE num BETWEEN 6680 AND 6696;
+        DROP FUNCTION hive.app_get_irreversible_block();
+    END IF;
+END;
+$fixture$;
 DO $$
 BEGIN
     IF NOT (SELECT had_dblink FROM ci173_saved) THEN

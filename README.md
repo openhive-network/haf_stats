@@ -997,7 +997,7 @@ connections of their own committing out of order, and in a batch of fewer blocks
 staging round trip's seconds (`stage_level_seconds`): one per level once the staging is split, so
 a rebuild shows each level's time. Each part times `prepare_batch_ops` on its own; for a batch
 whose staging was split, `scripts/processor_timings_report.py` counts the step as its slowest
-part, its wall time, and reports the parts' sum apart (`split_ops_parts`). The custom_json ops step joins the ops to their exact RC shares by
+part, its wall time, and reports the parts' sum apart (`concurrent_parts`); likewise `process_custom_json`, timed once per shard of the custom_json group, counts as its slowest shard in a batch of the parallel path, whose shards ran as processor groups at once. The custom_json ops step joins the ops to their exact RC shares by
 merging them in op id order, not by hashing the op ids (1.6 s hashed, 0.44 s merged at 60M).
 
 The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database
