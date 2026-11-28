@@ -387,7 +387,7 @@ def test_a_bad_deferred_log_fails_and_writes_nothing(tmp_path: Path, capsys: pyt
 # --- the step lists against the SQL that emits the lines ------------------------------
 
 _TIMING_CALL = re.compile(r"report_processor_timing\('(\w+)', _first_block, _last_block, _t, '\{([^}]*)\}', "
-                          r"(NULL|'(\w+)')(?:, _shard)?\)")
+                          r"(NULL|'(\w+)')(?:, _shard|, _part)?\)")
 
 
 def _sql(name: str) -> str:

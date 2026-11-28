@@ -112,6 +112,7 @@ function haf_stats_app.scanned_op_type_literals() | owner=haf_stats_owner | secd
 function haf_stats_app.select_content_source(_requested text, _allow_switch boolean) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.set_daily_retention_floor(_daily_table text, _kept_from date) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.shared_batch_complete(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
+function haf_stats_app.shared_batch_ops_parts() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.shared_batch_slot(_first_block integer, _last_block integer) | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.shared_batch_stage_levels() | owner=haf_stats_owner | secdef=false | acl=<default>
 function haf_stats_app.stage_engagement_days_from_hivemind() | owner=haf_stats_owner | secdef=false | acl=<default>

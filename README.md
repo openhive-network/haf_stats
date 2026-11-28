@@ -943,8 +943,8 @@ past HAF's irreversible block is not staged ahead, since its blocks are not all 
 yet. The driver's transaction deletes the progress rows and the markers of every range the batch
 moves the HAF context past; the markers of the range staged ahead stay.
 
-A slot's first staging step empties its four tables with `TRUNCATE` in the transaction that loads
-them, and each load is analyzed, as the session-local staging is. #146 replaced the rows with
+A slot's first staging step claims it for the range and empties its four tables with `TRUNCATE`,
+and each load is analyzed, as the session-local staging is. #146 replaced the rows with
 `DELETE`, because `TRUNCATE` gives a table new files every batch, whose commit drops the old
 files' pages from `shared_buffers` ([#146](https://gitlab.syncad.com/hive/haf_stats/-/issues/146)).
 That kept the staging on the critical path and left about 3.4 million dead rows and 3 GB in
@@ -980,7 +980,20 @@ per level of `haf_stats_app.shared_batch_stage_levels()` instead of one: the ops
 authored_ops and exact_rc at once, each on a connection of its own, one more than before. Below
 that, as in the gate's 5M blocks, the staging stays in one round trip on one connection. Each step
 still commits on its own, so a step that fails leaves the steps beside it committed, and a range
-staged again reuses them. The custom_json ops step joins the ops to their exact RC shares by
+staged again reuses them.
+
+The ops step, which every other step reads, was then most of a dense batch's staging: at 71M it
+took 6.6-8.4 s of 10.6-13.3 s, nearly all of it one statement copying about 731,000 operations
+with their bodies ([#171](https://gitlab.syncad.com/hive/haf_stats/-/issues/171)). So the slot is
+claimed and emptied by a step of its own, the `slot` level, and the ops stage is loaded in
+`haf_stats_app.shared_batch_ops_parts()` (4) parts, the `ops_0`..`ops_3` level: each part copies
+one of as many consecutive block sub-ranges into the slot's one ops table, on a connection of its
+own once the staging is split. Each part commits with its own marker row, and the last to commit
+analyzes the table and marks the ops stage complete, so no step and no group reads the table
+before every part is in. The rows are those the one ops step staged, the same as the
+single-session path's (`tests/ci_shared_ops_parts_equality.sql`). The batch's line also holds each
+staging round trip's seconds (`stage_level_seconds`): one per level once the staging is split, so
+a rebuild shows each level's time. The custom_json ops step joins the ops to their exact RC shares by
 merging them in op id order, not by hashing the op ids (1.6 s hashed, 0.44 s merged at 60M).
 
 The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database

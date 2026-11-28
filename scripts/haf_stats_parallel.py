@@ -44,28 +44,31 @@ a round trip to the server is slow.
 
 Once staging a batch took HAF_STATS_SPLIT_STAGING_SECONDS (default 2) or longer, as it does in the
 dense blocks from about 57M on, the next staging runs each level's steps at once instead, each on
-a worker connection of its own: a round trip per level, and one more connection while a level
-has more than one step. Each step still commits on its own, so a failed step leaves the steps
-that committed, on its connection or another, to be reused when the range is staged again. The
-value is a number of seconds; 0 splits every staging.
+a worker connection of its own: a round trip per level, and a connection for each step of the
+widest level (the ops stage's parts) while it runs. Each step still commits on its own, so a
+failed step leaves the steps that committed, on its connection or another, to be reused when the
+range is staged again. The value is a number of seconds; 0 splits every staging.
 
 Each batch writes one line with the wall time of each of those four phases, as the driver
 measures the range processor's ("processed in"), and what bounds them:
 
     haf_stats_batch_phases {"first_block":..,"last_block":..,"seconds":{"begin":..,
                             "staging":..,"groups":..,"finish":..},"stage_seconds":..,
-                            "group_seconds":{"financial":..,..},"critical":"custom_json_0"}
+                            "stage_level_seconds":[..],"group_seconds":{"financial":..,..},
+                            "critical":"custom_json_0"}
 
 "begin" runs from the call to the staging's dispatch: begin_parallel_range, and on the first
 batch the query for the groups and staging steps. "staging" is the wait for the staging ahead
 and, when that did not stage the range, the batch's own staging. "stage_seconds" is how long
-staging the batch's range took, ahead or not; "group_seconds" each group's time on its worker
-connection (its haf_stats_app.processor_group_progress row, as finish_parallel_range returns
-them; a group that applied the batch in an earlier delivery reports that delivery's). A batch
-staged ahead takes the longer of its groups and the next batch's staging, so "critical" names
-the longest of the groups and "staging". With haf_stats.processor_timings on, the staging ahead
-also logs its steps' timings under the range it staged, which may be a range the driver never
-delivers. scripts/processor_timings_report.py reads both.
+staging the batch's range took, ahead or not, and "stage_level_seconds" each of its round trips':
+one per level of a split staging, a single one for all of them otherwise; "group_seconds" each
+group's time on its worker connection (its haf_stats_app.processor_group_progress row, as
+finish_parallel_range returns them; a group that applied the batch in an earlier delivery
+reports that delivery's). A batch staged ahead takes the longer of its groups and the next
+batch's staging, so "critical" names the longest of the groups and "staging". With
+haf_stats.processor_timings on, the staging ahead also logs its steps' timings under the range it
+staged, which may be a range the driver never delivers. scripts/processor_timings_report.py reads
+both.
 
 The worker connections use the driver's connection parameters (conn.get_dsn_parameters(), so
 the same application_name the rebuild scripts look for) and the password the driver's
@@ -120,6 +123,8 @@ class _Staged(NamedTuple):
     first_block: int
     last_block: int
     seconds: float
+    # Each round trip's seconds, in order.
+    level_seconds: tuple[float, ...]
 
 
 class _ConnectionInfo(Protocol):
@@ -219,10 +224,12 @@ class ParallelCoordinator:
             raise RuntimeError("the coordinator has no groups or staging steps")
         params = _worker_connection_params(conn)
         if staged_ahead is not None and (staged_ahead.first_block, staged_ahead.last_block) == (first_block, last_block):
-            stage_seconds = staged_ahead.seconds
+            stage_seconds, level_seconds = staged_ahead.seconds, staged_ahead.level_seconds
         else:
             own_staging_started = time.monotonic()
-            self._stage(params, "batch staging steps", self._stage_round_trips(), first_block, last_block)
+            _, level_seconds = self._stage(
+                params, "batch staging steps", self._stage_round_trips(), first_block, last_block
+            )
             stage_seconds = time.monotonic() - own_staging_started
         self._stage_seconds = stage_seconds
         groups_started = time.monotonic()
@@ -245,6 +252,7 @@ class ParallelCoordinator:
             "last_block": last_block,
             "seconds": {phase: round(seconds, 6) for phase, seconds in phases.items()},
             "stage_seconds": round(stage_seconds, 6),
+            "stage_level_seconds": [round(seconds, 6) for seconds in level_seconds],
             "group_seconds": {g: None if t is None else round(t, 6) for g, t in group_seconds.items()},
             "critical": _critical(stage_seconds, group_seconds),
         }))
@@ -294,17 +302,21 @@ class ParallelCoordinator:
         first_block: int,
         last_block: int,
         check: str | None = None,
-    ) -> bool:
+    ) -> tuple[bool, tuple[float, ...]]:
         """The staging steps for the range, round trip by round trip; then whether `check` found
-        the range staged. Every share of the last round trip runs `check` after its own steps:
-        the share whose check runs last sees what every share committed."""
+        the range staged, and each round trip's seconds. Every share of the last round trip runs
+        `check` after its own steps: the share whose check runs last sees what every share
+        committed."""
         complete: list[Any] = []
+        seconds: list[float] = []
         for i, shares in enumerate(round_trips):
             final = i == len(round_trips) - 1
+            started = time.monotonic()
             complete = self._run_at_once(
                 params, kind, _STAGE_SQL, shares, first_block, last_block, check if final else None
             )
-        return any(complete)
+            seconds.append(time.monotonic() - started)
+        return any(complete), tuple(seconds)
 
     def _prepare(self, cur: _Cursor) -> None:
         cur.execute("SELECT haf_stats_app.processor_groups(), haf_stats_app.shared_batch_stage_levels()")
@@ -338,8 +350,10 @@ class ParallelCoordinator:
         last_block: int,
     ) -> _Staged | None:
         started = time.monotonic()
-        complete = self._stage(params, "batch staging ahead", round_trips, first_block, last_block, check=_STAGED_SQL)
-        return _Staged(first_block, last_block, time.monotonic() - started) if complete else None
+        complete, level_seconds = self._stage(
+            params, "batch staging ahead", round_trips, first_block, last_block, check=_STAGED_SQL
+        )
+        return _Staged(first_block, last_block, time.monotonic() - started, level_seconds) if complete else None
 
     @staticmethod
     def _begin(cur: _Cursor, first_block: int, last_block: int) -> bool:

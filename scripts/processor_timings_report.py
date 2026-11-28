@@ -8,7 +8,8 @@
 DRIVER_LOG is haf_app_driver.py's output (with --server-messages=INFO) for a run with
 haf_stats.processor_timings = on (db/process_block_range.sql): one
 `haf_stats_processor_timing {...}` line per processor per batch (process_custom_json: one per
-shard of the custom_json group, whose seconds are summed), one per rollup refresh a processor
+shard of the custom_json group, and the shared staging's prepare_batch_ops one per part of the ops
+stage, whose seconds are summed), one per rollup refresh a processor
 ran, and one `haf_stats_operation_counts {...}` line per batch. Every other line is ignored. The
 batches must cover blocks N..M exactly, each with every processor timed once (or once per shard)
 and its operations counted once; anything else -- no timings at all, a line that is not JSON, a

@@ -629,12 +629,19 @@ $$;
 -- are never wrong for their range, and the rebuild scripts, which stage in their own session,
 -- never read them.
 --
--- The ops step empties its slot's four tables with TRUNCATE, in the transaction that loads them,
--- so another session never sees them empty, and nothing is left for autovacuum to reclaim; the
--- tables leave autovacuum off. TRUNCATE gives the tables new files, which costs the step a pass
--- over shared_buffers at commit (#146), but the step runs beside the previous batch's groups,
--- not before its own. Each load is analyzed, as the temp tables are: TRUNCATE resets the
--- planner's row count.
+-- The slot step claims a slot for the range: it deletes the slot's marker rows, empties its four
+-- tables with TRUNCATE and marks the slot as the range's (stage 'slot'), so nothing is left for
+-- autovacuum to reclaim; the tables leave autovacuum off. TRUNCATE gives the tables new files,
+-- which costs the step a pass over shared_buffers at commit (#146), but the step runs beside the
+-- previous batch's groups, not before its own. The ops stage is then loaded in parts
+-- (shared_batch_ops_parts()): part k fills the k-th of as many consecutive block sub-ranges into
+-- the slot's one ops table, each part a step of its own, so in the dense blocks the parts run at
+-- once on connections of their own rather than one after another on one (#171). Each part marks
+-- itself (stage 'ops_<k>') with its rows, and the part that commits last -- the one that finds
+-- every other part's row once it holds the ops-finish lock, which every part takes before its
+-- commit -- analyzes the table and marks the ops stage complete (stage 'ops'), so no reader sees
+-- the table before every part's rows are in it. Each load is analyzed, as the temp tables are:
+-- TRUNCATE resets the planner's row count.
 -- ---------------------------------------------------------------------------
 
 -- Before #148 there was one set of shared tables, emptied by DELETE.
@@ -645,12 +652,42 @@ DROP TABLE IF EXISTS haf_stats_app.shared_batch_exact_rc;
 DROP TABLE IF EXISTS haf_stats_app.shared_batch_custom_json_ops;
 DROP FUNCTION IF EXISTS haf_stats_app.analyze_shared_batch_stage;
 
+-- Before #171 the ops stage was one step, and the stage CHECK admitted no slot or part rows. The
+-- table holds only what a crash may empty anyway, so it is recreated rather than altered.
+DO $$
+BEGIN
+    IF TO_REGCLASS('haf_stats_app.shared_batch_marker') IS NOT NULL AND NOT EXISTS (
+        SELECT FROM pg_constraint AS c
+        WHERE c.conrelid = TO_REGCLASS('haf_stats_app.shared_batch_marker')
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) LIKE '%''slot''::text%'
+    ) THEN
+        DROP TABLE haf_stats_app.shared_batch_marker;
+    END IF;
+END;
+$$;
+
+-- The number of parts the ops stage is loaded in, each a staging step ('ops_0', 'ops_1', ...).
+-- Four: at 71M a batch's ops step took 6.6-8.4 s on its one connection, against about 4 s for
+-- the slowest group and for each step of the level after it.
+DROP FUNCTION IF EXISTS haf_stats_app.shared_batch_ops_parts;
+CREATE OR REPLACE FUNCTION haf_stats_app.shared_batch_ops_parts()
+RETURNS INT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT 4;
+$$;
+
 CREATE UNLOGGED TABLE IF NOT EXISTS haf_stats_app.shared_batch_marker (
     slot SMALLINT NOT NULL CHECK (slot IN (0, 1)),
-    stage TEXT NOT NULL CHECK (stage IN ('ops', 'authored_ops', 'exact_rc', 'custom_json_ops')),
+    stage TEXT NOT NULL CHECK (
+        stage IN ('slot', 'ops', 'authored_ops', 'exact_rc', 'custom_json_ops')
+        OR stage ~ '^ops_[0-9]+$'
+    ),
     first_block INT NOT NULL,
     last_block INT NOT NULL,
-    -- The ops stage's op types (batch_op_types); NULL for the others.
+    -- The ops stage's and its parts' op types (batch_op_types); NULL for the others.
     op_types INT [],
     PRIMARY KEY (slot, stage)
 );
@@ -732,7 +769,8 @@ CREATE UNLOGGED TABLE IF NOT EXISTS haf_stats_app.shared_batch_custom_json_ops_1
 -- in a single round trip while staging a batch is quick: on a server where a round trip is
 -- slow, a level's own round trip cost more than running its steps at once saved. Once a batch's
 -- staging takes seconds (the dense blocks from about 57M on), it runs each step of a level on a
--- connection of its own, a round trip per level. The exact_rc step stages exact_rc, then
+-- connection of its own, a round trip per level. The slot step claims and empties a slot, the
+-- ops_<k> steps load the ops stage's parts into it, and the exact_rc step stages exact_rc, then
 -- custom_json_ops, which joins the shares to the custom_json ops.
 DROP FUNCTION IF EXISTS haf_stats_app.shared_batch_stage_levels;
 CREATE OR REPLACE FUNCTION haf_stats_app.shared_batch_stage_levels()
@@ -740,7 +778,11 @@ RETURNS JSONB
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    SELECT '[["ops"], ["authored_ops", "exact_rc"]]'::JSONB;
+    SELECT jsonb_build_array(
+        '["slot"]'::JSONB,
+        (SELECT jsonb_agg('ops_' || k ORDER BY k) FROM generate_series(0, haf_stats_app.shared_batch_ops_parts() - 1) AS k),
+        '["authored_ops", "exact_rc"]'::JSONB
+    );
 $$;
 
 -- The slot to stage _first_block.._last_block in: the one already holding a stage of the range;
@@ -768,7 +810,7 @@ AS $$
     LIMIT 1;
 $$;
 
--- Whether every stage is complete for exactly _first_block.._last_block.
+-- Whether every stage a group reads is complete for exactly _first_block.._last_block.
 DROP FUNCTION IF EXISTS haf_stats_app.shared_batch_complete;
 CREATE OR REPLACE FUNCTION haf_stats_app.shared_batch_complete(
     _first_block INT,
@@ -780,7 +822,8 @@ STABLE
 AS $$
     SELECT COUNT(DISTINCT m.stage) = 4
     FROM haf_stats_app.shared_batch_marker AS m
-    WHERE m.first_block = _first_block AND m.last_block = _last_block;
+    WHERE m.first_block = _first_block AND m.last_block = _last_block
+      AND m.stage IN ('ops', 'authored_ops', 'exact_rc', 'custom_json_ops');
 $$;
 
 -- In the calling transaction, makes each of _stages that is complete for exactly
@@ -847,11 +890,11 @@ $$;
 -- own that the caller commits. A no-op when the range reaches past HAF's irreversible block (its
 -- blocks are not all in hafd.blocks yet), when every group has applied part of the batch, or when
 -- the step's stages are already complete for the range (a batch delivered again after a failed
--- group, or staged ahead). The ops step empties the slot's four tables first: the others are
--- built from it. So the later steps find their tables holding no rows: a stage's rows commit
--- only with its marker row, and the step runs only while that marker is missing. The steps after
--- ops may run at once, each in its own session: they fill different tables of the slot the ops
--- stage is in.
+-- group, or staged ahead). The slot step empties the slot's four tables first: the others are
+-- built in it. So the later steps find their tables holding no rows of another range: a stage's
+-- rows commit only with its marker row, and the step runs only while that marker is missing. The
+-- steps after slot may run at once, each in its own session: the ops parts fill disjoint block
+-- sub-ranges of the slot's ops table, and the steps after them different tables of the slot.
 DROP FUNCTION IF EXISTS haf_stats_app.stage_shared_batch;
 CREATE OR REPLACE FUNCTION haf_stats_app.stage_shared_batch(
     _step TEXT,
@@ -865,10 +908,14 @@ AS $$
 DECLARE
     _timed BOOLEAN := current_setting('haf_stats.processor_timings', TRUE) = 'on';
     _t TIMESTAMPTZ;
-    _stages TEXT [] := CASE _step
-        WHEN 'ops' THEN ARRAY['ops']
-        WHEN 'authored_ops' THEN ARRAY['authored_ops']
-        WHEN 'exact_rc' THEN ARRAY['exact_rc', 'custom_json_ops']
+    _parts INT := haf_stats_app.shared_batch_ops_parts();
+    _part INT := CASE WHEN _step ~ '^ops_[0-9]{1,4}$' THEN substr(_step, 5)::INT END;
+    _blocks INT := _last_block - _first_block + 1;
+    _stages TEXT [] := CASE
+        WHEN _step = 'slot' THEN ARRAY['slot']
+        WHEN _part < _parts THEN ARRAY[_step]
+        WHEN _step = 'authored_ops' THEN ARRAY['authored_ops']
+        WHEN _step = 'exact_rc' THEN ARRAY['exact_rc', 'custom_json_ops']
     END;
     _slot SMALLINT;
     _stage TEXT;
@@ -892,10 +939,10 @@ BEGIN
     ) THEN
         RETURN;
     END IF;
-    -- An ops step chooses and empties a slot alone; the other steps fill the slot their range's
-    -- ops stage is in, at once with each other but each step one at a time: a coordinator that
+    -- A slot step chooses and empties a slot alone; the other steps fill the slot their range's
+    -- slot step claimed, at once with each other but each step one at a time: a coordinator that
     -- died can leave one running.
-    IF _step = 'ops' THEN
+    IF _step = 'slot' THEN
         PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'));
     ELSE
         PERFORM pg_advisory_xact_lock_shared(hashtext('haf_stats_app.shared_batch_marker'));
@@ -910,35 +957,61 @@ BEGIN
     END IF;
 
     PERFORM set_config('synchronous_commit', 'off', TRUE);
-    IF _step = 'ops' THEN
+    IF _step = 'slot' THEN
         -- The marker rows first: deleting one waits for a group still reading its stage.
         DELETE FROM haf_stats_app.shared_batch_marker WHERE slot = _slot;
         EXECUTE format('TRUNCATE haf_stats_app.%I, haf_stats_app.%I, haf_stats_app.%I, haf_stats_app.%I',
                        'shared_batch_ops_' || _slot, 'shared_batch_authored_ops_' || _slot,
                        'shared_batch_exact_rc_' || _slot, 'shared_batch_custom_json_ops_' || _slot);
-    ELSE
+        INSERT INTO haf_stats_app.shared_batch_marker (slot, stage, first_block, last_block)
+        VALUES (_slot, 'slot', _first_block, _last_block);
+        RETURN;
+    END IF;
+    IF _part IS NULL THEN
         _attached := haf_stats_app.attach_shared_batch_stage(_first_block, _last_block, ARRAY['ops']);
         IF _attached <> ARRAY['ops'] THEN
             RAISE EXCEPTION 'haf_stats: blocks %..% have no shared ops stage for the % staging step', _first_block, _last_block, _step;
         END IF;
+    ELSIF NOT EXISTS (
+        SELECT FROM haf_stats_app.shared_batch_marker AS m
+        WHERE m.slot = _slot AND m.stage = 'slot'
+          AND m.first_block = _first_block AND m.last_block = _last_block
+    ) THEN
+        RAISE EXCEPTION 'haf_stats: blocks %..% have no shared slot for the % staging step', _first_block, _last_block, _step;
     END IF;
 
     -- Each stage's row first: it commits with the rows, and attaching the stage needs it.
     FOREACH _stage IN ARRAY _stages LOOP
         IF _timed THEN _t := clock_timestamp(); END IF;
-        IF _stage = 'ops' THEN
+        IF _part IS NOT NULL THEN
+            -- The part's consecutive share of the range's blocks, into the slot's one ops table.
             _types := haf_stats_app.batch_op_types(NULL);
+            _table := format('haf_stats_app.%I', 'shared_batch_ops_' || _slot);
+            INSERT INTO haf_stats_app.shared_batch_marker (slot, stage, first_block, last_block, op_types)
+            VALUES (_slot, _stage, _first_block, _last_block, _types);
+            EXECUTE format('CREATE TEMP VIEW haf_stats_batch_ops AS SELECT * FROM %s', _table);
+            PERFORM haf_stats_app.fill_batch_ops(_first_block + _blocks * _part / _parts,
+                                                 _first_block + _blocks * (_part + 1) / _parts - 1, _types, TRUE);
+            DROP VIEW pg_temp.haf_stats_batch_ops;
+            -- Held to the commit, so the last part to take it sees every other part's row.
+            PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'), hashtext('ops'));
+            IF (SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker AS m
+                WHERE m.slot = _slot AND m.stage ~ '^ops_[0-9]+$'
+                  AND m.first_block = _first_block AND m.last_block = _last_block
+               ) = _parts THEN
+                -- Not body_value, as on the temp table.
+                EXECUTE format('ANALYZE %s (op_id, block_num, trx_in_block, op_type_id, op_time, day, op_bytes)', _table);
+                INSERT INTO haf_stats_app.shared_batch_marker (slot, stage, first_block, last_block, op_types)
+                VALUES (_slot, 'ops', _first_block, _last_block, _types);
+            END IF;
+            IF _timed THEN PERFORM haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL, _part); END IF;
+            CONTINUE;
         END IF;
-        INSERT INTO haf_stats_app.shared_batch_marker (slot, stage, first_block, last_block, op_types)
-        VALUES (_slot, _stage, _first_block, _last_block, CASE WHEN _stage = 'ops' THEN _types END);
+        INSERT INTO haf_stats_app.shared_batch_marker (slot, stage, first_block, last_block)
+        VALUES (_slot, _stage, _first_block, _last_block);
         _attached := _attached || haf_stats_app.attach_shared_batch_stage(_first_block, _last_block, ARRAY[_stage]);
         _table := format('haf_stats_app.%I', format('shared_batch_%s_%s', _stage, _slot));
         CASE _stage
-        WHEN 'ops' THEN
-            PERFORM haf_stats_app.fill_batch_ops(_first_block, _last_block, _types, TRUE);
-            -- Not body_value, as on the temp table.
-            EXECUTE format('ANALYZE %s (op_id, block_num, trx_in_block, op_type_id, op_time, day, op_bytes)', _table);
-            IF _timed THEN PERFORM haf_stats_app.report_processor_timing('prepare_batch_ops', _first_block, _last_block, _t, '{non_virtual,author_reward_operation,comment_benefactor_reward_operation,curation_reward_operation,interest_operation,fill_transfer_from_savings_operation,fill_vesting_withdraw_operation,producer_reward_operation,liquidity_reward_operation,proposal_pay_operation,fill_order_operation,account_created_operation,producer_missed_operation,ineffective_delete_comment_operation}', NULL); END IF;
         WHEN 'authored_ops' THEN
             PERFORM haf_stats_app.fill_batch_authored_ops();
             EXECUTE format('ANALYZE %s', _table);
@@ -1086,7 +1159,7 @@ $$;
 -- then the in-flight batch's progress rows, which the groups' writes now stand for, and the marker
 -- rows of every shared stage of a range starting at or before its last block: the HAF context's
 -- move past the batch means none of those ranges can be delivered. The marker rows of the next
--- batch's range, staged ahead, stay. The staged rows stay until a later batch's ops step replaces
+-- batch's range, staged ahead, stay. The staged rows stay until a later batch's slot step replaces
 -- them ("Shared batch staging").
 DROP FUNCTION IF EXISTS haf_stats_app.finish_block_range;
 CREATE OR REPLACE FUNCTION haf_stats_app.finish_block_range(
