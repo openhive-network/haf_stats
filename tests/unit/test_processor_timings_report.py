@@ -73,14 +73,17 @@ def _batch(first: int, last: int, seconds: float, refreshes: tuple[str, ...] = (
 
 
 def _phases(first: int, last: int, begin: float = 0.01, staging: float = 0.3, groups: float = 0.6,
-            finish: float = 0.05, bound: tuple[float, dict[str, float | None]] | None = None) -> str:
+            finish: float = 0.05, bound: tuple[float, dict[str, float | None]] | None = None,
+            levels: list[Any] | None = None) -> str:
     """scripts/haf_stats_parallel.py's line for one batch of the parallel path; with ``bound``,
     the batch's staging seconds and its groups' (a line written before those were logged has
-    neither)."""
+    neither), and with ``levels`` its staging round trips' seconds."""
     record: dict[str, Any] = {"first_block": first, "last_block": last,
                               "seconds": {"begin": begin, "staging": staging, "groups": groups, "finish": finish}}
     if bound is not None:
         record |= {"stage_seconds": bound[0], "group_seconds": bound[1], "critical": "as the coordinator saw it"}
+    if levels is not None:
+        record["stage_level_seconds"] = levels
     return f"2026-10-25T10:00:00.000Z haf_stats_parallel: haf_stats_batch_phases {json.dumps(record)}\n"
 
 
@@ -161,6 +164,10 @@ def test_a_timed_run_makes_the_report(tmp_path: Path, capsys: pytest.CaptureFixt
                  "the phases are ['begin', 'groups', 'staging']", id="a phase missing"),
     pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000, groups=-0.1)],
                  "'groups' is negative", id="a negative phase"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000, bound=(0.3, {"network": 0.1}), levels=[0.1, -0.2])],
+                 "'stage_level_seconds' is [0.1, -0.2]", id="a negative staging round trip"),
+    pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000, bound=(0.3, {"network": 0.1}), levels=[])],
+                 "'stage_level_seconds' is []", id="no staging round trip"),
     pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 1_000_000)],
                  "blocks 1..1000000: a phase begin for a range that is not a batch", id="phases for no batch"),
     pytest.param(_batch(1, 2_000_000, 1.0) + [_phases(1, 2_000_000)] * 2,
@@ -252,6 +259,58 @@ def test_a_sharded_step_is_the_sum_of_its_shards(tmp_path: Path) -> None:
     assert report["processors"]["process_custom_json"]["seconds"] == 2.0
     assert report["processors"]["process_custom_json"]["calls"] == 2
     assert report["rows_read"]["process_custom_json"] == {"custom_json_operation": 14}
+    assert report["split_ops_parts"] is None
+
+
+def _parted(lines: list[str], seconds: list[float]) -> list[str]:
+    """The batch with its prepare_batch_ops line replaced by one per part of the ops stage, part k
+    at ``seconds[k]``."""
+    out = []
+    for line in lines:
+        if '"step": "prepare_batch_ops"' in line:
+            record = json.loads(line.split("haf_stats_processor_timing ", 1)[1])
+            out += [_line("haf_stats_processor_timing", {**record, "seconds": s, "shard": part})
+                    for part, s in enumerate(seconds)]
+        else:
+            out.append(line)
+    return out
+
+
+def test_the_ops_parts_of_a_split_staging_count_as_the_slowest(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The first batch's staging took one round trip, so its parts ran one after another; the
+    # second's took one per level, so its parts ran at once.
+    bound: tuple[float, dict[str, float | None]] = (2.5, {"custom_json_0": 3.0, "network": 0.5})
+    lines = (_parted(_batch(1, 1_000_000, 1.0), [0.25, 0.25, 0.5, 0.25])
+             + [_phases(1, 1_000_000, bound=bound, levels=[1.4])]
+             + _parted(_batch(1_000_001, 2_000_000, 1.0), [0.5, 2.0, 1.0, 0.75])
+             + [_phases(1_000_001, 2_000_000, bound=bound, levels=[0.1, 2.1, 0.3])])
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert [b["seconds"]["prepare_batch_ops"] for b in report["per_million"]] == [1.25, 2.0]
+    assert report["processors"]["prepare_batch_ops"]["seconds"] == 3.25
+    assert report["processors"]["prepare_batch_ops"]["calls"] == 2
+    assert report["processing_seconds"] == 3.25 + 2.0 * (len(PROCESSORS) - 1)
+    assert report["split_ops_parts"] == {"step": "prepare_batch_ops", "batches": 1, "wall_seconds": 2.0,
+                                         "summed_seconds": 4.25}
+    table = capsys.readouterr().out
+    assert re.search(r"^prepare_batch_ops +3\.25 +.* +2 +1\.25 +2\.00$", table, re.M)
+    assert ("(prepare_batch_ops: in the 1 batches whose staging was split, the slowest of its parts, which ran"
+            " at once: 2.00s wall, 4.25s summed over the parts)") in table
+
+
+def test_the_ops_parts_are_summed_without_the_staging_round_trips(tmp_path: Path) -> None:
+    # A phase line from before the round trips were logged does not say the staging was split.
+    lines = (_parted(_batch(1, 2_000_000, 1.0), [0.5, 2.0, 1.0, 0.75])
+             + [_phases(1, 2_000_000, bound=(2.5, {"network": 0.5}))])
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["processors"]["prepare_batch_ops"]["seconds"] == 4.25
+    assert report["split_ops_parts"] is None
 
 
 @pytest.mark.parametrize(("shards", "problem"), [

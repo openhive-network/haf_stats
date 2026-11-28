@@ -909,11 +909,12 @@ DECLARE
     _timed BOOLEAN := current_setting('haf_stats.processor_timings', TRUE) = 'on';
     _t TIMESTAMPTZ;
     _parts INT := haf_stats_app.shared_batch_ops_parts();
-    _part INT := CASE WHEN _step ~ '^ops_[0-9]{1,4}$' THEN substr(_step, 5)::INT END;
+    _part_steps TEXT [] := ARRAY(SELECT 'ops_' || k FROM generate_series(0, _parts - 1) AS k ORDER BY k);
+    _part INT := array_position(_part_steps, _step) - 1;
     _blocks INT := _last_block - _first_block + 1;
     _stages TEXT [] := CASE
         WHEN _step = 'slot' THEN ARRAY['slot']
-        WHEN _part < _parts THEN ARRAY[_step]
+        WHEN _part IS NOT NULL THEN ARRAY[_step]
         WHEN _step = 'authored_ops' THEN ARRAY['authored_ops']
         WHEN _step = 'exact_rc' THEN ARRAY['exact_rc', 'custom_json_ops']
     END;
@@ -996,7 +997,7 @@ BEGIN
             -- Held to the commit, so the last part to take it sees every other part's row.
             PERFORM pg_advisory_xact_lock(hashtext('haf_stats_app.shared_batch_marker'), hashtext('ops'));
             IF (SELECT COUNT(*) FROM haf_stats_app.shared_batch_marker AS m
-                WHERE m.slot = _slot AND m.stage ~ '^ops_[0-9]+$'
+                WHERE m.slot = _slot AND m.stage = ANY(_part_steps)
                   AND m.first_block = _first_block AND m.last_block = _last_block
                ) = _parts THEN
                 -- Not body_value, as on the temp table.
