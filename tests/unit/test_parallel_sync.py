@@ -36,7 +36,9 @@ SCRIPT = ROOT / "scripts" / "haf_stats_parallel.py"
 PROCESS_BLOCKS = ROOT / "scripts" / "process_blocks.sh"
 
 GROUPS = ["financial", "users", "content", "custom_json", "network"]
-STAGE_LEVELS = [["ops"], ["authored_ops", "exact_rc"]]
+# haf_stats_app.shared_batch_stage_levels(): the slot, the ops stage's parts, then the steps that read it.
+OPS_PARTS = [f"ops_{k}" for k in range(4)]
+STAGE_LEVELS = [["slot"], OPS_PARTS, ["authored_ops", "exact_rc"]]
 STAGE_STEPS = [step for level in STAGE_LEVELS for step in level]
 
 
@@ -70,23 +72,25 @@ class FakeDb:
         irreversible: int | None = None,
         barrier_stage_from: int | None = None,
         fail_session_lock: bool = False,
-        step_barrier: threading.Barrier | None = None,
         stage_delay: float = 0.0,
+        barrier_stage_steps: tuple[str, ...] = ("slot",),
     ) -> None:
         self.massive = massive
-        # Staging steps that wait on step_barrier, whatever their range.
-        self.barrier_steps: tuple[str, ...] = ()
-        self.step_barrier = step_barrier
-        # How long each ops step takes.
+        # Staging steps that wait on their barrier, for ranges from barrier_stage_from on (any
+        # range without it).
+        self.step_barriers: dict[str, threading.Barrier] = {}
+        # How long each ops part takes.
         self.stage_delay = stage_delay
         self.fail_session_lock = fail_session_lock
         # What finish_parallel_range returns: each group's seconds from its progress row.
         self.group_seconds = dict.fromkeys(GROUPS, 0.0) if group_seconds is None else group_seconds
         self.fail_group = fail_group
         self.fail_stage = fail_stage
-        # Only the staging of ranges from this block on fails; their ops step waits on the barrier.
+        # Only the staging of ranges from this block on fails; their barrier_stage_steps wait on
+        # the barrier.
         self.fail_stage_from = fail_stage_from
         self.barrier_stage_from = barrier_stage_from
+        self.barrier_stage_steps = barrier_stage_steps
         # A staging step for a range past it stages nothing, as past HAF's irreversible block.
         self.irreversible = irreversible
         self.barrier = barrier
@@ -202,12 +206,12 @@ class FakeConn:
         if "stage_shared_batch" in statement:
             self.pending = f"stage {name} {first}..{last}"
             db.record(self.name, f"stage {name} {first}..{last}")
-            if (db.barrier is not None and db.barrier_stage_from is not None and name == "ops"
+            if (db.barrier is not None and db.barrier_stage_from is not None and name in db.barrier_stage_steps
                     and first >= db.barrier_stage_from):
                 db.barrier.wait()
-            if db.step_barrier is not None and name in db.barrier_steps:
-                db.step_barrier.wait()
-            if name == "ops" and db.stage_delay:
+            if name in db.step_barriers and (db.barrier_stage_from is None or first >= db.barrier_stage_from):
+                db.step_barriers[name].wait()
+            if name in OPS_PARTS and db.stage_delay:
                 time.sleep(db.stage_delay)
             if name == db.fail_stage and (db.fail_stage_from is None or first >= db.fail_stage_from):
                 db.fail_stage = None
@@ -305,7 +309,7 @@ def test_the_first_batch_is_staged_once_in_level_order_before_any_group() -> Non
 
 
 def test_the_next_range_is_staged_ahead_beside_the_groups() -> None:
-    # The five groups and the ops step of the next range's staging wait until all six are running
+    # The five groups and the slot step of the next range's staging wait until all six are running
     # together; had the staging waited for the groups, or the groups for it, the barrier would break.
     db = FakeDb(barrier=threading.Barrier(len(GROUPS) + 1, timeout=10), barrier_stage_from=10001)
     c = coordinator(db, parallelism=len(GROUPS))
@@ -327,8 +331,8 @@ def test_a_batch_staged_ahead_starts_its_groups_at_once() -> None:
     c.process(driver_conn(db), 10001, 20000)
     c.process(driver_conn(db), 20001, 30000)
 
-    assert [e for _, e in db.log].count("stage ops 10001..20000") == 1
-    assert _first(db, "stage ops 10001..20000") < _first(db, "group financial 10001..20000")
+    assert [e for _, e in db.log].count("stage slot 10001..20000") == 1
+    assert _first(db, "stage slot 10001..20000") < _first(db, "group financial 10001..20000")
     second = db.log[begin:db.log.index(("driver", "finish 10001..20000"))]
     assert [e for n, e in second if n == "driver"] == ["begin"]
     assert _stage_events(db, "10001..20000") == sorted(f"stage {s} 10001..20000" for s in STAGE_STEPS)
@@ -361,8 +365,8 @@ def test_the_range_staged_ahead_is_as_long_as_the_longest_batch() -> None:
     c.process(driver_conn(db), 10001, 15000)
     c.process(driver_conn(db), 15001, 25000)
 
-    assert ("ops", 15001, 25000) in db.staged
-    assert [e for _, e in db.log].count("stage ops 15001..25000") == 1
+    assert ("slot", 15001, 25000) in db.staged
+    assert [e for _, e in db.log].count("stage slot 15001..25000") == 1
 
 
 def test_a_failed_staging_ahead_is_logged_and_the_batch_stages_itself(capsys: pytest.CaptureFixture[str]) -> None:
@@ -375,7 +379,7 @@ def test_a_failed_staging_ahead_is_logged_and_the_batch_stages_itself(capsys: py
     assert sorted(db.committed) == sorted(GROUPS * 2)
     assert ("driver", "finish 10001..20000") in db.log
     out = capsys.readouterr().out
-    assert ("haf_stats_parallel: batch staging ahead ops, authored_ops, exact_rc, blocks 10001..20000, failed: "
+    assert (f"haf_stats_parallel: batch staging ahead {', '.join(STAGE_STEPS)}, blocks 10001..20000, failed: "
             "injected failure in staging step authored_ops") in out
 
 
@@ -406,26 +410,51 @@ def test_a_quick_staging_sends_every_step_in_one_round_trip() -> None:
 
 def test_a_staging_that_took_long_splits_the_next_into_a_round_trip_per_level() -> None:
     # The first batch's staging is in one round trip; it took longer than the threshold, so the
-    # staging ahead sends the ops step, then authored_ops and exact_rc at once on two connections:
-    # each waits on the barrier until the other has started.
-    db = FakeDb(step_barrier=threading.Barrier(2, timeout=10), stage_delay=0.05)
+    # staging ahead sends the slot step, then the four ops parts at once on four connections, then
+    # authored_ops and exact_rc at once on two: each step of a level waits on its level's barrier
+    # until the others have started.
+    # The barriers are set before the first batch, whose staging ahead of the second's range runs
+    # beside its groups and may still be running when it returns.
+    db = FakeDb(stage_delay=0.05, barrier_stage_from=10001)
+    for level in STAGE_LEVELS[1:]:
+        db.step_barriers |= dict.fromkeys(level, threading.Barrier(len(level), timeout=10))
     c = coordinator(db, split_staging_seconds=0.02)
     c.process(driver_conn(db), 1, 10000)
-    db.barrier_steps = ("authored_ops", "exact_rc")
     c.process(driver_conn(db), 10001, 20000)
 
     assert [[step for _, step in trip] for trip in _staging_round_trips(db, "1..10000")] == [STAGE_STEPS]
-    ops, *level = _staging_round_trips(db, "10001..20000")
-    assert [step for _, step in ops] == ["ops"]
-    assert sorted(step for [(_, step)] in level) == ["authored_ops", "exact_rc"]
-    assert len({conn for [(conn, _)] in level}) == 2, "the level's steps shared a connection"
-    ops_commit = db.log.index((ops[0][0], "commit stage ops 10001..20000"))
-    assert ops_commit < _first(db, "stage authored_ops 10001..20000")
-    assert ops_commit < _first(db, "stage exact_rc 10001..20000")
+    slot, *trips = _staging_round_trips(db, "10001..20000")
+    assert [step for _, step in slot] == ["slot"]
+    assert all(len(trip) == 1 for trip in trips), "a split level sent two steps on one connection"
+    parts, readers = trips[:len(OPS_PARTS)], trips[len(OPS_PARTS):]
+    assert sorted(step for [(_, step)] in parts) == OPS_PARTS
+    assert sorted(step for [(_, step)] in readers) == ["authored_ops", "exact_rc"]
+    assert len({conn for [(conn, _)] in parts}) == len(OPS_PARTS), "the ops parts shared a connection"
+    assert len({conn for [(conn, _)] in readers}) == 2, "the level's steps shared a connection"
+    slot_commit = db.log.index((slot[0][0], "commit stage slot 10001..20000"))
+    assert all(slot_commit < _first(db, f"stage {part} 10001..20000") for part in OPS_PARTS)
+    last_part_commit = max(db.log.index((conn, f"commit stage {part} 10001..20000")) for [(conn, part)] in parts)
+    assert last_part_commit < _first(db, "stage authored_ops 10001..20000")
+    assert last_part_commit < _first(db, "stage exact_rc 10001..20000")
     # Staged ahead completely: the second batch did not stage its range again.
-    assert [e for _, e in db.log].count("stage ops 10001..20000") == 1
+    assert [e for _, e in db.log].count("stage slot 10001..20000") == 1
     assert sorted(db.committed) == sorted(GROUPS * 2)
-    assert db.opened <= 4 + 2
+    assert db.opened <= 4 + len(OPS_PARTS)
+
+
+def test_the_pool_runs_every_group_beside_the_widest_level_staged_ahead() -> None:
+    # The five groups and the four ops parts of the next range wait until all nine are running
+    # together: the pool must hold a thread for each group, one for the staging ahead, which waits
+    # on its shares, and one for each step of the widest level.
+    db = FakeDb(barrier=threading.Barrier(len(GROUPS) + len(OPS_PARTS), timeout=10), barrier_stage_from=10001,
+                barrier_stage_steps=tuple(OPS_PARTS))
+    c = coordinator(db, parallelism=len(GROUPS), split_staging_seconds=0)
+    c.process(driver_conn(db), 1, 10000)
+    c.process(driver_conn(db), 10001, 20000)
+
+    assert sorted(db.committed) == sorted(GROUPS * 2)
+    assert sorted(step for step, *blocks in db.staged if blocks == [10001, 20000]) == sorted(STAGE_STEPS)
+    assert db.opened <= len(GROUPS) + len(OPS_PARTS)
 
 
 def test_a_split_staging_ahead_starts_the_next_batch_at_once() -> None:
@@ -438,7 +467,7 @@ def test_a_split_staging_ahead_starts_the_next_batch_at_once() -> None:
     second = db.log[begin:db.log.index(("driver", "finish 10001..20000"))]
     assert [e for n, e in second if n == "driver"] == ["begin"]
     assert _stage_events(db, "10001..20000") == sorted(f"stage {s} 10001..20000" for s in STAGE_STEPS)
-    assert [step for step, *blocks in db.staged if blocks == [10001, 20000]] == STAGE_STEPS
+    assert sorted(step for step, *blocks in db.staged if blocks == [10001, 20000]) == sorted(STAGE_STEPS)
 
 
 def test_a_failed_step_of_a_split_level_keeps_the_others_and_the_retry_stages_the_rest() -> None:
@@ -447,7 +476,7 @@ def test_a_failed_step_of_a_split_level_keeps_the_others_and_the_retry_stages_th
     with pytest.raises(FakeDbError, match="injected failure in staging step exact_rc"):
         c.process(driver_conn(db), 101, 10100)
 
-    assert [step for step, *_ in db.staged] == ["ops", "authored_ops"]
+    assert sorted(step for step, *_ in db.staged) == sorted(s for s in STAGE_STEPS if s != "exact_rc")
     assert any(e == "rollback stage exact_rc 101..10100" for _, e in db.log)
     assert not any(e.startswith(("group ", "finish")) for _, e in db.log)
 
@@ -488,12 +517,13 @@ def test_groups_sharing_a_connection_each_commit_on_their_own() -> None:
 
 
 def test_a_failed_staging_step_runs_no_group_and_does_not_finish_the_batch() -> None:
-    db = FakeDb(fail_stage="ops")
-    with pytest.raises(FakeDbError, match="injected failure in staging step ops"):
+    db = FakeDb(fail_stage="slot")
+    with pytest.raises(FakeDbError, match="injected failure in staging step slot"):
         coordinator(db).process(driver_conn(db), 101, 10100)
 
-    assert not any(e.startswith(("group ", "finish", "stage authored_ops", "stage exact_rc")) for _, e in db.log)
-    assert ("worker1", "rollback stage ops 101..10100") in db.log
+    assert not any(e.startswith(("group ", "finish", "stage ops_", "stage authored_ops", "stage exact_rc"))
+                   for _, e in db.log)
+    assert ("worker1", "rollback stage slot 101..10100") in db.log
     assert db.committed == [] and db.staged == []
 
 
@@ -653,8 +683,9 @@ def test_every_massive_batch_reports_its_phases_and_group_times(capsys: pytest.C
 
 
 def test_the_phases_line_times_each_staging_round_trip(capsys: pytest.CaptureFixture[str]) -> None:
-    # The first batch stages in one round trip; it took longer than the threshold, so the second
-    # batch's range, staged ahead, takes a round trip per level, the ops level the slow one.
+    # The first batch stages in one round trip, its ops parts one after another; it took longer
+    # than the threshold, so the second batch's range, staged ahead, takes a round trip per level,
+    # the ops level the slow one.
     db = FakeDb(stage_delay=0.05)
     c = coordinator(db, split_staging_seconds=0.02)
     c.process(driver_conn(db), 1, 10000)
@@ -662,11 +693,10 @@ def test_the_phases_line_times_each_staging_round_trip(capsys: pytest.CaptureFix
 
     first, second = _batch_lines(capsys.readouterr().out)
     [whole] = first["stage_level_seconds"]
-    assert 0.05 <= whole <= first["stage_seconds"]
-    levels = second["stage_level_seconds"]
-    assert len(levels) == len(STAGE_LEVELS)
-    assert levels[0] >= 0.05 and all(0 <= s < 0.05 for s in levels[1:])
-    assert sum(levels) <= second["stage_seconds"]
+    assert 0.05 * len(OPS_PARTS) <= whole <= first["stage_seconds"]
+    slot, ops, level = second["stage_level_seconds"]
+    assert ops >= 0.05 and 0 <= slot < 0.05 and 0 <= level < 0.05
+    assert slot + ops + level <= second["stage_seconds"]
 
 
 def test_staging_is_the_critical_part_when_no_group_takes_longer(capsys: pytest.CaptureFixture[str]) -> None:

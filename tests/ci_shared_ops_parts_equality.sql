@@ -3,7 +3,9 @@
 -- (prepare_batch_ops): over blocks 6630-6636, which the parts split unevenly (1, 2, 2 and 2
 -- blocks), every staged row must be the same, as a multiset. The ops stage is complete only once
 -- every part is in, whatever order the parts run in; a part run again stages nothing twice; and
--- the steps of the level after it stage from the parted table.
+-- the steps of the level after it stage from the parted table. A step named like a part but not
+-- one of them is refused. (tests/ci_shared_ops_parts_connections.sql runs the parts on connections
+-- of their own.)
 --
 -- One transaction, rolled back.
 \set ON_ERROR_STOP on
@@ -59,6 +61,7 @@ DECLARE
     _levels JSONB := haf_stats_app.shared_batch_stage_levels();
     _order INT [];
     _part INT;
+    _step TEXT;
     _slot SMALLINT;
     _rows BIGINT;
     _n BIGINT;
@@ -67,6 +70,19 @@ BEGIN
        OR _levels->1 <> (SELECT jsonb_agg('ops_' || k ORDER BY k) FROM generate_series(0, _parts - 1) AS k) THEN
         RAISE EXCEPTION 'FAIL: the staging levels % do not start with the slot step, then the % ops parts', _levels, _parts;
     END IF;
+
+    -- Only the exact part names are parts: another spelling of a part's number would mark a part
+    -- twice and the ops stage complete before every part is in.
+    FOREACH _step IN ARRAY ARRAY['ops_01', 'ops_' || _parts, 'ops_-1', 'ops', 'ops_1 '] LOOP
+        BEGIN
+            PERFORM haf_stats_app.stage_shared_batch(_step, 6630, 6636);
+            RAISE EXCEPTION 'FAIL: the staging step % was accepted', _step;
+        EXCEPTION WHEN raise_exception THEN
+            IF SQLERRM <> format('haf_stats: unknown batch staging step %s', _step) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
 
     PERFORM haf_stats_app.stage_shared_batch('slot', 6630, 6636);
     SELECT m.slot INTO _slot FROM haf_stats_app.shared_batch_marker AS m

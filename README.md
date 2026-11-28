@@ -991,9 +991,13 @@ one of as many consecutive block sub-ranges into the slot's one ops table, on a 
 own once the staging is split. Each part commits with its own marker row, and the last to commit
 analyzes the table and marks the ops stage complete, so no step and no group reads the table
 before every part is in. The rows are those the one ops step staged, the same as the
-single-session path's (`tests/ci_shared_ops_parts_equality.sql`). The batch's line also holds each
+single-session path's (`tests/ci_shared_ops_parts_equality.sql`), also with the parts on
+connections of their own committing out of order, and in a batch of fewer blocks than parts
+(`tests/ci_shared_ops_parts_connections.sql`). The batch's line also holds each
 staging round trip's seconds (`stage_level_seconds`): one per level once the staging is split, so
-a rebuild shows each level's time. The custom_json ops step joins the ops to their exact RC shares by
+a rebuild shows each level's time. Each part times `prepare_batch_ops` on its own; for a batch
+whose staging was split, `scripts/processor_timings_report.py` counts the step as its slowest
+part, its wall time, and reports the parts' sum apart (`split_ops_parts`). The custom_json ops step joins the ops to their exact RC shares by
 merging them in op id order, not by hashing the op ids (1.6 s hashed, 0.44 s merged at 60M).
 
 The comparison #148 asks for, at parallelism 1 and 5 with the same build on the same full-database
