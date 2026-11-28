@@ -61,6 +61,11 @@
 #        hive.get_required_authorities. Runs it over windows of the replay and asserts
 #        its (op, account) pairs for those four types are exactly the ones
 #        hive.get_required_authorities gives. Rolled back; writes only temp tables.
+#  10. tests/parity/authored_ops_pre168_equality.sql (issue #170)
+#        Stages the replay's last 120,000 blocks' authored ops through
+#        account_custom_json_rows, as backfill_rc_exact does, under a statement timeout
+#        that a nested-loop name join exceeds, and asserts the rows are exactly the ones
+#        the query before #168 gives. Rolled back; writes only temp tables.
 #
 # Two connection modes:
 #   * TCP (CI):    --host/--port/--user[/--database] connect straight to the DB over TCP. Used
@@ -89,7 +94,8 @@ PG_PORT="5432"
 PG_USER="haf_admin"
 PG_DB="haf_block_log"
 GUARDS=(parity hived-snapshot content-volume-rebuild community-vs-hivemind interactions-cap
-  witness-blocks-rebuild context-vs-app-status content-vs-hivemind authored-ops-signers)
+  witness-blocks-rebuild context-vs-app-status content-vs-hivemind authored-ops-signers
+  authored-ops-pre168)
 SELECTED=()
 
 for arg in "$@"; do
@@ -133,12 +139,12 @@ selected() {
 }
 
 if selected parity; then
-  echo "===== Guard 1/9: parity (independent in-DB re-derivation) ====="
+  echo "===== Guard 1/10: parity (independent in-DB re-derivation) ====="
   run_sql_file tests/parity/mainnet_metrics_parity.sql
 fi
 
 if selected hived-snapshot; then
-  echo "===== Guard 2/9: regression (vs external hived snapshot) ====="
+  echo "===== Guard 2/10: regression (vs external hived snapshot) ====="
   if [[ "$MODE" == "tcp" ]]; then
     # run_test.sh natively speaks --host/--port/--user and runs psql on this host.
     bash tests/regression/run_test.sh --host="${PG_HOST}" --port="${PG_PORT}" --user="${PG_USER}" --database="${PG_DB}"
@@ -164,42 +170,47 @@ if selected hived-snapshot; then
 fi
 
 if selected content-volume-rebuild; then
-  echo "===== Guard 3/9: content-volume rebuild consistency (issue #42) ====="
+  echo "===== Guard 3/10: content-volume rebuild consistency (issue #42) ====="
   run_sql_file tests/parity/content_volume_rebuild_consistency.sql
 fi
 
 if selected community-vs-hivemind; then
-  echo "===== Guard 4/9: community derivation vs hivemind (issue #47) ====="
+  echo "===== Guard 4/10: community derivation vs hivemind (issue #47) ====="
   run_sql_file tests/parity/community_vs_hivemind.sql
 fi
 
 if selected interactions-cap; then
-  echo "===== Guard 5/9: interactions op-ceiling guard (issue #48) ====="
+  echo "===== Guard 5/10: interactions op-ceiling guard (issue #48) ====="
   run_sql_file tests/parity/interactions_cap.sql
 fi
 
 if selected witness-blocks-rebuild; then
-  echo "===== Guard 6/9: witness blocks rebuild consistency (issue #54) ====="
+  echo "===== Guard 6/10: witness blocks rebuild consistency (issue #54) ====="
   run_sql_file tests/parity/witness_blocks_rebuild_consistency.sql
 fi
 
 if selected context-vs-app-status; then
-  echo "===== Guard 7/9: HAF context vs app_status parity (issue #55) ====="
+  echo "===== Guard 7/10: HAF context vs app_status parity (issue #55) ====="
   run_sql_file tests/parity/context_vs_app_status.sql
 fi
 
 if selected content-vs-hivemind; then
-  echo "===== Guard 8/9: post/comment counts vs hivemind (issues #42, #45, #63) ====="
+  echo "===== Guard 8/10: post/comment counts vs hivemind (issues #42, #45, #63) ====="
   run_sql_file tests/parity/content_vs_hivemind.sql
 fi
 
 if selected authored-ops-signers; then
-  echo "===== Guard 9/9: authored-ops signers vs hive.get_required_authorities (issue #112) ====="
+  echo "===== Guard 9/10: authored-ops signers vs hive.get_required_authorities (issue #112) ====="
   run_sql_file tests/parity/authored_ops_signers.sql
+fi
+
+if selected authored-ops-pre168; then
+  echo "===== Guard 10/10: authored ops vs the query before #168, under the backfill's caller (issue #170) ====="
+  run_sql_file tests/parity/authored_ops_pre168_equality.sql
 fi
 
 if [ ${#SELECTED[@]} -gt 0 ]; then
   echo "===== Selected correctness guards PASSED (${SELECTED[*]}) ====="
   exit 0
 fi
-echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle + authored-ops signers) ====="
+echo "===== Correctness guards PASSED (parity + external regression + rebuild consistency + community oracle + interactions cap + witness rebuild + context parity + content oracle + authored-ops signers + authored ops before #168) ====="

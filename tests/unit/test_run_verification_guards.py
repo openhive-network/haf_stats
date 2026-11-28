@@ -47,8 +47,8 @@ def test_the_named_guards_run_and_no_other(bash: str, tmp_path: Path) -> None:
     result, files = run(bash, tmp_path, "--guard=interactions-cap", "--guard=parity")
     assert result.returncode == 0, result.stdout + result.stderr
     assert files == ["tests/parity/mainnet_metrics_parity.sql", "tests/parity/interactions_cap.sql"]
-    assert "Guard 1/9" in result.stdout and "Guard 5/9" in result.stdout
-    assert "Guard 3/9" not in result.stdout
+    assert "Guard 1/10" in result.stdout and "Guard 5/10" in result.stdout
+    assert "Guard 3/10" not in result.stdout
     assert "Selected correctness guards PASSED (interactions-cap parity)" in result.stdout
 
 
@@ -58,11 +58,11 @@ def test_every_listed_guard_selects_exactly_one_guard(bash: str, tmp_path: Path)
     )
     assert listed.returncode == 0
     names = listed.stdout.split()
-    assert len(names) == 9 and len(set(names)) == 9
+    assert len(names) == 10 and len(set(names)) == 10
     for index, name in enumerate(names, start=1):
         result, _ = run(bash, tmp_path / name, f"--guard={name}")
         headers = [line for line in result.stdout.splitlines() if line.startswith("===== Guard ")]
-        assert headers and all(header.startswith(f"===== Guard {index}/9:") for header in headers), (name, result.stdout)
+        assert headers and all(header.startswith(f"===== Guard {index}/10:") for header in headers), (name, result.stdout)
 
 
 def test_an_unknown_guard_is_rejected_before_anything_runs(bash: str, tmp_path: Path) -> None:
