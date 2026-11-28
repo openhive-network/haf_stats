@@ -288,6 +288,7 @@ SET from_collapse_limit = '16'
 SET join_collapse_limit = '16'
 SET enable_bitmapscan = 'off'
 SET enable_mergejoin = 'off'
+SET enable_hashjoin = 'on'
 AS $$
 DECLARE
     _safe BOOLEAN := FALSE;
@@ -308,7 +309,10 @@ BEGIN
     -- through the load (stage_shared_batch), and in name order each row would go to a random
     -- page of the key: on a dense batch that cost more than the sort. Duplicate pairs are
     -- removed by that final step, on account ids rather than names. The join hashes the names
-    -- (enable_mergejoin): a merge join would sort every authored row by name first.
+    -- (enable_mergejoin): a merge join would sort every authored row by name first. Hash joins
+    -- are enabled here too because account_custom_json_rows disables them for its own join and
+    -- calls this through prepare_batch_authored_ops (backfill_rc_exact's first staging of a
+    -- day): with neither, the name join is a nested loop, quadratic in the range's rows.
     <<attempt>>
     LOOP
         BEGIN
