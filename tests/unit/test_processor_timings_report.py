@@ -259,7 +259,46 @@ def test_a_sharded_step_is_the_sum_of_its_shards(tmp_path: Path) -> None:
     assert report["processors"]["process_custom_json"]["seconds"] == 2.0
     assert report["processors"]["process_custom_json"]["calls"] == 2
     assert report["rows_read"]["process_custom_json"] == {"custom_json_operation": 14}
-    assert report["split_ops_parts"] is None
+    assert report["concurrent_parts"] is None
+
+
+def test_the_shards_of_a_parallel_batch_count_as_the_slowest(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The first batch ran in one session, its shards one after another; the second on the parallel
+    # path, its shards as processor groups at once.
+    shard_seconds = [0.25, 1.5, 0.5, 0.75]
+    lines = _sharded(_batch(1, 1_000_000, 1.0), [0, 1, 2, 3], 0.25)
+    for line in _batch(1_000_001, 2_000_000, 1.0):
+        if '"step": "process_custom_json"' in line:
+            record = json.loads(line.split("haf_stats_processor_timing ", 1)[1])
+            lines += [_line("haf_stats_processor_timing", {**record, "seconds": s, "shard": shard})
+                      for shard, s in enumerate(shard_seconds)]
+        else:
+            lines.append(line)
+    lines.append(_phases(1_000_001, 2_000_000, bound=(0.5, {f"custom_json_{i}": s for i, s in enumerate(shard_seconds)})))
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert [b["seconds"]["process_custom_json"] for b in report["per_million"]] == [1.0, 1.5]
+    assert report["processors"]["process_custom_json"]["seconds"] == 2.5
+    assert report["concurrent_parts"] == {
+        "process_custom_json": {"batches": 1, "wall_seconds": 1.5, "summed_seconds": 3.0},
+    }
+    table = capsys.readouterr().out
+    assert ("(process_custom_json: in the 1 batches of the parallel path, the slowest of its parts, which ran"
+            " at once: 1.50s wall, 3.00s summed over the parts)") in table
+
+
+def test_a_phase_line_without_group_times_still_makes_the_batch_parallel(tmp_path: Path) -> None:
+    lines = _sharded(_batch(1, 2_000_000, 1.0), [0, 1, 2, 3], 0.25) + [_phases(1, 2_000_000)]
+    rc, out = _run(tmp_path, lines)
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["processors"]["process_custom_json"]["seconds"] == 0.25
+    assert report["concurrent_parts"]["process_custom_json"] == {"batches": 1, "wall_seconds": 0.25,
+                                                                 "summed_seconds": 1.0}
 
 
 def _parted(lines: list[str], seconds: list[float]) -> list[str]:
@@ -293,8 +332,8 @@ def test_the_ops_parts_of_a_split_staging_count_as_the_slowest(
     assert report["processors"]["prepare_batch_ops"]["seconds"] == 3.25
     assert report["processors"]["prepare_batch_ops"]["calls"] == 2
     assert report["processing_seconds"] == 3.25 + 2.0 * (len(PROCESSORS) - 1)
-    assert report["split_ops_parts"] == {"step": "prepare_batch_ops", "batches": 1, "wall_seconds": 2.0,
-                                         "summed_seconds": 4.25}
+    assert report["concurrent_parts"]["prepare_batch_ops"] == {"batches": 1, "wall_seconds": 2.0,
+                                                               "summed_seconds": 4.25}
     table = capsys.readouterr().out
     assert re.search(r"^prepare_batch_ops +3\.25 +.* +2 +1\.25 +2\.00$", table, re.M)
     assert ("(prepare_batch_ops: in the 1 batches whose staging was split, the slowest of its parts, which ran"
@@ -310,7 +349,7 @@ def test_the_ops_parts_are_summed_without_the_staging_round_trips(tmp_path: Path
     assert rc == 0
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["processors"]["prepare_batch_ops"]["seconds"] == 4.25
-    assert report["split_ops_parts"] is None
+    assert report["concurrent_parts"] is None
 
 
 @pytest.mark.parametrize(("shards", "problem"), [

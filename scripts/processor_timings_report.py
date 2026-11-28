@@ -8,8 +8,8 @@
 DRIVER_LOG is haf_app_driver.py's output (with --server-messages=INFO) for a run with
 haf_stats.processor_timings = on (db/process_block_range.sql): one
 `haf_stats_processor_timing {...}` line per processor per batch (process_custom_json: one per
-shard of the custom_json group, whose seconds are summed; the shared staging's prepare_batch_ops:
-one per part of the ops stage, see below), one per rollup refresh a processor
+shard of the custom_json group; the shared staging's prepare_batch_ops: one per part of the ops
+stage; see below for how they add up), one per rollup refresh a processor
 ran, and one `haf_stats_operation_counts {...}` line per batch. Every other line is ignored. The
 batches must cover blocks N..M exactly, each with every processor timed once (or once per shard)
 and its operations counted once; anything else -- no timings at all, a line that is not JSON, a
@@ -38,11 +38,15 @@ connection. A batch takes the longer of its groups and the next batch's staging,
 "critical_path" totals each of them over the batches and counts the batches each was the longest
 in: the group, or the staging, that bounds the parallel sync.
 
-A batch whose phase line has more than one staging round trip ("stage_level_seconds") had its
-staging split: the parts of the ops stage ran at once, each on a connection of its own, so its
-prepare_batch_ops counts as its slowest part, the step's wall time, and "split_ops_parts" holds
-those batches' wall time beside the sum of their parts' seconds. Otherwise the parts ran one after
-another on one connection, and the step counts as their sum.
+A step timed in parts counts, in a batch whose parts ran at once, as its slowest part, the step's
+wall time, and "concurrent_parts" holds, per such step, those batches' wall time beside the sum
+of their parts' seconds; otherwise the parts ran one after another on one
+connection, and the step counts as their sum. The custom_json group's shards are processor groups
+of their own, so in a batch of the parallel path (one with a phase line) they ran on the worker
+connections at once -- with fewer connections than groups, a connection runs its shards one after
+another, and the slowest shard understates the step's wall time. A batch whose phase line has more
+than one staging round trip ("stage_level_seconds") had its staging split: the parts of the ops
+stage ran at once, each on a connection of its own.
 
 During massive sync the processors skip their refreshes and record them instead, and
 haf_stats_app.run_deferred_rollup_refreshes() runs each once afterwards
@@ -103,8 +107,9 @@ REFRESHES: dict[str, str] = {
 #: The phases scripts/haf_stats_parallel.py times in each batch of the parallel path, in order.
 PHASES: tuple[str, ...] = ("begin", "staging", "groups", "finish")
 
-#: The step the shared staging times once per part of the ops stage.
-_PARTED_STEP = "prepare_batch_ops"
+#: The steps timed once per part, and in which batches their parts ran at once: those of the
+#: parallel path ("parallel"), or those whose staging was split ("split").
+_CONCURRENT_PARTS: dict[str, str] = {"prepare_batch_ops": "split", "process_custom_json": "parallel"}
 
 #: The "reads" entry that stands for every non-virtual op type.
 NON_VIRTUAL = "non_virtual"
@@ -130,7 +135,7 @@ class _Timing:
     seconds: float
     reads: tuple[str, ...]
     shard: int | None = None
-    #: For a step whose parts ran at once: the sum of the parts' seconds, ``seconds`` their wall time.
+    #: For a step whose parts ran at once: the sum of the parts' seconds, ``seconds`` the slowest's.
     summed_seconds: float | None = None
 
 
@@ -337,7 +342,7 @@ _Batch = tuple[tuple[int, int], dict[str, _Timing], _Counts]
 
 
 def _batches(timings: list[_Timing], counts: list[_Counts], first_block: int, last_block: int,
-             split: frozenset[tuple[int, int]]) -> list[_Batch]:
+             concurrent: Mapping[str, frozenset[tuple[int, int]]]) -> list[_Batch]:
     by_batch: dict[tuple[int, int], dict[str, _Timing]] = defaultdict(dict)
     shards: dict[tuple[int, int, str], set[int | None]] = defaultdict(set)
     shard_seconds: dict[tuple[int, int, str], list[float]] = defaultdict(list)
@@ -351,9 +356,7 @@ def _batches(timings: list[_Timing], counts: list[_Counts], first_block: int, la
         shard_seconds[(t.first_block, t.last_block, t.step)].append(t.seconds)
         batch.setdefault(t.step, t)
     for (first, last, step), seconds in shard_seconds.items():
-        # A sharded step's seconds are the sum of its shards', but the ops stage's parts ran at
-        # once when the batch's staging was split.
-        if step == _PARTED_STEP and (first, last) in split:
+        if len(seconds) > 1 and (first, last) in concurrent.get(step, frozenset()):
             by_batch[(first, last)][step] = replace(by_batch[(first, last)][step], seconds=max(seconds),
                                                     summed_seconds=sum(seconds))
         else:
@@ -463,9 +466,9 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
                  bounds: list[_BatchBound] | None = None) -> dict[str, Any]:
     """The report for one run: totals, the per-million split and the rows read; given
     ``walls`` (parse_log), where the wall time went; given ``bounds`` (parse_log), which group or
-    the staging bounded the parallel batches, and which batches' staging was split, whose
-    prepare_batch_ops counts as its slowest part; and, given ``deferred`` (parse_deferred_log) and its
-    wall time, the deferred refreshes' seconds.
+    the staging bounded the parallel batches; given either, the batches in which a step's parts ran
+    at once, where the step counts as its slowest part; and, given ``deferred`` (parse_deferred_log)
+    and its wall time, the deferred refreshes' seconds.
 
     :raises TimingsError: the records do not tile ``first_block..last_block`` with every
         processor timed and the operations counted once per batch, a batch wall-time record
@@ -474,15 +477,20 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
     """
     if sync_seconds < 0 or (deferred_seconds is not None and deferred_seconds < 0):
         raise TimingsError("a wall time is negative")
-    split = frozenset((b.first_block, b.last_block) for b in bounds or [] if b.stage_round_trips > 1)
-    batches = _batches(timings, counts, first_block, last_block, split)
+    at_once = {
+        "split": frozenset((b.first_block, b.last_block) for b in bounds or [] if b.stage_round_trips > 1),
+        "parallel": frozenset((w.first_block, w.last_block) for w in walls or [] if w.phase is not None)
+        | frozenset((b.first_block, b.last_block) for b in bounds or []),
+    }
+    batches = _batches(timings, counts, first_block, last_block,
+                       {step: at_once[when] for step, when in _CONCURRENT_PARTS.items()})
     steps = PROCESSORS + tuple(REFRESHES)
     totals: dict[str, float] = dict.fromkeys(steps, 0.0)
     calls: dict[str, int] = dict.fromkeys(steps, 0)
     rows_read: dict[str, dict[str, int]] = {p: defaultdict(int) for p in PROCESSORS}
     operations: dict[str, int] = defaultdict(int)
     instrumentation = 0.0
-    split_parts = {"batches": 0, "wall_seconds": 0.0, "summed_seconds": 0.0}
+    concurrent = {step: {"batches": 0, "wall_seconds": 0.0, "summed_seconds": 0.0} for step in _CONCURRENT_PARTS}
     buckets: dict[int, dict[str, Any]] = {}
     for (first, _last), by_step, batch_counts in batches:
         per_type: dict[str, int] = defaultdict(int)
@@ -501,11 +509,12 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
             "seconds": dict.fromkeys(steps, 0.0),
         })
         bucket["batches"] += 1
-        parted = by_step[_PARTED_STEP]
-        if parted.summed_seconds is not None:
-            split_parts["batches"] += 1
-            split_parts["wall_seconds"] += parted.seconds
-            split_parts["summed_seconds"] += parted.summed_seconds
+        for step, parts in concurrent.items():
+            parted = by_step[step]
+            if parted.summed_seconds is not None:
+                parts["batches"] += 1
+                parts["wall_seconds"] += parted.seconds
+                parts["summed_seconds"] += parted.summed_seconds
         for step, t in by_step.items():
             totals[step] += t.seconds
             calls[step] += 1
@@ -537,12 +546,11 @@ def build_report(timings: list[_Timing], counts: list[_Counts], *, first_block: 
         "processing_seconds": _rounded(processing),
         "instrumentation_seconds": _rounded(instrumentation),
         "processors": {p: entry(p) for p in PROCESSORS},
-        "split_ops_parts": None if not split_parts["batches"] else {
-            "step": _PARTED_STEP,
-            "batches": split_parts["batches"],
-            "wall_seconds": _rounded(split_parts["wall_seconds"]),
-            "summed_seconds": _rounded(split_parts["summed_seconds"]),
-        },
+        "concurrent_parts": {
+            step: {"batches": parts["batches"], "wall_seconds": _rounded(parts["wall_seconds"]),
+                   "summed_seconds": _rounded(parts["summed_seconds"])}
+            for step, parts in concurrent.items() if parts["batches"]
+        } or None,
         "refreshes": {r: {**entry(r), "within": REFRESHES[r]} for r in REFRESHES},
         "per_million": per_million,
         "rows_read": {p: dict(sorted(r.items())) for p, r in rows_read.items()},
@@ -574,9 +582,10 @@ def summary_table(report: Mapping[str, Any]) -> str:
     lines.append(f"{'all processors':<{width}}  {report['processing_seconds']:>9.2f}  {'':>6}  {'':>6}  "
                  + "  ".join(f"{b['processing_seconds']:>9.2f}" for b in buckets))
     lines.append("(indented: refreshes, whose seconds are also in the processor above them)")
-    parts = report.get("split_ops_parts")
-    if parts is not None:
-        lines.append(f"({parts['step']}: in the {parts['batches']} batches whose staging was split, the slowest of"
+    for step, parts in (report.get("concurrent_parts") or {}).items():
+        batches = ("whose staging was split" if _CONCURRENT_PARTS[step] == "split"
+                   else "of the parallel path")
+        lines.append(f"({step}: in the {parts['batches']} batches {batches}, the slowest of"
                      f" its parts, which ran at once: {parts['wall_seconds']:.2f}s wall,"
                      f" {parts['summed_seconds']:.2f}s summed over the parts)")
     lines.append(f"sync wall {report['sync_wall_seconds']:.1f}s over {report['batches']} batches"
